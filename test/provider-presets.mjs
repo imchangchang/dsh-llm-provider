@@ -1,7 +1,7 @@
 // 供应商候选清单的顺序与标记。
 //
 // 清单从 pi-ai 目录动态生成，按名字排、Custom Gateway 固定最后，这个测试盯住它。
-import { presetsWithMeta } from '../lib/provider-presets.js'
+import { catalogBaseUrlOf, presetsWithMeta } from '../lib/provider-presets.js'
 
 let failures = 0
 function check(name, cond) {
@@ -12,8 +12,11 @@ function check(name, cond) {
 const presets = presetsWithMeta(new Set())
 
 // 清单主体来自 pi-ai 的目录数据，没装 pi-ai 的机器上会只剩自定义那一项——
-// 断言写成对长度不敏感，两种环境都跑得过。
+// 断言写成对长度不敏感，两种环境都跑得过；但**必须让人看得出跳过**，别安静地全绿。
 check('至少有自定义网关这一项', presets.length > 0)
+if (presets.length === 1) {
+  console.log('  .. 目录为空（这台机器解析不到 pi-ai 的 providers 数据），目录相关断言跳过')
+}
 
 const last = presets[presets.length - 1]
 check('自定义网关固定排最后', last !== undefined && last.id === 'custom-gateway')
@@ -46,7 +49,23 @@ if (presetOf('github-copilot') !== undefined) {
 }
 if (presetOf('openrouter') !== undefined) {
   check('openrouter 多协议', presetOf('openrouter').apis.length > 1)
+  check('openrouter 的端点集合含两个协议各自的地址（界面靠它认出旧版自动填的地址）',
+    presetOf('openrouter').baseUrls.indexOf('https://openrouter.ai/api') >= 0
+    && presetOf('openrouter').baseUrls.indexOf('https://openrouter.ai/api/v1') >= 0)
 }
+if (presetOf('github-copilot') !== undefined) {
+  check('copilot 的端点集合里只有目录那一个（企业版端点在集合外 → 修正时不会被动）',
+    presetOf('github-copilot').baseUrls.length === 1
+    && presetOf('github-copilot').baseUrls[0] === 'https://api.individual.githubcopilot.com')
+}
+// 卡片「API 地址」用目录默认端点：带 {} 的模板不能摆上去（那是个假的地址）
+const copilotUrl = catalogBaseUrlOf('github-copilot')
+if (copilotUrl !== undefined) {
+  check('目录默认端点读得到', copilotUrl === 'https://api.individual.githubcopilot.com')
+}
+const templateUrls = named.map((p) => catalogBaseUrlOf(p.id)).filter((u) => typeof u === 'string' && u.includes('{'))
+check('带占位符的模板不作为默认端点下发', templateUrls.length === 0)
+check('没这家就返回 undefined', catalogBaseUrlOf('definitely-not-a-provider') === undefined)
 
 // OAuth-only 判定来自 pi-ai 元数据（有 oauth、没有 apiKey），只留一条有理由的例外：
 // Copilot 的 apiKey 路径是个手填 token 的框，那种 token 用户拿不到，界面上当 OAuth-only。

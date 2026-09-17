@@ -38,13 +38,22 @@ export interface ProviderPreset {
    * 跟目录不一致才是真错（用户手填错了）。自建网关没有目录，是空数组。
    */
   apis: string[]
+  /**
+   * 目录里这家出现过的全部端点（去重、排序，含工厂默认值）。界面靠它区分「用户自己写的地址」
+   * 和「旧版本表单自动填进去的目录地址」——后者要跟着一键修正一起删，前者（企业版端点这类）
+   * 一个字都不能动。自建网关是空数组。
+   */
+  baseUrls: string[]
   apiKeyEnv: string
   websiteUrl: string | undefined
   models: number
   billing: boolean
   custom: boolean
   /**
-   * OAuth-only：这家在界面上只给 OAuth 引导，不给密钥输入框（要么登录成功，要么不可用）。
+   * OAuth-only：这家只留登录这条路。客户端拿它做四件事：藏「API 地址 / 协议 / 凭据名」三行、
+   * 藏「测试」按钮、不渲染「改用 API 密钥」的切换（那条路在这套界面里走不通：测试被藏了，
+   * 而「添加到列表」要求测试通过）、以及 OAuth 服务没挂上时给一条红字说明。
+   *
    * 判定来自 pi-ai 元数据（有 oauth、没有 apiKey），加一条例外见 `KEY_PATH_IS_DEAD_END`。
    */
   oauthOnly: boolean
@@ -67,7 +76,10 @@ export interface ProviderPresetWithMeta extends ProviderPreset {
     inFlight: boolean
   }
   /**
-   * OAuth-only：这家在界面上只给 OAuth 引导，不给密钥输入框（要么登录成功，要么不可用）。
+   * OAuth-only：这家只留登录这条路。客户端拿它做四件事：藏「API 地址 / 协议 / 凭据名」三行、
+   * 藏「测试」按钮、不渲染「改用 API 密钥」的切换（那条路在这套界面里走不通：测试被藏了，
+   * 而「添加到列表」要求测试通过）、以及 OAuth 服务没挂上时给一条红字说明。
+   *
    * 判定来自 pi-ai 元数据（有 oauth、没有 apiKey），加一条例外见 `KEY_PATH_IS_DEAD_END`。
    */
   oauthOnly: boolean
@@ -80,6 +92,8 @@ interface PresetSource {
   models?: number
   /** 目录里这家出现过的协议（去重）。一家多协议时「路由写死一个协议」才是问题。 */
   apis?: Set<string>
+  /** 目录里这家出现过的端点（去重，含工厂默认）。界面据此认出「旧版自动填进去的地址」。 */
+  baseUrls?: Set<string>
   label?: string
   custom?: boolean
 }
@@ -94,22 +108,27 @@ export function keyEnvOf(routeId: string): string {
   return String(routeId).toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_API_KEY'
 }
 
-/** provider → 目录默认端点（该家第一个模型的 baseUrl）。缓存键是 pi-ai 根目录，换版本自然失效。 */
+/** provider → 目录默认端点。缓存键是 pi-ai 根目录，换版本自然失效。 */
 let catalogBaseUrls: { root: string | undefined, map: Map<string, string> } | undefined
 
 /**
- * pi-ai 目录里这家 provider 的默认端点；目录没有就 undefined。
+ * pi-ai 目录里这家 provider 的默认端点；目录没有（或只有带占位符的模板）就 undefined。
  *
  * 路由不再写 baseURL（写了会盖掉每个模型自己的端点，见文件头），但余额查询和界面展示
  * 仍要知道「这家发到哪」——zai / minimax 这类适配器按 host 选站点（api.z.ai vs
  * open.bigmodel.cn），拿不到就掉到错误的站点去查。
+ *
+ * 取值顺序同 {@link makePreset}：provider 工厂自己的 baseUrl 优先（就是官方适配器里最后一档
+ * 回落的 `providerBaseUrl`），没有才用该家第一个模型的。带 `{` 的模板跳过（cloudflare 的
+ * 账号/网关占位、vertex 的 location）——摆到卡片的「API 地址」行上是个假的，宁可不显示。
  */
 export function catalogBaseUrlOf(providerId: string): string | undefined {
   const root = activePiAiRoot()
   if (catalogBaseUrls === undefined || catalogBaseUrls.root !== root) {
     const map = new Map<string, string>()
     for (const preset of buildPresets()) {
-      if (preset.baseURL !== '') map.set(preset.id, preset.baseURL)
+      if (preset.baseURL === '' || preset.baseURL.includes('{')) continue
+      map.set(preset.id, preset.baseURL)
     }
     catalogBaseUrls = { root, map }
   }
@@ -129,15 +148,29 @@ const KEY_PATH_IS_DEAD_END: ReadonlySet<string> = new Set(['github-copilot'])
 /** 客户端据此把密码输入框换成 OAuth 引导：pi-ai 里这家只能靠 OAuth（或密钥路径形同虚设）。 */
 function oauthOnlyOf(id: string): boolean {
   const meta = piAiProviderMeta(id)
-  // 读不到元数据（没装 pi-ai / 版本太老）时只认例外表，至少别把已知的两家判反
-  if (meta === undefined) return KEY_PATH_IS_DEAD_END.has(id) || id === 'openai-codex'
+  // 读不到元数据（没装 pi-ai、目录读不出来）时认不出「有 oauth 没 apiKey」的那种，只能先认
+  // 已知的两家——openai-codex 是元数据判定的结果，Copilot 是下面的例外，判反了用户会看到
+  // 一个点了走不通的密钥入口。
+  if (meta === undefined) return id === 'openai-codex' || KEY_PATH_IS_DEAD_END.has(id)
   if (meta.oauth !== true) return false
   if (meta.apiKey !== true) return true
   return KEY_PATH_IS_DEAD_END.has(id)
 }
 
+/** 这家的端点集合：工厂自己的 + 目录里每个模型出现的（排序交给调用方）。 */
+function baseUrlSet(id: string, info: PresetSource): Set<string> {
+  const set = new Set<string>(info.baseUrls ?? [])
+  const factory = piAiProviderMeta(id)?.baseUrl
+  if (typeof factory === 'string' && factory !== '') set.add(factory)
+  return set
+}
+
 function makePreset(id: string, info: PresetSource): ProviderPreset {
-  const baseURL = typeof info.baseURL === 'string' ? info.baseURL : ''
+  const modelBaseURL = typeof info.baseURL === 'string' ? info.baseURL : ''
+  // 端点优先级：provider 工厂自己的 baseUrl（官方适配器最后一档回落就是它）> 该家第一个模型的
+  // baseUrl > 空。表单里只当占位提示（路由不再写 baseURL），带 `{}` 的模板在这里可以照实显示
+  // ——cloudflare 那种就是要用户自己把账号填进去。
+  const baseURL = piAiProviderMeta(id)?.baseUrl ?? modelBaseURL
   return {
     id,
     // 名字优先级：pi-ai 注册表原名 > 预设自带（EXTRA_PRESETS）> labelOf 按 id 拼
@@ -148,6 +181,7 @@ function makePreset(id: string, info: PresetSource): ProviderPreset {
     websiteUrl: websiteOf(id),
     models: typeof info.models === 'number' ? info.models : 0,
     apis: [...(info.apis ?? [])].sort(),
+    baseUrls: [...baseUrlSet(id, info)].sort(),
     billing: findAdapter(id, baseURL) !== undefined,
     custom: info.custom === true,
     oauthOnly: oauthOnlyOf(id),
@@ -166,6 +200,10 @@ export function buildPresets(): ProviderPreset[] {
     current.models = (current.models ?? 0) + 1
     current.apis ??= new Set<string>()
     current.apis.add(detail.api)
+    if (typeof detail.baseUrl === 'string' && detail.baseUrl !== '') {
+      current.baseUrls ??= new Set<string>()
+      current.baseUrls.add(detail.baseUrl)
+    }
     if (current.baseURL === '' && typeof detail.baseUrl === 'string') current.baseURL = detail.baseUrl
   }
   const presets: ProviderPreset[] = []

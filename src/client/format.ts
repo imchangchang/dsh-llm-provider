@@ -181,7 +181,10 @@ export function shortWindowLabel(name: unknown): string {
  *
  * pi-ai 的静态目录与账号实际权益是两回事：Copilot 目录 28 个模型、登录时拿到的清单只有 6 个，
  * 选到清单外的会拿 400 `model_not_supported`（实测）。清单缺失时一律允许（api-key 类路由
- * 本来就没有这份清单）；当前选中的那个也允许，否则用户会以为当前模型凭空消失了。
+ * 本来就没有这份清单）。
+ *
+ * `isCurrent` 只有选择器传 true（当前那个无论如何都要列出来，否则用户会以为当前模型凭空消失
+ * 了）；卡片列的是「这个账号能用哪些」，不给特例，所以卡片与选择器的条数可能差一个。
  *
  * @param available - 账号可用模型 id（`PlanAccount.availableModels`），可能没有。
  * @param modelId - 待判断的模型 id。

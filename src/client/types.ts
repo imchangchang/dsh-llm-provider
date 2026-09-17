@@ -60,6 +60,8 @@ export interface PlanAccount {
   apiKeyEnv?: string
   /** 已经通过 OAuth 登录过：卡片显示登录状态，不再摆密钥输入框。 */
   oauthAuthorized?: boolean
+  /** 这个地址是配置里钉着的（baseUrl 字段），不是目录默认值——「一键修正」据此决定要不要连地址一起删。 */
+  baseUrlPinned?: boolean
   /** 账号实际可用的模型 id（OAuth 登录时 pi-ai 记下的）。列表按它过滤，选不到用不了的模型。 */
   availableModels?: string[]
   error?: unknown
@@ -95,9 +97,9 @@ export interface ProviderPreset {
   api?: string
   /** 目录里这家出现过的协议（去重）：多协议时路由写死一个必然发错一批。 */
   apis?: string[]
+  /** 目录里这家出现过的全部端点（含工厂默认）：用来认出「旧版自动填进配置的目录地址」。 */
+  baseUrls?: string[]
   apiKeyEnv?: string
-  /** 已经通过 OAuth 登录过：卡片显示登录状态，不再摆密钥输入框。 */
-  oauthAuthorized?: boolean
   websiteUrl?: string
   configured?: boolean
   /** 路由在、凭据没值：仍算已配置，但下拉里不该禁选（选中就是去补密钥）。 */
@@ -213,6 +215,13 @@ export interface EffortChoice {
 export interface AddProviderPanelProps {
   presets?: unknown
   onAdded?: () => void
+  /**
+   * 这条路由在配置里钉着的地址（用户自己写的企业版端点之类），没钉返回 undefined。
+   *
+   * 二次添加（给已有路由补密钥）走的是整对象 `settings/mutate` set，表单里地址栏是空的，
+   * 不管一下就会把用户写的地址静默抹掉。
+   */
+  addressOf?: (routeId: string) => string | undefined
 }
 
 /** 座位注册表：inject(name, factory) + register(描述符, 组件)。 */

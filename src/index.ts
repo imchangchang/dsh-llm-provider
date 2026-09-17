@@ -213,10 +213,14 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const oauthCredential = oauthAuthorized ? await oauthCredentialFor(providerId) : {}
     const queryKey = credential.configured ? credential.key : oauthCredential.token
     const routeMeta = {
-      // 卡片展示的端点：只认用户写的那个。OAuth 路由的端点由凭据决定——pi-ai 的 toAuth 带
-      // baseUrl，models.js 里 `auth.baseUrl` 覆盖模型自己的（企业版 Copilot 的
-      // api.enterprise.* 就这么来的），摆目录里那个 individual 地址反而是错的。
+      // 卡片「API 地址」行：路由自己写了就用它，没写就摆目录默认（那是实际会发到的地址）；
+      // 只有 OAuth 路由例外——端点由凭据决定（pi-ai 的 toAuth 带 baseUrl，models.js 里
+      // `auth.baseUrl` 覆盖模型自己的，企业版 Copilot 的 api.enterprise.* 就这么来的），
+      // 摆目录里那个 individual 地址反而是错的。
       baseUrl: configuredBaseUrl ?? (oauthAuthorized ? undefined : catalogBaseUrl),
+      // 地址是不是用户/旧版本写到配置里的。界面靠它决定「一键修正」要不要连地址一起删
+      // （旧版表单会把目录地址写进路由，那同样会盖掉每个模型自己的端点）。
+      baseUrlPinned: configuredBaseUrl !== undefined,
       api: route.api,
       apiKeyEnv: route.apiKeyEnv,
       oauthAuthorized,

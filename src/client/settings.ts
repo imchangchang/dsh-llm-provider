@@ -51,6 +51,41 @@ export function authEntryOf(preset: ProviderPreset | undefined): {
 }
 
 /**
+ * 卡片上「这条路由写死了协议 / 地址」的判定，以及一键修正该删哪些字段。
+ *
+ * 官方适配器是 `request.api ?? base?.api ?? routeApi`、`request.baseURL ?? base?.baseUrl
+ * ?? providerBaseUrl`：路由写了就盖掉每个模型自己的那份。要报的只有两种：
+ *   - 目录多协议（Copilot：claude 走 anthropic-messages、gpt-5.x 走 openai-responses）：
+ *     写死必然让另一批发错端点、报 400；
+ *   - 目录单协议但写死的跟它不一致：那是真配错了。
+ * 单协议 + 写对了不报（那种白报只会让用户去点一个没必要的按钮）。
+ *
+ * 删的字段里要不要带 `baseURL`：只有「配置里钉着、且这个地址就在目录的端点集合里」才带——
+ * 那是旧版表单自动写进去的目录地址，同样会盖掉模型自己的端点；用户自己写的地址（企业版
+ * 端点、自建网关）不在集合里，一个字都不能动。
+ *
+ * @param account - 卡片对应的额度账户（读 `api` / `baseUrl` / `baseUrlPinned`）。
+ * @param catalogApis - 目录里这家出现过的协议（`preset.apis`）。
+ * @param catalogBaseUrls - 目录里这家出现过的端点（`preset.baseUrls`）。
+ * @returns `fields` 为空表示不用报；否则是点修正时要 unset 的字段；`multiProtocol` 决定文案。
+ */
+export function routeRepairOf(
+  account: { api?: string, baseUrl?: string, baseUrlPinned?: boolean },
+  catalogApis: string[],
+  catalogBaseUrls: string[],
+): { fields: string[], multiProtocol: boolean } {
+  var pinnedApi = typeof account.api === 'string' && account.api !== '' ? account.api : undefined
+  if (pinnedApi === undefined) return { fields: [], multiProtocol: false }
+  var multiProtocol = catalogApis.length > 1
+  var mismatch = catalogApis.length === 1 && catalogApis[0] !== pinnedApi
+  if (multiProtocol !== true && mismatch !== true) return { fields: [], multiProtocol: false }
+  var fields = ['api']
+  var address = account.baseUrlPinned === true ? account.baseUrl : undefined
+  if (typeof address === 'string' && address !== '' && catalogBaseUrls.indexOf(address) >= 0) fields.push('baseURL')
+  return { fields: fields, multiProtocol: multiProtocol }
+}
+
+/**
  * 「添加到列表」写进 settings 的路由配置。
  *
  * **OAuth 授权过的 provider 绝不写 apiKeyEnv**：官方适配器的 resolveApiKey 只要看到
@@ -392,8 +427,10 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   function pickPreset(id: string) {
     var preset = findById(presets, id)
     if (preset === undefined) return
-    // 换了供应商就回到该方法下的默认入口（密钥型默认密钥，有 OAuth 的默认 OAuth）。
+    // 换了供应商就回到该方法下的默认入口（密钥型默认密钥，有 OAuth 的默认 OAuth）；
+    // 上一个 provider 的登录流要撤掉——它的 attempt 是那个 provider 的凭据键。
     setUseKeyInsteadChoice(null)
+    abandonOauth()
     patchForm({
       routeId: preset.id,
       // 地址不预填：目录 provider 的端点由 pi-ai 按模型决定（一家可能多端点，比如
@@ -414,9 +451,17 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       setTest({ phase: 'fail', message: customPicked ? '路由 ID / API 地址 / API 密钥都要填' : '路由 ID 和 API 密钥都要填' })
       return
     }
-    setTest({ phase: 'run', message: '正在用这把密钥实连供应商探测模型…' })
-    // 目录 provider 不带 api/baseURL（都是 undefined/空）：官方的 discoverModels 对有目录的
-    // provider 直接返回目录，没有目录的（自建网关）才用 api/baseURL 决定往哪发请求。
+    // 目录 provider 带不带密钥、地址填得对不对，这一步都验不出来：官方的 discoverModels 对有
+    // 目录的 provider 直接返回目录，不发请求也不看密钥。所以文案要照实说，别让用户以为
+    // 「✓ 连通」等于密钥可用（错密钥会在发第一条消息时才报 401）。
+    var catalogLookup = findById(presets, form.routeId.trim())
+    var catalogProvider = catalogLookup !== undefined && catalogLookup.custom !== true
+    setTest({
+      phase: 'run',
+      message: catalogProvider ? '正在读 pi-ai 目录里这家的模型…' : '正在用这把密钥实连供应商探测模型…',
+    })
+    // api/baseURL 只有自建网关才带（目录 provider 的是 undefined/空）：没有目录的才靠它们
+    // 决定往哪发请求。
     apiCall('llm/discoverModels', {
       settingsNs: 'llm-pi-ai',
       request: {
@@ -433,10 +478,12 @@ function AddProviderPanel(props: AddProviderPanelProps) {
           var m = models[i]
           names.push(typeof m === 'string' ? m : String((m && (m.name || m.id)) || '?'))
         }
+        var list = names.length > 0 ? '：' + names.join('、') + (models.length > 3 ? ' …' : '') : ''
         setTest({
           phase: 'ok',
-          message: '✓ 连通，发现 ' + String(models.length) + ' 个模型'
-            + (names.length > 0 ? '：' + names.join('、') + (models.length > 3 ? ' …' : '') : ''),
+          message: catalogProvider
+            ? '✓ 目录里有 ' + String(models.length) + ' 个模型' + list + '（密钥要到发第一条消息时才校验）'
+            : '✓ 连通，发现 ' + String(models.length) + ' 个模型' + list,
         })
       })
       .catch(function (cause) {
@@ -448,6 +495,12 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     setNote(null)
     // 只有「这次确实走完 OAuth 登录」才不写 apiKeyEnv；选了密钥路径就照旧写。
     var profile = routeProfileOf(form, oauthAuthorized && useKeyInstead !== true, customPicked)
+    // set 是整个对象覆盖：这条路由原来钉了地址（企业版端点这类，用户自己写的）而这次表单里
+    // 没填（字段是空的、只显示占位符），别把它静默抹掉。
+    var existingAddress = props.addressOf === undefined ? undefined : props.addressOf(form.routeId.trim())
+    if (profile.baseURL === undefined && typeof existingAddress === 'string' && existingAddress !== '') {
+      profile.baseURL = existingAddress
+    }
     var typedKey = form.key.trim()
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
@@ -601,6 +654,24 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       return null
     })
   }
+  /**
+   * 放弃这次登录：撤掉宿主上在跑的 attempt、关掉 SSE、清空弹窗状态。
+   *
+   * 「改用 API 密钥」和「换一个供应商」都走这里。**不能只 `setOauth(null)`**：SSE 不关会漏
+   * 连接，宿主的 attempt 还在跑，等它 settle 成 authorized 时回调里 `prev === null` 会把真
+   * 结果丢掉——界面既不提示成功、`oauthAuthorized` 也永远是 false，用户卡在「添加」灰着的
+   * 状态里（授权其实已经写进凭据记录了）。
+   */
+  function abandonOauth() {
+    setOauth(function (prev) {
+      if (prev === null) return null
+      if (prev.attempt !== undefined) {
+        prev.attempt.cancel()
+        prev.attempt.close()
+      }
+      return null
+    })
+  }
   function submitOAuth() {
     setOauth(function (prev) {
       if (prev === null || prev.attempt === undefined || prev.prompt === undefined) return prev
@@ -651,7 +722,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     : useKeyInsteadChoice === true
   function setUseKeyInstead(next: boolean) {
     setUseKeyInsteadChoice(next)
-    if (next === true) setOauth(null)
+    if (next === true) abandonOauth()
   }
   var pickItems = []
   for (var pk = 0; pk < presets.length; pk += 1) {
@@ -811,8 +882,11 @@ function AddProviderPanel(props: AddProviderPanelProps) {
                     ? '✓ ' + authEntry.oauth.label + ' · 重新登录'
                     : t('oauthSignInMethod').replace('{label}', authEntry.oauth.label)),
               ),
-              // 两者都支持的 provider：给一条换回密钥的路（否则用户一旦登录就再也回不去）。
-              authEntry.onlyApiKey === true
+              // 两者都支持的 provider 才给换回密钥的路（否则用户一旦登录就再也回不去）。
+              // OAuth-only 的不给：那种 provider 的密钥路径在这套界面里走不通——地址/协议行和
+              // 「测试」按钮都被 oauthOnlyPicked 藏着，而「添加到列表」要求测试通过，用户输完
+              // key 会卡在一个没有任何解释的死路上（Copilot 更甚：那种 token 本来就拿不到）。
+              authEntry.onlyApiKey === true || oauthOnlyPicked === true
                 ? null
                 : react.createElement(
                     'button',
@@ -1249,17 +1323,17 @@ export function ProviderSettingsSection() {
     return ''
   }
   /**
-   * 把某条路由的某个字段从配置里删掉（卡片上的修正动作）。
+   * 把某条路由的几个字段从配置里删掉（卡片上的修正动作）。
    * 只删配置里的字段，不动凭据：万一用户之前真存过同名 ref，那也不该由我们顺手清掉。
    * @param account - 卡片对应的额度账户。
-   * @param field - 要删的字段名（`apiKeyEnv` / `api`）。
+   * @param fields - 要删的字段名（`apiKeyEnv` / `api` / `baseURL`）。
    * @param done - 成功提示文案。
    */
-  function dropRouteField(account: PlanAccount, field: string, done: string) {
+  function dropRouteFields(account: PlanAccount, fields: string[], done: string) {
     setSavingKey(function (prev: AnyRecord) { return withKey(prev, account.id, true) })
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
-      ops: [{ op: 'unset', path: ['providers', account.id, field] }],
+      ops: fields.map(function (field) { return { op: 'unset', path: ['providers', account.id, field] } }),
     })
       .then(function () {
         showToast(done, true)
@@ -1434,17 +1508,6 @@ export function ProviderSettingsSection() {
   )
   var accounts = plan !== null && Array.isArray(plan.accounts) ? plan.accounts : []
   /**
-   * 这条路由是不是 pi-ai 目录里的 provider（预设清单里非 custom 的那些）。
-   * 只有它们才有「每个模型自带协议」可回落；Custom Gateway 必须自己写 api。
-   * @param routeId - 路由 id。
-   */
-  function knownCatalogRoute(routeId: string): boolean {
-    for (var pi = 0; pi < presets.length; pi += 1) {
-      if (presets[pi].id === routeId) return presets[pi].custom !== true
-    }
-    return false
-  }
-  /**
    * 目录里这家出现过哪些协议（预设响应里的 `apis`）。空数组 = 目录里没这家或没有协议信息。
    * @param routeId - 路由 id。
    */
@@ -1456,6 +1519,25 @@ export function ProviderSettingsSection() {
       }
     }
     return []
+  }
+  /**
+   * 目录里这家出现过哪些端点。配置里钉着的地址若在这个集合里，说明它是目录带来的（旧版表单会
+   * 自动填），跟着「一键修正」一起删是安全的；不在集合里的才是用户自己写的（企业版端点这类），
+   * 一个字都不能动。
+   * @param routeId - 路由 id。
+   */
+  function baseUrlsOfRoute(routeId: string): string[] {
+    for (var pi = 0; pi < presets.length; pi += 1) {
+      if (presets[pi].id === routeId) {
+        var list = presets[pi].baseUrls
+        return Array.isArray(list) ? list : []
+      }
+    }
+    return []
+  }
+  /** 路由配置里钉着的地址是不是目录带来的（不是用户自己写的）。 */
+  function addressFromCatalog(routeId: string, address: string): boolean {
+    return baseUrlsOfRoute(routeId).indexOf(address) >= 0
   }
   var modelsByProvider: Record<string, CatalogModel[]> = {}
   for (var gi = 0; gi < catalogGroups.length; gi += 1) {
@@ -1469,7 +1551,10 @@ export function ProviderSettingsSection() {
       // 藏在折叠区里用户根本发现不了（他就是这么卡住的：发送时才发现 MISSING_CREDENTIAL）。
       var apiKeyEnvConflict = account.oauthAuthorized === true
         && typeof account.apiKeyEnv === 'string' && account.apiKeyEnv !== ''
-      var dflt = account.error !== undefined || typeof account.credentialWarning === 'string' || apiKeyEnvConflict
+      // 协议写死的告警同理：修正按钮就在展开体里，折叠着等于没有。
+      var apiConflict = routeRepairOf(account, apisOfRoute(account.id), baseUrlsOfRoute(account.id)).fields.length > 0
+      var dflt = account.error !== undefined || typeof account.credentialWarning === 'string'
+        || apiKeyEnvConflict || apiConflict
       var expanded = isOpen(account.id, dflt)
 
       var chipEls = []
@@ -1519,7 +1604,7 @@ export function ProviderSettingsSection() {
                     className: 'pv_action',
                     style: { marginLeft: '8px' },
                     disabled: savingKey[account.id] === true,
-                    onClick: function () { dropRouteField(account, 'apiKeyEnv', '已把 ' + shortName(account) + ' 改成走 OAuth 认证') },
+                    onClick: function () { dropRouteFields(account, ['apiKeyEnv'], '已把 ' + shortName(account) + ' 改成走 OAuth 认证') },
                   },
                   '改用 OAuth 认证',
                 ),
@@ -1608,16 +1693,17 @@ export function ProviderSettingsSection() {
         //   - 目录单协议但写死的跟它不一致：那是真配错了，照样发错。
         var pinnedApi = typeof account.api === 'string' && account.api !== '' ? account.api : undefined
         var catalogApis = apisOfRoute(account.id)
-        var apiPinnedWrong = pinnedApi !== undefined && knownCatalogRoute(account.id)
-          && (catalogApis.length > 1 || (catalogApis.length === 1 && catalogApis[0] !== pinnedApi))
-        if (apiPinnedWrong) {
+        var repair = routeRepairOf(account, catalogApis, baseUrlsOfRoute(account.id))
+        var dropAddressToo = repair.fields.indexOf('baseURL') >= 0
+        if (repair.fields.length > 0) {
           bodyRows.push(
             react.createElement(
               'div',
               { className: 'plan_note plan_warnText', key: 'api-pinned' },
-              catalogApis.length > 1
+              repair.multiProtocol
                 ? '这条路由写死了协议（' + String(pinnedApi) + '），会覆盖每个模型自己的协议；'
                   + '这家目录是多协议的（' + catalogApis.join(' / ') + '），写死会让一部分模型发出 400。'
+                  + (dropAddressToo ? '地址也是旧版写进配置的目录端点，会一起删掉。' : '')
                 : '这条路由写死的协议（' + String(pinnedApi) + '）跟目录里的（' + catalogApis[0] + '）不一致，'
                   + '发送会走错协议。',
               react.createElement(
@@ -1627,7 +1713,10 @@ export function ProviderSettingsSection() {
                   className: 'pv_action',
                   style: { marginLeft: '8px' },
                   disabled: savingKey[account.id] === true,
-                  onClick: function () { dropRouteField(account, 'api', '已让 ' + shortName(account) + ' 按模型各自的协议发送') },
+                  onClick: function () {
+                    dropRouteFields(account, repair.fields, '已让 ' + shortName(account) + ' 按模型各自的协议发送'
+                      + (dropAddressToo ? '，并删掉旧版写进去的地址' : ''))
+                  },
                 },
                 '改成按模型协议',
               ),
@@ -1915,7 +2004,22 @@ export function ProviderSettingsSection() {
       : react.createElement(
           'div',
           { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
-          react.createElement(AddProviderPanel, { presets: presets, onAdded: onProviderAdded }),
+          react.createElement(AddProviderPanel, {
+            presets: presets,
+            onAdded: onProviderAdded,
+            // 只在「配置里真的钉了地址」时回填（baseUrlPinned 由宿主给）：卡片上的地址可能只是
+            // 目录默认值，那种不该被当成用户的选择存进配置。
+            addressOf: function (routeId: string) {
+              for (var ai = 0; ai < accounts.length; ai += 1) {
+                if (accounts[ai].id !== routeId) continue
+                var address = accounts[ai].baseUrl
+                if (accounts[ai].baseUrlPinned !== true || typeof address !== 'string' || address === '') return undefined
+                // 目录带来的地址不算用户的选择（旧版表单自动填的），那种删掉才对
+                return addressFromCatalog(routeId, address) ? undefined : address
+              }
+              return undefined
+            },
+          }),
           cards,
         ),
     toast === null

@@ -41,12 +41,14 @@
       # 写——插件不写宿主配置。用户想改就在 settings.yaml 里写同名的
       # llm-pi-ai.providers.deepseek，会覆盖这里的值。
       #
-      # 不写 api：协议由 pi-ai 目录决定（deepseek 的模型都在 openai-completions 下，
-      # 每个模型自带 api）。路由上写 api 会盖掉模型自己的协议——官方适配器里是
-      # `request.api ?? base?.api ?? routeApi`，多协议的 provider 写死一个就发错端点。
+      # 不写 api、也不写 baseURL：协议和端点都由 pi-ai 目录决定（deepseek 的模型都在
+      # openai-completions 下，每个模型自带 api 和 baseUrl，工厂也有默认 baseUrl）。
+      # 路由上写了会盖掉模型自己的那份——官方适配器里是
+      # `request.api ?? base?.api ?? routeApi`、`request.baseURL ?? base?.baseUrl ?? providerBaseUrl`，
+      # 多协议多端点的 provider 写死一个就会让另一批发错地方。用户要覆盖（企业版端点这类）
+      # 就在 settings.yaml 里写同名条目。
       config:
         providers:
           deepseek:
             displayName: DeepSeek
             apiKeyEnv: DEEPSEEK_API_KEY
-            baseURL: https://api.deepseek.com

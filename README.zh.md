@@ -51,7 +51,7 @@ dsh web                   # 插件树变了，必须重启
 插件在自己 config 里声明了一条 DeepSeek 路由（`llm-pi-ai.providers.deepseek`，凭据名 `DEEPSEEK_API_KEY`），因为内置的 `llm-deepseek` 条目被禁用了。所以刚装完就有一张没配密钥的 DeepSeek 卡片：
 
 - 在 设置 →「模型服务」→「服务商」里展开这张卡片。没存过凭据时「API 密钥」那行就是输入框，保存后立刻实查一次额度。
-- 加别的供应商：「＋ 添加供应商」→ 选预设 → 填密钥与端点（带 OAuth 的供应商会多一个「使用 OAuth 登录」按钮，走 device-code / 订阅流程登录后写入同一套凭据存储）→ 测试通过后保存。
+- 加别的供应商：「＋ 添加供应商」→ 选预设 → 填密钥与端点（带 OAuth 的供应商会多一个「使用 OAuth 登录」按钮，走 device-code / 订阅流程登录后写入同一套凭据存储）→ 测试通过后保存（目录里有的 provider，这一步只是读目录、不校验密钥，文案会照实说）。
 - 之后卡片上就有余额，模型选择器的触发器上是同一个快照。
 
 密钥存在 dsh 自己的凭据服务里，键名是路由的 `apiKeyEnv`，与官方那套读的是同一份，插件不需要自己的配置文件。
@@ -139,8 +139,8 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 
 设置页新增「模型服务」标签（官方 `ui-settings-models` 条目已禁用），两个二级标签：「服务商」、「pi-ai 桥接」。
 
-- 卡片照官方 PluginCard：状态点 + 名称 + 官网链接，一行余量摘要（`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`），右侧是刷新时间、单卡刷新、删除。展开体展示路由配置（路由 ID、掩码密钥、凭据名，以及只有路由上真写了才出现的 API 地址 / 协议）和该供应商的模型列表（带过滤与详情卡）。
-- 添加供应商：选预设 → 填密钥与端点（带 OAuth 的预设可直接走 OAuth 登录，自动写入同一套凭据存储）→ 实连测试通过才能写入。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。
+- 卡片照官方 PluginCard：状态点 + 名称 + 官网链接，一行余量摘要（`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`），右侧是刷新时间、单卡刷新、删除。展开体展示路由配置（路由 ID、掩码密钥、凭据名，以及 API 地址 / 协议——协议只在路由真写了时才有，地址没写时摆的是目录默认端点）和该供应商的模型列表（带过滤与详情卡）。
+- 添加供应商：选预设 → 填密钥与端点（带 OAuth 的预设可直接走 OAuth 登录，自动写入同一套凭据存储）→ 通过测试才能写入（目录里有的 provider，这一步读的是 pi-ai 目录、不发请求也不校验密钥，密钥要到发第一条消息时才验；只有自建网关那一步是真·实连探测）。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。
 - 补密钥：路由在、凭据没值时，卡片展开体里那一行就是输入框（官方 Models 页已禁用，这是唯一入口）。存完立刻实查一次额度。这种供应商在添加列表里标「缺密钥」而不是「已配置」，不会被禁选堵住。
 - 删除：清路由 + 清凭据。内置原生路由不允许在这里删。
 - 「pi-ai 桥接」标签：当前版本与来源、被跳过的候选及原因、上游版本与检查更新按钮。
@@ -153,11 +153,11 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 |---|---|
 | deepseek | `api.deepseek.com/user/balance` |
 | kimi-coding | `api.kimi.com/coding/v1/usages` |
-| moonshot | `api.moonshot.cn/v1/users/me/balance`（按配置的 baseURL 走 `.cn` 或 `.ai`） |
+| moonshot | `api.moonshot.cn/v1/users/me/balance`（按 baseURL 走 `.cn` 或 `.ai`；路由没写就用目录默认） |
 | glm | `open.bigmodel.cn/api/monitor/usage/quota/limit` |
 | minimax | `api.minimaxi.com/v1/api/openplatform/coding_plan/remains`（国际站是 `.io`） |
 | opencode-go | `opencode.ai/zen/go/v1/usage` |
-| zenmux | 配置的 `baseURL` 本身（响应里是 `quota_5_hour` / `quota_7_day`） |
+| zenmux | `baseURL` 本身（响应里是 `quota_5_hour` / `quota_7_day`；这家不在目录里，地址只能用户自己填） |
 | openrouter | `openrouter.ai/api/v1/credits` |
 | github-copilot | `api.github.com/copilot_internal/user`（付费档 `quota_snapshots`、免费档 `monthly_quotas`；要 GitHub token，不是 api.githubcopilot.com 那个） |
 | qwen | 无公开接口：不发请求，卡片给「看控制台」跳转链接 |
@@ -264,9 +264,9 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 - 同一个 credential key 同时只允许一个 attempt：seam 自己也会拒（`ALREADY_IN_FLIGHT`），我们这里先发制人给 409。
 - 5 分钟未活动的 attempt 被 sweeper 清掉（断网 / 关页后内存不漏）；attempt settled 后保留到 TTL 上限，浏览器重连 SSE 还能拿到结果。
 - 客户端在「添加供应商」表单里识别 `preset.oauth`：按钮替代密码输入框，弹窗实时显示 notice 与 prompt（按 kind 渲染 input / select），settled 后通过 `onAdded` 触发卡片刷新。
-- **协议和端点都归 pi-ai 目录，路由不写 `api` / `baseURL`**。官方适配器是 `const api = request.api ?? base?.api ?? routeApi`、`const baseUrl = request.baseURL ?? base?.baseUrl ?? providerBaseUrl`——路由上写了就盖掉**每个模型自己的那份**：40 家里 6 家是多协议（Copilot：claude 系走 `anthropic-messages`、gpt-5.x 走 `openai-responses`、gemini 走 `openai-completions`），其中 5 家的端点还按协议分（Fireworks / opencode / opencode-go / OpenRouter / Cloudflare 的 anthropic 与 openai 端点差一个 `/v1` 之类的后缀——SDK 自己会再拼 `/v1/messages`，写错就是 `.../v1/v1/messages`），Bedrock 更是 us-east-1 与 eu-central-1 两套。实测写死 `anthropic-messages` 让 `gpt-5.4` 报 400 `no model endpoints available given user constraints`。表单里地址栏留空即用目录默认（占位符里显示），用户想覆盖企业版端点、带占位符的网关再自己填——**不能写空串**，`'' ?? x` 不会回落。余额查询和卡片展示要用的端点从目录取（`catalogBaseUrlOf`）；OAuth 路由的端点由凭据决定（`auth.baseUrl` 覆盖模型自己的），卡片不显示目录里那个地址。卡片上的告警按目录里真实的协议集判（预设响应里的 `apis`）：**多协议**的 provider 写死了才报（写死必然发错一批），单协议的写对了不报——那种白报只会让用户去点一个没必要的修正按钮；单协议但写死的跟目录不一致（手填错了）照样报，文案会点名两边各是什么。两种都配「改成按模型协议」的一键修正（`unset api`）。
-- **「只有 OAuth」由 pi-ai 元数据判定**：读 provider 工厂的 `auth`，有 `oauth` 且没有 `apiKey` 就是（当前只有 `openai-codex`），新加的自带跟上。例外只有一个 `github-copilot`：元数据里它确实有 `apiKey` 路径，但那只是个手填 token 的框（`Enter GitHub Copilot token`），这种 token 得先登录 GitHub 换、用户手里不会有，所以界面按 OAuth-only 处理（`KEY_PATH_IS_DEAD_END`）。判到 OAuth-only 就只给登录按钮，不给密钥框。
-- **一个 provider 的认证方式二选一，按 flow 的方法分**。挂上 authorization 服务后每个 provider 都有 flow，但方法含义不同：`oauth` 是真·订阅登录，`api-key` 只是 dsh 把「让你输密钥」也包装成了一次登录。所以判据是方法 id 而不是「有没有 flow」——DeepSeek / OpenAI / Moonshot 只有 `api-key` 方法，表单照旧给密钥输入框（给它们显示「使用 OAuth 登录（DeepSeek）」既误导又顶掉密钥框）；两者都有的（Anthropic / Kimi Coding / Copilot）默认走 OAuth，旁边一条「改用 API 密钥」可切回密钥输入。
+- **协议和端点都归 pi-ai 目录，路由不写 `api` / `baseURL`**。官方适配器是 `const api = request.api ?? base?.api ?? routeApi`、`const baseUrl = request.baseURL ?? base?.baseUrl ?? providerBaseUrl`——路由上写了就盖掉**每个模型自己的那份**：40 家里 6 家是多协议（Copilot：claude 系走 `anthropic-messages`、gpt-5.x 走 `openai-responses`、gemini 走 `openai-completions`），其中 5 家的端点还按协议分（Fireworks / opencode / opencode-go / OpenRouter / Cloudflare 的 anthropic 与 openai 端点差一个 `/v1` 之类的后缀——SDK 自己会再拼 `/v1/messages`，写错就是 `.../v1/v1/messages`），Bedrock 更是 us-east-1 与 eu-central-1 两套。实测写死 `anthropic-messages` 让 `gpt-5.4` 报 400 `no model endpoints available given user constraints`。表单里地址栏留空即用目录默认（占位符里显示），用户想覆盖企业版端点、带占位符的网关再自己填——**不能写空串**，`'' ?? x` 不会回落。余额查询和卡片展示要用的端点从目录取（`catalogBaseUrlOf`）；OAuth 路由的端点由凭据决定（`auth.baseUrl` 覆盖模型自己的），卡片不显示目录里那个地址。卡片上的告警按目录里真实的协议集判（预设响应里的 `apis`）：**多协议**的 provider 写死了才报（写死必然发错一批），单协议的写对了不报——那种白报只会让用户去点一个没必要的修正按钮；单协议但写死的跟目录不一致（手填错了）照样报，文案会点名两边各是什么。两种都配「改成按模型协议」的一键修正：它 `unset api`，**并且**在路由地址等于目录端点集合里的某一个时连 `baseURL` 一起删（旧版表单会把目录地址写进路由，那同样盖掉每个模型自己的端点）——用户自己写的企业版端点不在那个集合里，不会被碰。
+- **「只有 OAuth」由 pi-ai 元数据判定**：读 provider 工厂的 `auth`，有 `oauth` 且没有 `apiKey` 就是（当前只有 `openai-codex`），新加的自带跟上。例外只有一个 `github-copilot`：元数据里它确实有 `apiKey` 路径，但那只是个手填 token 的框（`Enter GitHub Copilot token`），这种 token 得先登录 GitHub 换、用户手里不会有，所以界面按 OAuth-only 处理（`KEY_PATH_IS_DEAD_END`）。判到 OAuth-only 的界面只留登录这条路：藏掉「API 地址 / 协议 / 凭据名」三行和「测试」按钮，也不渲染「改用 API 密钥」那条切换——那条路在这套界面里走不通（测试按钮被藏了，而「添加到列表」要求测试通过），Copilot 更甚：那种 token 本来就拿不到。
+- **一个 provider 的认证方式二选一，按 flow 的方法分**。挂上 authorization 服务后每个 provider 都有 flow，但方法含义不同：`oauth` 是真·订阅登录，`api-key` 只是 dsh 把「让你输密钥」也包装成了一次登录。所以判据是方法 id 而不是「有没有 flow」——DeepSeek / OpenAI / Moonshot 只有 `api-key` 方法，表单照旧给密钥输入框（给它们显示「使用 OAuth 登录（DeepSeek）」既误导又顶掉密钥框）；两者都有的（Anthropic / Kimi Coding / OpenRouter / xAI / Radius）默认走 OAuth，旁边一条「改用 API 密钥」可切回密钥输入——注意 pi-ai 的 flow 也给 Copilot 报 `api-key` 方法，但它被上面那条 OAuth-only 规则挡掉了。
 - **两者不能共存于同一条路由**。pi-ai 的优先级是「显式传入的 apiKey > 凭据记录里的 grant > 环境变量」（`auth/resolve.js`，`models.js` 那句 "Explicit request options win per-field" 是同一件事），所以一条路由要么写 `apiKeyEnv`（密钥路径），要么不写（凭据记录路径）。混着写的结果是显式 key 静默胜出、OAuth 那份变成死配置。
 - **OAuth 授权的路由不写 `apiKeyEnv`**。官方适配器的 `resolveApiKey` 只要看到 `apiKeyEnv` 就只认那个 ref，取不到值直接抛 `MISSING_CREDENTIAL`——写上它等于把 OAuth 登录堵死（发送时才报错）。留空才会回落到 pi-ai 自己的凭据解析，从凭据记录里取 grant 换 token。早期版本添加的路由带着这个字段时，卡片展开体会给一条「改用 OAuth 认证」的一键修正（`unset apiKeyEnv`）。
 

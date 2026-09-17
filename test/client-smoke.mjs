@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { routeProfileOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
+const { routeProfileOf, routeRepairOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -266,8 +266,11 @@ rowsCheck('只有 api-key 方法 → 标记为密钥型', authEntryOf(deepseekPr
 rowsCheck('两者都有 → 认出 OAuth 方法', authEntryOf(anthropicPreset).oauth.id === 'oauth')
 rowsCheck('OAuth 入口用方法自己的标签（不是 provider 名）', authEntryOf(anthropicPreset).oauth.label === 'Anthropic (Claude Pro/Max)')
 rowsCheck('两者都有 → 不算密钥型', authEntryOf(anthropicPreset).onlyApiKey === false)
-rowsCheck('只有 oauth 方法 → 没密钥入口', authEntryOf(codexPreset).onlyApiKey === false)
-rowsCheck('没有 flow → 密钥型', authEntryOf({ id: 'x', label: 'X' }).onlyApiKey === false && authEntryOf({ id: 'x', label: 'X' }).oauth === undefined)
+// 只有 oauth 方法 → onlyApiKey 为 false（这个字段的含义是「只有 api-key 方法」，不是
+// 「显示密钥框」）。界面上这条 provider 靠 oauthOnly 藏掉「改用 API 密钥」那条切换：
+// 光看 onlyApiKey 会渲染一个点了走不通的死路（测试按钮被 oauthOnly 藏着，添加又要求测试通过）。
+rowsCheck('只有 oauth 方法 → 不算密钥型', authEntryOf(codexPreset).onlyApiKey === false)
+rowsCheck('没有 flow → 也不是密钥型', authEntryOf({ id: 'x', label: 'X' }).onlyApiKey === false && authEntryOf({ id: 'x', label: 'X' }).oauth === undefined)
 rowsCheck('预设为空也不炸', authEntryOf(undefined).oauth === undefined)
 
 // ---- 写进 settings 的路由配置：OAuth 授权过的不带 apiKeyEnv ----
@@ -285,6 +288,26 @@ rowsCheck('非 OAuth 路由照旧写 apiKeyEnv', keyProfile.apiKeyEnv === 'GITHU
 rowsCheck('非 OAuth 的目录 provider 也不写 api', keyProfile.api === undefined)
 const customProfile = routeProfileOf(formFixture, false, true)
 rowsCheck('Custom Gateway 必须写 api（目录里查不到）', customProfile.api === 'anthropic-messages')
+
+// ---- 卡片上「协议/地址写死了」的判定 + 一键修正删哪些字段 ----
+// 官方适配器里路由的 api / baseURL 都盖掉每个模型自己的那份；但只有「多协议」或「跟目录不一致」
+// 才值得报，别对单协议写对的 provider 白报（用户会去点一个没必要的修正按钮）。
+const multi = ['anthropic-messages', 'openai-completions', 'openai-responses']
+const single = ['openai-completions']
+const catalogUrls = ['https://openrouter.ai/api', 'https://openrouter.ai/api/v1']
+rowsCheck('单协议 + 写对了 → 不报', routeRepairOf({ api: 'openai-completions' }, single, ['https://api.deepseek.com']).fields.length === 0)
+rowsCheck('没写协议 → 不报', routeRepairOf({}, multi, catalogUrls).fields.length === 0)
+rowsCheck('多协议写死了 → 报，先删 api', JSON.stringify(routeRepairOf({ api: 'anthropic-messages' }, multi, catalogUrls).fields) === '["api"]')
+rowsCheck('多协议 → 文案走「多协议」那套', routeRepairOf({ api: 'anthropic-messages' }, multi, catalogUrls).multiProtocol === true)
+rowsCheck('单协议但写错了 → 报', JSON.stringify(routeRepairOf({ api: 'anthropic-messages' }, single, []).fields) === '["api"]')
+rowsCheck('单协议写错 → 文案不说「多协议」', routeRepairOf({ api: 'anthropic-messages' }, single, []).multiProtocol === false)
+// 旧版表单会把目录地址写进路由，它同样盖掉模型自己的端点 —— 修正要连它一起删
+rowsCheck('配置里的地址是目录端点 → 连 baseURL 一起删',
+  JSON.stringify(routeRepairOf({ api: 'anthropic-messages', baseUrl: 'https://openrouter.ai/api', baseUrlPinned: true }, multi, catalogUrls).fields) === '["api","baseURL"]')
+rowsCheck('用户自己写的地址（企业版端点）→ 只删 api，不动地址',
+  JSON.stringify(routeRepairOf({ api: 'anthropic-messages', baseUrl: 'https://api.enterprise.githubcopilot.com', baseUrlPinned: true }, multi, ['https://api.individual.githubcopilot.com']).fields) === '["api"]')
+rowsCheck('卡片上那个地址只是目录默认（没钉）→ 不算配置，不用删',
+  JSON.stringify(routeRepairOf({ api: 'anthropic-messages', baseUrl: 'https://openrouter.ai/api', baseUrlPinned: false }, multi, catalogUrls).fields) === '["api"]')
 
 // ---- 重置倒计时：天数到两位数就只留天数（卡片头部最挤的一段）----
 const inFuture = (ms) => new Date(Date.now() + ms).toISOString()
