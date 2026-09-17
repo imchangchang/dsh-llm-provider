@@ -3,6 +3,10 @@
  *   触发器胶囊（模型名 + 思考强度 + Chevron）→ 根菜单两行（模型 / 推理等级，值右对齐 + ›）
  *   → 模型面板（我们的增强：搜索 + provider 过滤 + 能力徽章，样式走官方 token）
  *   → 推理等级面板（Default + 档位，选中打勾）。
+ *
+ * 切换模型时强制选档：选了新模型不再立即关菜单，跳到推理等级面板让用户点一档；
+ * 点档位时优先沿用上一档 id（直接命中），不在新模型档位表里时按"区间中心"做比例映射。
+ * 新模型没有 reasoning 元数据时面板显示空态 +「知道了」按钮提交无档位后关闭。
  */
 import react from 'react'
 import { accountsById, findModel, loadModelCatalog, loadModelDetailMap, loadPlanStatus, normalizeGroups, onPlanChange, selectionCell, submitSelection, unwrap, usePolledSnapshot } from './data.js'
@@ -40,6 +44,83 @@ export function aliasSelection(selection: ModelSelection | undefined, groups: Ca
   return keepEffort
     ? { provider: mapped, model: selection.model, reasoningEffort: effort }
     : { provider: mapped, model: selection.model }
+}
+
+/**
+ * 把老模型的档位索引按区间中心映射到新模型的档位索引：把 [0, oldLen) 的档位中心
+ * (oldIdx + 0.5) / oldLen 当成 [0, 1) 内的点，再取反 [0, newLen) 的区间中心
+ * (newIdx + 0.5) / newLen。
+ *
+ * 选"区间中心"而不是 Math.round(oldIdx/(oldLen-1) * (newLen-1)) 是为了避开 0.5 边界
+ * 向上舍入的极值偏移——后者会让"老档中段"全部推到新档边界上；区间中心对齐是中段对
+ * 中段、边界对边界，不会跳到极值。
+ *
+ * 例（验证用）：5→3 时 k=0/1/2/3/4 → newIdx=0/0/1/2/2。
+ *
+ * @param oldIdx - 老档位索引（0..oldLen-1）。
+ * @param oldLen - 老档位表长度。
+ * @param newLen - 新档位表长度（≥ 1）。
+ * @returns 新档位索引（0..newLen-1）。
+ */
+export function intervalCenterMap(oldIdx: number, oldLen: number, newLen: number): number {
+  if (newLen <= 1) return 0
+  if (oldLen <= 0) return 0
+  var ratio = (oldIdx + 0.5) / oldLen
+  var raw = ratio * newLen - 0.5
+  var idx = Math.round(raw)
+  if (idx < 0) idx = 0
+  else if (idx > newLen - 1) idx = newLen - 1
+  return idx
+}
+
+/**
+ * 切换模型时算"上一档"应该带过去的继承档位：
+ *   1. 新模型没有 reasoning 元数据 → undefined（面板走空态）。
+ *   2. 上一档是 undefined：
+ *      - 老模型也不存在（首次选模型）→ 新模型 defaultEffort（再否则 undefined）。
+ *      - 老模型存在（用户之前没指定档位）→ undefined（保留"无档"偏好）。
+ *   3. 上一档直接落在新模型档位表里 → 原样返回。
+ *   4. 老模型档位表拿不到或上一档不在里面（脏数据）→ 新模型 defaultEffort。
+ *   5. 否则按区间中心把上一档在老档位表里的索引转投到新档位表里。
+ *
+ * 设计意图：用户已经显式选过的档位偏好应该跟着走，除非新模型不支持——和会话迁
+ * 移里 aliasSelection 的"档位在新模型支持时带过去、不支持时丢掉"同口径（见
+ * `model-seat.ts:31-43`）。
+ *
+ * @param priorEffort - 当前会话的 reasoningEffort（可能 undefined）。
+ * @param priorModel - 老模型在目录里的 CatalogModel（可迁，老数据通过）。
+ * @param newModel - 新模型在目录里的 CatalogModel（可迁，新数据通过）。
+ * @returns 应当作为新模型初始选中档位的 id，或 undefined（让面板走"Default"/空态）。
+ */
+export function resolveInheritedEffort(
+  priorEffort: string | undefined,
+  priorModel: CatalogModel | undefined,
+  newModel: CatalogModel | undefined,
+): string | undefined {
+  // 1. 新模型没 reasoning → undefined
+  if (newModel === undefined || newModel.reasoning === undefined) return undefined
+  var newEfforts = newModel.reasoning.efforts
+  var newDefault = newModel.reasoning.default
+  if (newEfforts.length === 0) return undefined
+
+  // 2. 上一档是 undefined：分"首次选"和"老档是关闭"两种
+  if (priorEffort === undefined) {
+    return priorModel === undefined ? newDefault : undefined
+  }
+
+  // 3. 直接命中
+  if (newEfforts.indexOf(priorEffort) !== -1) return priorEffort
+
+  // 4. 老档位表拿不到 / priorEffort 不在里面
+  var priorEfforts = priorModel !== undefined && priorModel.reasoning !== undefined
+    ? priorModel.reasoning.efforts
+    : undefined
+  if (priorEfforts === undefined || priorEfforts.length === 0) return newDefault
+  var oldIdx = priorEfforts.indexOf(priorEffort)
+  if (oldIdx === -1) return newDefault
+
+  // 5. 按区间中心映射
+  return newEfforts[intervalCenterMap(oldIdx, priorEfforts.length, newEfforts.length)]
 }
 
 export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
