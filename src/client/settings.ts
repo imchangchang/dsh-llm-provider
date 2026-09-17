@@ -397,7 +397,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     patchForm({
       routeId: preset.id,
       // 地址不预填：目录 provider 的端点由 pi-ai 按模型决定（一家可能多端点，比如
-      // firefox 的 anthropic 用 /inference、openai 用 /inference/v1），写进路由会盖掉。
+      // fireworks 的 anthropic 用 /inference、openai 用 /inference/v1），写进路由会盖掉。
       // preset.baseURL 只当占位提示；用户想覆盖（企业版端点、带占位符的网关）再自己填。
       baseURL: '',
       api: preset.api,
@@ -641,8 +641,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   var customPicked = pickedPreset !== undefined && pickedPreset.custom === true
   // 这次登录是否已授权：授权过就不必再走「填密钥 → 测试」那条路（OAuth 没有密钥可填）。
   var oauthAuthorized = oauth !== null && oauth.done !== undefined && oauth.done.status === 'authorized'
-  // OAuth-only 供应商：界面只留「供应商 / 路由 ID / 登录方式」。API 地址与协议由 preset 带进
-  // form（写配置时照旧落盘），用户不需要看见；也没有可测的密钥。
+  // OAuth-only 供应商：界面只留「供应商 / 路由 ID / 登录方式」。地址和协议都是目录里带着的
+  // 东西，用户不需要看见；也没有可测的密钥。
   var oauthOnlyPicked = pickedPreset !== undefined && pickedPreset.oauthOnly === true
   // 认证入口按 flow 的方法分（见 authEntryOf 的注释）：没显式选过就让默认值决定。
   var authEntry = authEntryOf(pickedPreset)

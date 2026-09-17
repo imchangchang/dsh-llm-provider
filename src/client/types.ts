@@ -96,8 +96,6 @@ export interface ProviderPreset {
   apiKeyEnv?: string
   /** 已经通过 OAuth 登录过：卡片显示登录状态，不再摆密钥输入框。 */
   oauthAuthorized?: boolean
-  /** 账号实际可用的模型 id（OAuth 登录时 pi-ai 记下的）。列表按它过滤，选不到用不了的模型。 */
-  availableModels?: string[]
   websiteUrl?: string
   configured?: boolean
   /** 路由在、凭据没值：仍算已配置，但下拉里不该禁选（选中就是去补密钥）。 */

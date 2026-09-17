@@ -206,7 +206,6 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // routeMeta 会 spread 进每个返回分支，所以放这里就不必逐分支加。
     const oauthAuthorized = credential.configured ? false : await oauthAuthorizedFor(providerId)
     const authConfigured = credential.configured || oauthAuthorized
-    // 路由自身的配置项：卡片展开体和「添加供应商」表单展示同一组信息（缺的字段 JSON 序列化时自然消失）
     // 余额适配器的端点参数：路由没写就用目录默认（查额度得打到这家真正的主机）
     const adapterBaseUrl = configuredBaseUrl ?? catalogBaseUrl
     const adapter = findAdapter(providerId, adapterBaseUrl)
