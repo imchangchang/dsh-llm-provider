@@ -17,13 +17,14 @@ import {
   mergePlanAccount,
   onPlanChange,
   postJson,
+  startOauthAttempt,
   withKey,
   withKeys,
 } from './data.js'
 import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
 import { caretSvg } from './icons.js'
 import { t } from './i18n.js'
-import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, PlanAccount, ProviderPreset } from './types.js'
+import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, OauthAttemptClient, OauthEvent, OauthPrompt, PlanAccount, ProviderPreset } from './types.js'
 
 /** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
 function piAiSourceLabel(source: unknown): string {
@@ -243,6 +244,22 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   var noteState = react.useState(null)
   var note = noteState[0]
   var setNote = noteState[1]
+  // OAuth 登录流：尝试态独立于表单，attempt 一旦 settled 也清掉，授权后回到添加流程。
+  // react 是 default export，TS 推不出 useState 的签名；整 tuple `as` cast 让 setOauth 的
+  // prev 类型是 OAuthFlowState | null，不要让回调里漏成隐式 any。
+  type OAuthFlowState = {
+    attempt: OauthAttemptClient | undefined,
+    notices: { message: string, url?: string, code?: string }[],
+    prompt: { promptId: string, prompt: OauthPrompt } | undefined,
+    pendingValue: string,
+    pendingSelect: string,
+    pendingBusy: boolean,
+    done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
+  }
+  type OAuthFlowSetter = (next: OAuthFlowState | null | ((prev: OAuthFlowState | null) => OAuthFlowState | null)) => void
+  var oauthState = react.useState(null) as [OAuthFlowState | null, OAuthFlowSetter]
+  var oauth = oauthState[0]
+  var setOauth = oauthState[1]
   var pickRef = react.useRef(null)
   var pickOpenState = react.useState(false)
   var pickOpen = pickOpenState[0]
@@ -343,6 +360,101 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       .then(function () {
         setBusy(false)
       })
+  }
+
+  // ---- OAuth 流：把官方 bundle 的 flow 暴露给浏览器，弹窗收 notice / prompt，settled 触发 onAdded ----
+  function startOauth() {
+    var oauthInfo = pickedPreset === undefined ? undefined : pickedPreset.oauth
+    if (oauthInfo === undefined || oauthInfo.key === '') return
+    setOauth({
+      attempt: undefined,
+      notices: [],
+      prompt: undefined,
+      pendingValue: '',
+      pendingSelect: oauthInfo.methods[0]?.id ?? '',
+      pendingBusy: true,
+      done: undefined,
+    })
+    startOauthAttempt(oauthInfo.key, oauthInfo.methods[0]?.id, function (event: OauthEvent) {
+      setOauth(function (prev) {
+        if (prev === null) return null
+        var next = { ...prev }
+        if (event.kind === 'notice') {
+          next.notices = prev.notices.concat([event.notice])
+          return next
+        }
+        if (event.kind === 'prompt') {
+          next.prompt = { promptId: event.promptId, prompt: event.prompt }
+          // 默认值：text/secret 空；select 用 options[0]
+          next.pendingValue = ''
+          next.pendingSelect = event.prompt.kind === 'select' && event.prompt.options.length > 0
+            ? (event.prompt.options[0]?.id ?? '')
+            : ''
+          next.pendingBusy = false
+          return next
+        }
+        if (event.kind === 'settled') {
+          next.done = { status: event.status, error: event.error }
+          next.pendingBusy = false
+          // 授权成功后：调父组件让卡片刷新；attempt 自己已经关 SSE，不用再 cancel
+          if (event.status === 'authorized' && typeof props.onAdded === 'function') {
+            // setTimeout 把 onAdded 挪出 setOauth，避免在 setState 内触发外部 setState
+            setTimeout(function () { props.onAdded!() }, 0)
+          }
+          return next
+        }
+        return prev
+      })
+    })
+      .then(function (attempt) {
+        setOauth(function (prev) {
+          if (prev === null) return null
+          return { ...prev, attempt: attempt, pendingBusy: false }
+        })
+      })
+      .catch(function (cause) {
+        setOauth(function (prev) {
+          if (prev === null) return null
+          return { ...prev, done: { status: 'failed', error: String(cause && cause.message ? cause.message : cause) }, pendingBusy: false }
+        })
+      })
+  }
+  function cancelOauth() {
+    setOauth(function (prev) {
+      if (prev === null || prev.attempt === undefined) return prev
+      prev.attempt.cancel()
+      return { ...prev, pendingBusy: true }
+    })
+  }
+  function closeOauth() {
+    setOauth(function (prev) {
+      if (prev !== null && prev.attempt !== undefined) prev.attempt.close()
+      return null
+    })
+  }
+  function submitOAuth() {
+    setOauth(function (prev) {
+      if (prev === null || prev.attempt === undefined || prev.prompt === undefined) return prev
+      var prompt = prev.prompt
+      var value: string
+      if (prompt.prompt.kind === 'select') value = prev.pendingSelect
+      else value = prev.pendingValue
+      if (value === '') return prev
+      prev.attempt.respond(prompt.promptId, value)
+        .then(function () {
+          setOauth(function (latest) {
+            if (latest === null) return null
+            return { ...latest, prompt: undefined, pendingBusy: true, pendingValue: '', pendingSelect: '' }
+          })
+        })
+        .catch(function (cause) {
+          setOauth(function (latest) {
+            if (latest === null) return null
+            return { ...latest, done: { status: 'failed', error: String(cause && cause.message ? cause.message : cause) }, pendingBusy: false }
+          })
+        })
+      return { ...prev, pendingBusy: true }
+    })
   }
 
   if (!open) {
@@ -491,6 +603,56 @@ function AddProviderPanel(props: AddProviderPanelProps) {
               readOnly: true,
             }),
       ),
+      // API 密钥 / OAuth 登录：preset 自带 OAuth flow 就用 OAuth 按钮代替密码输入。
+      // 两条路并存：选了非 default gateway 也能手动填 key 覆盖；OAuth 流结束后
+      // attempt 写进 dsh 凭据服务，照常走与手动填 key 相同的存储路径。
+      pickedPreset !== undefined && pickedPreset.oauth !== undefined
+        ? react.createElement(
+            'div',
+            { className: 'pv_line pv_row' },
+            react.createElement('span', null, '登录方式'),
+            react.createElement(
+              'div',
+              { style: { display: 'flex', gap: '8px', alignItems: 'center', flex: 1 } },
+              react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'pv_action',
+                  style: { marginLeft: '0' },
+                  disabled: oauth !== null && oauth.done === undefined,
+                  title: oauth !== null && oauth.done === undefined ? t('oauthInFlight') : '',
+                  onClick: function () {
+                    if (oauth !== null && oauth.done === undefined) return
+                    startOauth()
+                  },
+                },
+                oauth !== null && oauth.done === undefined
+                  ? t('oauthInFlight')
+                  : (oauth !== null && oauth.done !== undefined && oauth.done.status === 'authorized'
+                    ? '✓ ' + pickedPreset.oauth!.label + ' · 重新登录'
+                    : t('oauthSignInMethod').replace('{label}', pickedPreset.oauth!.label)),
+              ),
+              form.websiteUrl === undefined
+                ? null
+                : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer' }, '获取密钥 ↗'),
+            ),
+          )
+        : react.createElement(
+            'div',
+            { className: 'pv_line pv_row' },
+            react.createElement('span', null, 'API 密钥'),
+            react.createElement('input', {
+              className: 'pv_field pv_key',
+              type: 'password',
+              placeholder: 'sk-…',
+              value: form.key,
+              onChange: function (event: FieldEvent) { patchForm({ key: event.target.value }) },
+            }),
+            form.websiteUrl === undefined
+              ? null
+              : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer', style: { marginLeft: '8px' } }, '获取密钥 ↗'),
+          ),
       // 凭据名：单独一行小字，不挤在协议行右侧
       react.createElement(
         'div',
@@ -516,7 +678,115 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         ? null
         : react.createElement('div', { className: 'plan_note' + (test.phase === 'fail' ? ' plan_badText' : '') }, test.message),
       note === null ? null : react.createElement('div', { className: 'plan_note' }, note),
+      // OAuth 弹窗：attempt 期间挂在 form 顶部，独立卡片样式。
+      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth,
+        function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingValue: event.target.value } }) },
+        function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingSelect: event.target.value } }) },
+      ),
     ),
+  )
+}
+
+/**
+ * OAuth 弹窗：实时渲染 notice / prompt / settled，attempt 不在时返回 null。
+ *
+ * 拆成独立函数而不是嵌套组件——`AddProviderPanel` 内已经装满 useState，再开一个会让 hook 顺序
+ * 跟表单字段耦合，调试更累。状态全在父组件里通过 props 暴露。
+ */
+function renderOauthDialog(
+  state: NonNullable<{
+    attempt: OauthAttemptClient | undefined,
+    notices: { message: string, url?: string, code?: string }[],
+    prompt: { promptId: string, prompt: OauthPrompt } | undefined,
+    pendingValue: string,
+    pendingSelect: string,
+    pendingBusy: boolean,
+    done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
+  }>,
+  preset: ProviderPreset | undefined,
+  onCancel: () => void,
+  onClose: () => void,
+  onSubmit: () => void,
+  onValueChange: (event: FieldEvent) => void,
+  onSelectChange: (event: FieldEvent) => void,
+) {
+  // 末帧 notice 是 device-code flow 的 URL + code；老帧留作上下文。
+  var lastNotice = state.notices.length > 0 ? state.notices[state.notices.length - 1] : undefined
+  var dialogTitle = preset === undefined || preset.oauth === undefined
+    ? t('oauthDialogTitle').replace('{label}', 'OAuth')
+    : t('oauthDialogTitle').replace('{label}', preset.oauth.label)
+  return react.createElement(
+    'div',
+    { className: 'pv_oauth', style: { border: '1px solid var(--pv-line, #e5e5e5)', borderRadius: '8px', padding: '12px', marginTop: '12px', background: 'var(--pv-bg-soft, #fafafa)' } },
+    react.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } },
+      react.createElement('strong', null, dialogTitle),
+      state.done !== undefined
+        ? react.createElement('button', { type: 'button', className: 'pv_action', onClick: onClose }, '×')
+        : react.createElement('button', { type: 'button', className: 'pv_action', onClick: onCancel }, t('oauthCancel')),
+    ),
+    lastNotice === undefined
+      ? react.createElement('div', { className: 'plan_note' }, state.attempt === undefined ? '正在打开浏览器…' : t('oauthInFlight'))
+      : react.createElement(
+          'div',
+          { className: 'plan_note' },
+          react.createElement('div', null, lastNotice.message),
+          lastNotice.url === undefined
+            ? null
+            : react.createElement('a', { href: lastNotice.url, target: '_blank', rel: 'noreferrer' }, lastNotice.url + ' ↗'),
+          lastNotice.code === undefined
+            ? null
+            : react.createElement('div', { style: { fontFamily: 'monospace', fontSize: '1.5em', marginTop: '4px' } }, lastNotice.code),
+        ),
+    state.prompt === undefined
+      ? null
+      : react.createElement(
+          'div',
+          { style: { marginTop: '8px' } },
+          react.createElement('div', null, state.prompt.prompt.kind === 'secret' ? '🔒 ' : '', state.prompt.prompt.message),
+          state.prompt.prompt.kind === 'select'
+            ? react.createElement(
+                'select',
+                {
+                  className: 'pv_field',
+                  style: { width: '100%', marginTop: '4px' },
+                  value: state.pendingSelect,
+                  onChange: onSelectChange,
+                  disabled: state.pendingBusy,
+                },
+                react.createElement('option', { value: '' }, t('oauthSelectPlaceholder')),
+                state.prompt.prompt.options.map(function (option) {
+                  return react.createElement('option', { key: option.id, value: option.id }, option.label)
+                }),
+              )
+            : react.createElement('input', {
+                className: 'pv_field',
+                style: { width: '100%', marginTop: '4px' },
+                type: state.prompt.prompt.kind === 'secret' ? 'password' : 'text',
+                placeholder: state.prompt.prompt.placeholder,
+                value: state.pendingValue,
+                onChange: onValueChange,
+                disabled: state.pendingBusy,
+                autoFocus: true,
+              }),
+          react.createElement(
+            'button',
+            {
+              type: 'button',
+              className: 'pv_action',
+              style: { marginTop: '6px' },
+              disabled: state.pendingBusy || (state.prompt.prompt.kind !== 'select' && state.pendingValue === ''),
+              onClick: onSubmit,
+            },
+            t('oauthSubmit'),
+          ),
+        ),
+    state.done === undefined
+      ? null
+      : state.done.status === 'authorized'
+        ? react.createElement('div', { className: 'plan_note', style: { marginTop: '8px', color: 'var(--pv-ok, #2a7)' } }, '✓ ' + t('oauthAuthorized'))
+        : state.done.status === 'cancelled'
+          ? react.createElement('div', { className: 'plan_note', style: { marginTop: '8px' } }, t('oauthCancelled'))
+          : react.createElement('div', { className: 'plan_note plan_badText', style: { marginTop: '8px' } }, t('oauthFailed').replace('{error}', state.done.error ?? '')),
   )
 }
 
