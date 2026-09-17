@@ -159,6 +159,25 @@ export function apply(ctx: PluginContext, config: unknown): void {
   }
 
   /**
+   * 从 OAuth 凭据记录里取一个能用的 token，喂给额度适配器。
+   *
+   * 走 OAuth 的 provider 没有 apiKeyEnv，凭据在记录的 grant 里；记录本身是 pi-ai 的
+   * `OAuthCredential`，`refresh` 是 GitHub 那个长期 token、`access` 是换来的短命 token。
+   * github-copilot 的配额接口要的是前者。取不到就返回 undefined（适配器会说明「还没登录」）。
+   * @param providerId - 路由 id。
+   */
+  async function oauthTokenFor(providerId: string): Promise<string | undefined> {
+    const key = oauthKeyFor(providerId)
+    if (key === undefined) return undefined
+    const credentials = service<CredentialsService>('credentials')
+    if (typeof credentials?.readRecord !== 'function') return undefined
+    try {
+      const payload = asRecord(asRecord(await credentials.readRecord(key))['payload'])
+      return readString(payload['refresh']) ?? readString(payload['access'])
+    } catch { return undefined }
+  }
+
+  /**
    * 查一个 provider 路由的额度。
    * @param route - 来自 {@link providerRoutes}。
    * @param credentials - 收集 `{provider, ref, value}` 供凭据体检比对；值不外传。
@@ -176,6 +195,9 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // routeMeta 会 spread 进每个返回分支，所以放这里就不必逐分支加。
     const oauthAuthorized = credential.configured ? false : await oauthAuthorizedFor(providerId)
     const authConfigured = credential.configured || oauthAuthorized
+    // OAuth 授权过的：适配器要的 key 从凭据记录里取（Copilot 的配额接口要 GitHub token）。
+    const oauthToken = oauthAuthorized ? await oauthTokenFor(providerId) : undefined
+    const queryKey = credential.configured ? credential.key : oauthToken
     const routeMeta = { api: route.api, apiKeyEnv: route.apiKeyEnv, oauthAuthorized }
     // 掩码提示（前3+后4）：让界面能认出是哪一把 key（错配一眼可见），值本身不出宿主
     const keyHint = credential.configured ? maskKey(credential.key) : undefined
@@ -200,7 +222,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       result.membership = undefined // 等级不展示，适配器原始数据保留在适配器内
       return { ...routeMeta, ...result }
     }
-    if (!credential.configured) {
+    if (!credential.configured && !oauthAuthorized) {
       return {
         ...routeMeta,
         id: providerId, displayName, kind: 'quota', authConfigured, baseUrl,
@@ -209,7 +231,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       }
     }
     try {
-      const result = await adapter.query({ id: providerId, displayName, key: credential.key, baseUrl, extras: {} })
+      const result = await adapter.query({ id: providerId, displayName, key: queryKey, baseUrl, extras: {} })
       if (result.websiteUrl === undefined) result.websiteUrl = websiteUrl
       if (result.keyHint === undefined) result.keyHint = keyHint
       if (result.deletable === undefined) result.deletable = route.source === 'llm-pi-ai'

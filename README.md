@@ -147,7 +147,7 @@ Adds a 「模型服务」 tab to the settings page (the official `ui-settings-mo
 
 ### Quota adapters
 
-One file per provider under `src/adapters/`, one registration line in `registry.ts`, the contract in `shared.ts`; `node lib/adapters/run.js` runs them standalone. Every adapter except qwen uses the provider's API key against a free GET endpoint; none needs a browser session.
+One file per provider under `src/adapters/`, one registration line in `registry.ts`, the contract in `shared.ts`; `node lib/adapters/run.js` runs them standalone. Every adapter except qwen issues a free GET; none needs a browser session. Most use the provider's API key, while github-copilot uses the GitHub token obtained through OAuth sign-in (OAuth providers have no apiKeyEnv, so the plugin reads it from the credential record).
 
 | Adapter | Data source |
 |---|---|
@@ -159,6 +159,7 @@ One file per provider under `src/adapters/`, one registration line in `registry.
 | opencode-go | `opencode.ai/zen/go/v1/usage` |
 | zenmux | the configured `baseURL` itself (`quota_5_hour` / `quota_7_day` in the response) |
 | openrouter | `openrouter.ai/api/v1/credits` |
+| github-copilot | `api.github.com/copilot_internal/user` (`quota_snapshots` on paid plans, `monthly_quotas` on free; wants the GitHub token, not the api.githubcopilot.com one) |
 | qwen | no public endpoint: no request is sent, the card shows a 「看控制台」 link |
 
 Numbers and presentation follow CC Switch ([farion1231/cc-switch](https://github.com/farion1231/cc-switch), a desktop tool that switches provider configs for coding CLIs): the fields it shows, and no others. Plan tier fields are dropped before they reach the browser, and the Kimi top-up balance is not shown because the figure disagrees with CC Switch and looks unreliable.
@@ -285,5 +286,5 @@ Boundaries:
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
 | `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | eight offline tests (no dsh, no services) |
+| `test/*.mjs` | nine offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

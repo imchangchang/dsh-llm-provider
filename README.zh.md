@@ -79,11 +79,11 @@ scripts/test-profile.sh stop   # 停掉
 node lib/adapters/run.js all            # 跑全部额度适配器（key 从环境变量或 ~/.dsh/.credentials.yaml 找）
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # 构建 + 八个离线测试；自测与合入跑的就是这条
+npm test                                # 构建 + 九个离线测试；自测与合入跑的就是这条
 npm run typecheck                       # tsc --noEmit（npm test 不含它）
 ```
 
-八个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
+九个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
 
 ## 实现
 
@@ -145,7 +145,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 
 ### 额度适配器
 
-一家一个文件（`src/adapters/`），`registry.ts` 注册一行，契约在 `shared.ts`；`node lib/adapters/run.js` 可单独跑。除 qwen 外都用各家的 API key 走免费 GET，都不依赖浏览器登录态。
+一家一个文件（`src/adapters/`），`registry.ts` 注册一行，契约在 `shared.ts`；`node lib/adapters/run.js` 可单独跑。除 qwen 外都发免费 GET，都不依赖浏览器登录态：多数用各家的 API key，github-copilot 用 OAuth 登录拿到的 GitHub token（走 OAuth 的 provider 没有 apiKeyEnv，插件层从凭据记录里取）。
 
 | 适配器 | 数据来源 |
 |---|---|
@@ -157,6 +157,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | opencode-go | `opencode.ai/zen/go/v1/usage` |
 | zenmux | 配置的 `baseURL` 本身（响应里是 `quota_5_hour` / `quota_7_day`） |
 | openrouter | `openrouter.ai/api/v1/credits` |
+| github-copilot | `api.github.com/copilot_internal/user`（付费档 `quota_snapshots`、免费档 `monthly_quotas`；要 GitHub token，不是 api.githubcopilot.com 那个） |
 | qwen | 无公开接口：不发请求，卡片给「看控制台」跳转链接 |
 
 数值与展示口径对齐 CC Switch（[farion1231/cc-switch](https://github.com/farion1231/cc-switch)，给编码 CLI 切换供应商配置的桌面工具）：它显示哪些字段就显示哪些，不额外加工。套餐等级字段在下发到浏览器前丢弃；Kimi 充值包余额不显示，因为数值与 CC Switch 不一致，看着也不可靠。
@@ -284,5 +285,5 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
 | `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
-| `test/*.mjs` | 八个离线测试（不进 dsh、不起服务） |
+| `test/*.mjs` | 九个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |

@@ -5,6 +5,7 @@
  * 在这里 import + push 一行，完事。match() 认 provider id 或 baseURL。
  */
 import deepseek from './deepseek.js'
+import githubCopilot from './github-copilot.js'
 import glm from './glm.js'
 import kimiCoding from './kimi-coding.js'
 import minimax from './minimax.js'
@@ -17,6 +18,7 @@ import type { BillingAdapter } from './shared.js'
 
 export const adapters = [
   deepseek,
+  githubCopilot,
   kimiCoding,
   moonshot,
   glm,
