@@ -836,6 +836,36 @@ function renderOauthDialog(
   var dialogTitle = preset === undefined || preset.oauth === undefined
     ? t('oauthDialogTitle').replace('{label}', 'OAuth')
     : t('oauthDialogTitle').replace('{label}', preset.oauth.label)
+  /**
+   * 一行「标签 + 值 + 复制」：标签定宽、值占满并允许折行、复制按钮钉在右边。
+   * 两行共用它，按钮因此对齐；按钮给固定最小宽，从「复制」变「已复制」时不会把布局顶动。
+   */
+  function copyRow(
+    label: string,
+    valueEl: unknown,
+    text: string | undefined,
+    what: 'link' | 'code',
+    title: string,
+  ) {
+    if (valueEl === null || text === undefined) return null
+    return react.createElement(
+      'div',
+      { style: { display: 'flex', gap: '10px', alignItems: 'center', marginTop: '6px' } },
+      react.createElement('span', { style: { flex: '0 0 48px', opacity: 0.6, fontSize: '0.9em' } }, label),
+      react.createElement('span', { style: { flex: '1 1 auto', minWidth: '0', wordBreak: 'break-all' } }, valueEl),
+      react.createElement(
+        'button',
+        {
+          type: 'button',
+          className: 'pv_action',
+          style: { marginLeft: '0', flex: '0 0 auto', minWidth: '62px', textAlign: 'center' },
+          title: title,
+          onClick: function () { onCopy(text, what) },
+        },
+        state.copied === what ? t('oauthCopied') : t('oauthCopyLink'),
+      ),
+    )
+  }
   return react.createElement(
     'div',
     { className: 'pv_oauth', style: { border: '1px solid var(--pv-line, #e5e5e5)', borderRadius: '8px', padding: '12px', marginTop: '12px', background: 'var(--pv-bg-soft, #fafafa)' } },
@@ -861,54 +891,23 @@ function renderOauthDialog(
           react.createElement('div', null, lastNotice.message),
           // 链接给两种用法：点得开就点（新窗口打开），点不开/想在别的设备上打开就复制走。
           // 地址原样当链接文字显示，不加装饰后缀，选中复制出来是干净的。
-          noticeUrl === undefined
-            ? null
-            : react.createElement(
-                'div',
-                { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '2px', flexWrap: 'wrap' } },
-                react.createElement(
-                  'a',
-                  { href: noticeUrl, target: '_blank', rel: 'noreferrer', style: { wordBreak: 'break-all' } },
-                  noticeUrl,
-                ),
-                react.createElement(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'pv_action',
-                    style: { marginLeft: '0', flex: '0 0 auto' },
-                    title: '复制链接',
-                    onClick: function () {
-                      if (noticeUrl !== undefined) onCopy(noticeUrl, 'link')
-                    },
-                  },
-                  state.copied === 'link' ? t('oauthCopied') : t('oauthCopyLink'),
-                ),
-              ),
+          // 两行同一套栅格：标签固定宽 + 值占满 + 复制按钮靠右。之前按钮跟在值后面，
+          // 链接长、串码短，两个按钮左边缘对不齐，看着乱。
+          copyRow('验证页', noticeUrl === undefined ? null :
+            react.createElement(
+              'a',
+              { href: noticeUrl, target: '_blank', rel: 'noreferrer', style: { wordBreak: 'break-all' } },
+              noticeUrl,
+            ), noticeUrl, 'link', '复制链接'),
           noticeCode === undefined
             ? null
             : react.createElement(
                 'div',
-                { style: { marginTop: '4px' } },
-                react.createElement(
-                  'div',
-                  { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
-                  react.createElement('span', { style: { fontFamily: 'monospace', fontSize: '1.5em' } }, noticeCode),
-                  react.createElement(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'pv_action',
-                      style: { marginLeft: '0', flex: '0 0 auto' },
-                      title: '复制串码',
-                      onClick: function () {
-                        if (noticeCode !== undefined) onCopy(noticeCode, 'code')
-                      },
-                    },
-                    state.copied === 'code' ? t('oauthCopied') : t('oauthCopyLink'),
-                  ),
-                ),
-                react.createElement('div', { style: { opacity: 0.7 } }, '在打开的页面里输入这串码完成授权'),
+                { style: { marginTop: '2px' } },
+                copyRow('串码', react.createElement('span', { style: { fontFamily: 'monospace', fontSize: '1.4em', letterSpacing: '0.04em' } }, noticeCode),
+                  noticeCode, 'code', '复制串码'),
+                // 缩进到与串码同一列（标签 48px + 间距 10px），别顶到标签下面
+                react.createElement('div', { style: { opacity: 0.7, marginLeft: '58px', marginTop: '2px', fontSize: '0.9em' } }, '在打开的页面里输入这串码完成授权'),
               ),
         ),
     state.prompt === undefined
