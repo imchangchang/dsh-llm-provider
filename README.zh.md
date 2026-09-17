@@ -51,7 +51,7 @@ dsh web                   # 插件树变了，必须重启
 插件在自己 config 里声明了一条 DeepSeek 路由（`llm-pi-ai.providers.deepseek`，凭据名 `DEEPSEEK_API_KEY`），因为内置的 `llm-deepseek` 条目被禁用了。所以刚装完就有一张没配密钥的 DeepSeek 卡片：
 
 - 在 设置 →「模型服务」→「服务商」里展开这张卡片。没存过凭据时「API 密钥」那行就是输入框，保存后立刻实查一次额度。
-- 加别的供应商：「＋ 添加供应商」→ 选预设 → 填密钥与端点 → 测试通过后保存。
+- 加别的供应商：「＋ 添加供应商」→ 选预设 → 填密钥与端点（带 OAuth 的供应商会多一个「使用 OAuth 登录」按钮，走 device-code / 订阅流程登录后写入同一套凭据存储）→ 测试通过后保存。
 - 之后卡片上就有余额，模型选择器的触发器上是同一个快照。
 
 密钥存在 dsh 自己的凭据服务里，键名是路由的 `apiKeyEnv`，与官方那套读的是同一份，插件不需要自己的配置文件。
@@ -138,7 +138,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 设置页新增「模型服务」标签（官方 `ui-settings-models` 条目已禁用），两个二级标签：「服务商」、「pi-ai 桥接」。
 
 - 卡片照官方 PluginCard：状态点 + 名称 + 官网链接，一行余量摘要（`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`），右侧是刷新时间、单卡刷新、删除。展开体展示路由配置（路由 ID、掩码密钥、API 地址、协议、凭据名）和该供应商的模型列表（带过滤与详情卡）。
-- 添加供应商：选预设 → 填密钥与端点 → 实连测试通过才能写入。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。
+- 添加供应商：选预设 → 填密钥与端点（带 OAuth 的预设可直接走 OAuth 登录，自动写入同一套凭据存储）→ 实连测试通过才能写入。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。
 - 补密钥：路由在、凭据没值时，卡片展开体里那一行就是输入框（官方 Models 页已禁用，这是唯一入口）。存完立刻实查一次额度。这种供应商在添加列表里标「缺密钥」而不是「已配置」，不会被禁选堵住。
 - 删除：清路由 + 清凭据。内置原生路由不允许在这里删。
 - 「pi-ai 桥接」标签：当前版本与来源、被跳过的候选及原因、上游版本与检查更新按钮。
@@ -186,6 +186,11 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | `POST /provider/refresh` | 单卡刷新额度（实查并更新全局快照） |
 | `POST /provider/remove` | 删除供应商（清路由 + 清凭据） |
 | `POST /provider/test` | 用已存的 key 查一次某家的额度（只读，不动全局快照） |
+| `GET /provider/oauth/flows` | 列出 `ctx.authorization` 已注册的 flow（与 `/provider/presets` 的 `preset.oauth` 同源） |
+| `POST /provider/oauth/begin` | 发起一次 attempt，立刻返回 attemptId；后台跑 flow、往 SSE 总线推事件 |
+| `GET /provider/oauth/stream` | SSE 流：`data: {kind:'notice'\|'prompt'\|'settled',...}`。attempt 不存在回 404，已 settled 立刻回 settled 帧 |
+| `POST /provider/oauth/respond` | 浏览器对 prompt 的回应，按 attemptId + promptId 找到 pending resolver |
+| `POST /provider/oauth/cancel` | 主动撤 attempt（既 abort 本地 signal，也调 `authorization.cancel(key)` 让 in-flight slot 释放） |
 
 添加供应商的表单不调 `/provider/test`，走的是官方 `llm/discoverModels` 的草稿探测。
 
@@ -238,8 +243,26 @@ npm run typecheck  # tsc --noEmit
 
 不做的：
 
-- 需要浏览器登录态的供应商（Claude / Codex / Gemini / Grok / Copilot 的 OAuth）。Kimi 控制台接口要网页登录态的 JWT，同样不接。
+- Kimi 控制台接口要网页登录态的 JWT，不接。
 - 不 fork 官方插件源码，也不背单体仓库布局（Typert Remote 因此用不了）。
+
+### OAuth / subscription 登录
+
+dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 的中继、commit 校验；官方 `llm-pi-ai` bundle 又在 mount 时把 pi-ai catalog 全部 provider（31 个 api-key + 6 个 subscription + Codex-only-OAuth）注册成 flow——所以**所有走 OAuth / device-code 的 provider 已经能用**，差的只是把 `ctx.authorization` 接到浏览器端。
+
+本插件补这一段（`src/oauth.ts`，路由见 HTTP 接口表）：
+
+- 后台 attempt + 内存事件总线（Node `EventEmitter`），与 `dsh-authorization`「attempt 不可持久」对齐——刷新页面就丢 attempt，不会留下半初始化状态。
+- 浏览器↔宿主走 SSE（`Content-Type: text/event-stream`）；flow 推 `notice`（message + URL + code）、`prompt`（text / secret / select 三种 kind）、`finished`。浏览器重启 EventSource 时直接读 SSE 收尾帧，不必重开 attempt。
+- 同一个 credential key 同时只允许一个 attempt：seam 自己也会拒（`ALREADY_IN_FLIGHT`），我们这里先发制人给 409。
+- 5 分钟未活动的 attempt 被 sweeper 清掉（断网 / 关页后内存不漏）；attempt settled 后保留到 TTL 上限，浏览器重连 SSE 还能拿到结果。
+- 客户端在「添加供应商」表单里识别 `preset.oauth`：按钮替代密码输入框，弹窗实时显示 notice 与 prompt（按 kind 渲染 input / select），settled 后通过 `onAdded` 触发卡片刷新。
+
+边界：
+
+- **attempt 不可持久**——这是 dsh-authorization 的硬限制，刷新页面会丢。中途断网 / 关页要重头来。
+- **provider 自带文本 prompt**——比如 Copilot enterprise 的「GitHub Enterprise URL/domain」，kind=text 用普通 input。
+- **OAuth 失败不写凭据**——commit 校验要求「attempt 期间观察到的 commit」才算成功；失败 / 取消走的都是 abort signal，seam 自己会没收 in-flight slot。
 
 ## 源码布局
 
@@ -250,6 +273,7 @@ npm run typecheck  # tsc --noEmit
 | `src/updater.ts` | 上游更新器：查 registry、校验 tarball、装依赖、标待重启 |
 | `src/routes.ts` | 路由发现、官网链接、显示名兜底 |
 | `src/provider-presets.ts` | 添加供应商的预设清单（pi-ai 目录动态生成 + Custom Gateway） |
+| `src/oauth.ts` | OAuth / device-code 登录桥：把 `ctx.authorization` 暴露给浏览器端（5 条 HTTP 路由 + SSE） |
 | `src/model-details.ts` | 模型详情：读生效 pi-ai 包的 providers 数据文件 |
 | `src/pi-ai-names.ts` | 读 pi-ai 注册表里的名字（显示名的来源之一） |
 | `src/credential-check.ts` | 凭据检查 |

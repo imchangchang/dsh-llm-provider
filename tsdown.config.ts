@@ -20,7 +20,9 @@ const manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.u
 export default defineConfig([
   {
     name: 'dsh-llm-provider/host',
-    entry: ['src/index.ts', 'src/adapters/run.ts'],
+    // 把测试钩文件也作为 entry：它只被 test/*.mjs 引用，不走 entry 链路的话 tsdown 不会输出
+    // lib/oauth-test-hooks.js。这是「从 oauth.ts 暴露并测试钩」那种典型 share file 模式。
+    entry: ['src/index.ts', 'src/adapters/run.ts', 'src/oauth-test-hooks.ts'],
     outDir: 'lib',
     format: ['esm'],
     platform: 'node',

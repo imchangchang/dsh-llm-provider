@@ -25,13 +25,21 @@ export interface Logger {
 export interface ServerRequest {
   method?: string
   url?: string
-  on: (event: 'data' | 'end', listener: (chunk?: unknown) => void) => void
+  /**
+   * `data` / `end`：HTTP body 的两个阶段。`close`：SSE 长连接被浏览器断网 / 关页时触发，
+   * 用来清掉事件总线上的 listener，避免后续帧往死 socket 写。
+   */
+  on: (event: 'data' | 'end' | 'close', listener: (chunk?: unknown) => void) => void
 }
 
 /** 我们只用到的响应面。 */
 export interface ServerResponse {
   writeHead: (status: number, headers?: Record<string, string>) => void
+  /** 多帧发送：SSE / 长轮询响应都得靠它。Node 的 ServerResponse 实际签名是 `(chunk, encoding?, cb?)`，这里只用到前两个参数。 */
+  write: (chunk: string, encoding?: BufferEncoding) => void
   end: (body?: string) => void
+  /** Node 的 ServerResponse.headersSent：headers 已发再 writeHead 抛 ERR_STREAM_WRITE_AFTER_ENDT，写 SSE 时要检查。 */
+  headersSent?: boolean
 }
 
 export interface ExactRoute {
@@ -81,6 +89,114 @@ export interface SettingsService {
 export interface CredentialsService {
   resolve?: (ref: string) => Promise<unknown>
   unset?: (ref: string) => Promise<void>
+}
+
+/* ---------------------------- Authorization ---------------------------- */
+
+/**
+ * 宿主 `authorization` 服务（dsh 的 OAuth / device-code 登录注册中心）的就地声明。
+ *
+ * 每个 flow 负责一条凭据记录，由官方 llm-pi-ai bundle 在 mount 时按 pi-ai catalog 注册；
+ * 浏览器通过我们新增的 HTTP 路由间接调它（`ctx.authorization` 不直接暴露 RPC）——
+ * 见 src/index.ts 的 `registerOAuthRoutes`。
+ *
+ * 凭据记录的 key 形状是 `<scope>/<id>`：scope 是拥有记录的插件名，id 是 provider id。
+ * 这里只用到字符串字段，不导入 dsh 的 `CredentialKey` 类型，免得宿主升级变成本插件编译期故障。
+ */
+
+/** 一条 flow 给出的登录方式（多数优先法选自）。 */
+export interface AuthorizationMethod {
+  /** flow 自己的 id，begin() 时回传以指明走哪一路。 */
+  id: string
+  /** 按钮上的文案。 */
+  label: string
+}
+
+/** 一条 flow 在列表里的视图。 */
+export interface AuthorizationEntry {
+  /** 凭据记录 key（`<scope>/<provider-id>`）。 */
+  key: string
+  /** 用户看到的大标题，例如 `GitHub Copilot`。 */
+  label: string
+  /** 该 flow 提供的登录方式，多数优先。 */
+  methods: readonly AuthorizationMethod[]
+  /** 同一 key 已有 attempt 在跑：按钮置灰。 */
+  inFlight: boolean
+}
+
+/** flow 推到浏览器的提示（一次性看完即丢）。不带 secret。 */
+export interface AuthorizationNotice {
+  message: string
+  /** 用户要打开的页面。 */
+  url?: string
+  /** 用户要在页面上输入的短码（device-code flow 才有）。 */
+  code?: string
+}
+
+/** 一个 select prompt 的一个选项。 */
+export interface AuthorizationPromptOption {
+  id: string
+  label: string
+  description?: string
+}
+
+/**
+ * flow 推到浏览器的提问，浏览器需要回 `respond`。
+ *
+ * 形状对应 dsh 的 `AuthorizationPrompt`：text / secret / select 三种 kind，各自的字段集互不相交。
+ */
+export type AuthorizationPrompt = {
+  /** 只撤回这一个 prompt；attempt 本身继续。 */
+  signal?: AbortSignal
+} & ({
+  kind: 'text'
+  message: string
+  placeholder?: string
+} | {
+  kind: 'secret'
+  message: string
+  placeholder?: string
+} | {
+  kind: 'select'
+  message: string
+  options: readonly AuthorizationPromptOption[]
+})
+
+/** resolve 后写入的 prompt 答案：secret → 用户输入；text → 用户输入；select → 选项 id。 */
+export type AuthorizationResponse =
+  | { kind: 'text' | 'secret'; value: string }
+  | { kind: 'select'; value: string }
+
+/**
+ * 浏览器↔flow 之间的桥（attempt 开始时由我们实现并交给 `begin()`）。它在内存里把
+ * notice / prompt 推到 SSE 流，并阻塞 await `prompt()` 等到浏览器 respond。
+ *
+ * 关键约束：每个 attemptId 只能挂一次 `interaction.begin()`；同一个 attemptId 二次 begin
+ * 直接报 `ALREADY_IN_FLIGHT`（seed 之前：seam 会拒绝）。
+ */
+export interface AuthorizationInteraction {
+  notify(notice: AuthorizationNotice): void
+  prompt(prompt: AuthorizationPrompt): Promise<string>
+}
+
+export interface AuthorizationRequest {
+  /** 凭据记录的 key。 */
+  key: string
+  /** 走哪条 method；不传就用 flow 第一个。 */
+  method?: string
+  interaction: AuthorizationInteraction
+  /** 浏览器取消 attempt 时 abort 这个 signal，seam 会顺手收回 in-flight slot。 */
+  signal?: AbortSignal
+}
+
+/** attempt 结算状态——`failed` 只出现在事件流里，调用方看到的是抛错。 */
+export type AuthorizationOutcome = 'authorized' | 'cancelled'
+
+export interface AuthorizationService {
+  list?: () => readonly AuthorizationEntry[]
+  describe?: (key: string) => AuthorizationEntry | undefined
+  begin?: (request: AuthorizationRequest) => Promise<{ status: AuthorizationOutcome }>
+  cancel?: (key: string) => void
 }
 
 /* ---------------------------- 插件上下文 ---------------------------- */

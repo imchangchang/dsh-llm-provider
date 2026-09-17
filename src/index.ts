@@ -18,6 +18,8 @@
  * 在界面上显式操作时（添加/删除 provider）。
  */
 import Schema from '@deepseek-ai/schemastery'
+import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { activePiAiRoot, loadBridge, vendorDir } from './bridge.js'
@@ -27,11 +29,18 @@ import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes
 import { presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
 import { findSharedCredentials } from './credential-check.js'
+import { registerOAuthRoutes } from './oauth.js'
 import type { AccountStatus } from './adapters/shared.js'
 import {
   asRecord,
   readString,
   type AnyRecord,
+  type AuthorizationEntry,
+  type AuthorizationInteraction,
+  type AuthorizationNotice,
+  type AuthorizationPrompt,
+  type AuthorizationResponse,
+  type AuthorizationService,
   type CredentialsService,
   type LlmService,
   type Logger,
@@ -369,7 +378,34 @@ export function apply(ctx: PluginContext, config: unknown): void {
               if (!credential.configured) keyless.add(route.id)
             }
           } catch { /* 路由发现失败就当全部未配置 */ }
-          json(res, 200, { presets: presetsWithMeta(configured, keyless) })
+          const presets = presetsWithMeta(configured, keyless)
+          // OAuth 入口：把 authorization 服务列出的 flow 按 provider id 挂回 preset。
+          // key 是 `<scope>/<provider-id>`，scope 是拥有这条 flow 的插件（来自官方 bundle 的注册）；
+          // 这里按 provider id 后缀对齐，所以 copilot / claude / codex 这些预设能认出自己。
+          const authorization = service<AuthorizationService>('authorization')
+          if (typeof authorization?.list === 'function') {
+            try {
+              const flowsByProvider = new Map<string, AuthorizationEntry>()
+              for (const entry of authorization.list()) {
+                const slash = entry.key.lastIndexOf('/')
+                const providerId = slash < 0 ? entry.key : entry.key.slice(slash + 1)
+                flowsByProvider.set(providerId, entry)
+              }
+              for (const preset of presets) {
+                const flow = flowsByProvider.get(preset.id)
+                if (flow === undefined) continue
+                preset.oauth = {
+                  key: flow.key,
+                  label: flow.label,
+                  methods: flow.methods.map((m) => ({ id: m.id, label: m.label })),
+                  inFlight: flow.inFlight,
+                }
+              }
+            } catch (cause) {
+              logger?.warn?.(`oauth 元信息挂载失败：${messageOf(cause)}`)
+            }
+          }
+          json(res, 200, { presets })
         })()
       },
     }),
@@ -453,7 +489,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
   // （设置页按钮 → POST /provider/update），替换一律要求验证通过，见 updater.ts 头部注释。
   startBackgroundCheck(logger, bridge.ok ? bridge.piAiVersion : undefined)
 
-  logger?.info?.('dsh-llm-provider active: GET /plan/status, GET /provider/status, POST /provider/update')
+  // OAuth / device-code 登录桥：把官方 llm-pi-ai bundle 已经注册到 ctx.authorization 的 flow
+  // 暴露给浏览器端（5 条路由：flows / begin / stream / respond / cancel）。详见 ./oauth.ts 头部注释。
+  registerOAuthRoutes(ctx, webServer)
+
+  logger?.info?.('dsh-llm-provider active: GET /plan/status, GET /provider/status, POST /provider/update, /provider/oauth/*')
 }
 
 /** 读一版被跳过的记录（status.json 里的 latestRejected）。 */

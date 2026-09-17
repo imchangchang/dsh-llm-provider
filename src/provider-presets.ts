@@ -35,6 +35,17 @@ export interface ProviderPresetWithMeta extends ProviderPreset {
   configured: boolean
   /** 路由在、凭据没值：仍算已配置，但不能当成"没得可做"把补密钥的入口堵死。 */
   missingKey: boolean
+  /**
+   * OAuth 入口（来自 ctx.authorization.list）：没有就不挂字段。
+   * 客户端据此在「添加供应商」表单里多一个 "Sign in with ..." 按钮。
+   */
+  oauth?: {
+    /** 完整 credential key（`<scope>/<provider-id>`），begin() 要用。 */
+    key: string
+    label: string
+    methods: { id: string, label: string }[]
+    inFlight: boolean
+  }
 }
 
 /** buildPresets 内部累积的每 provider 信息；目录来源和 EXTRA_PRESETS 都归到这个形状。 */

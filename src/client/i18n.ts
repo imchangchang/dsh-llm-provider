@@ -7,8 +7,36 @@
 
 /** i18n 本地字典：注册失败/服务缺席时的兜底（也用于缺键回退）。语言从 <html lang> 判断。 */
 export var LOCAL_DICT: Record<'zh' | 'en', Record<string, string>> = {
-  zh: { nav: '模型服务', tabProviders: '服务商', addProvider: '＋ 添加供应商' },
-  en: { nav: 'Provider', tabProviders: 'Provider', addProvider: '＋ Add Provider' },
+  zh: {
+    nav: '模型服务',
+    tabProviders: '服务商',
+    addProvider: '＋ 添加供应商',
+    oauthSignIn: '使用 OAuth 登录',
+    oauthSignInMethod: '使用 OAuth 登录（{label}）',
+    oauthInFlight: '已在登录…',
+    oauthDialogTitle: '{label} · OAuth 登录',
+    oauthCancel: '取消',
+    oauthSubmit: '提交',
+    oauthSelectPlaceholder: '请选择',
+    oauthCancelled: '已取消',
+    oauthAuthorized: '登录成功，正在刷新卡片…',
+    oauthFailed: '登录失败：{error}',
+  },
+  en: {
+    nav: 'Provider',
+    tabProviders: 'Provider',
+    addProvider: '＋ Add Provider',
+    oauthSignIn: 'Sign in with OAuth',
+    oauthSignInMethod: 'Sign in with OAuth ({label})',
+    oauthInFlight: 'Sign-in in progress…',
+    oauthDialogTitle: '{label} · OAuth sign-in',
+    oauthCancel: 'Cancel',
+    oauthSubmit: 'Submit',
+    oauthSelectPlaceholder: 'Choose…',
+    oauthCancelled: 'Cancelled',
+    oauthAuthorized: 'Authorized, refreshing cards…',
+    oauthFailed: 'Sign-in failed: {error}',
+  },
 }
 function localT(key: string): string {
   var lang: 'zh' | 'en' = 'en'

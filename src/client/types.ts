@@ -95,6 +95,66 @@ export interface ProviderPreset {
   /** 路由在、凭据没值：仍算已配置，但下拉里不该禁选（选中就是去补密钥）。 */
   missingKey?: boolean
   custom?: boolean
+  /**
+   * OAuth 入口：preset 在 ctx.authorization 里也有 flow 才会有这个字段（来自官方 llm-pi-ai bundle）。
+   * 有它就在「添加供应商」表单里多一个 "Sign in with ..." 按钮。
+   */
+  oauth?: {
+    /** 完整 credential key（`<scope>/<provider-id>`），begin() 时回传给宿主。 */
+    key: string
+    label: string
+    methods: { id: string, label: string }[]
+    inFlight: boolean
+  }
+}
+
+/* ---------------------------- OAuth ---------------------------- */
+
+/** 浏览器侧看一条 OAuth flow：flows 接口与 preset.oauth 同形。 */
+export interface OauthMethod {
+  id: string
+  label: string
+}
+
+/** flow 推到浏览器的提示（只读一次，不带 secret）。 */
+export interface OauthNotice {
+  message: string
+  url?: string
+  code?: string
+}
+
+/** 一个 select 选项。 */
+export interface OauthPromptOption {
+  id: string
+  label: string
+  description?: string
+}
+
+/** flow 推来的提问：按 kind 决定渲染哪种输入。 */
+export type OauthPrompt =
+  | { kind: 'text', message: string, placeholder?: string }
+  | { kind: 'secret', message: string, placeholder?: string }
+  | { kind: 'select', message: string, options: readonly OauthPromptOption[] }
+
+/** SSE 推过来的事件帧：kind 决定后续动作（notice 显示、prompt 弹输入、settled 关弹窗）。 */
+export type OauthEvent =
+  | { kind: 'notice', notice: OauthNotice }
+  | { kind: 'prompt', promptId: string, prompt: OauthPrompt }
+  | { kind: 'settled', status: 'authorized' | 'cancelled' | 'failed', error?: string }
+
+/**
+ * 一次 OAuth 登录的客户端句柄：连接 SSE、转发 respond / cancel。
+ *
+ * 注意 `begin` 之后才存在 attempt；列表 / 探查走独立 API（loadOauthFlows）。
+ */
+export interface OauthAttemptClient {
+  attemptId: string
+  /** 关掉 SSE 连接（attempt 本身保留，5 分钟内可重连拿 settled 帧）。 */
+  close(): void
+  /** 用户对 prompt 的答案：服务端按 promptId 找回对应 pending resolver。 */
+  respond(promptId: string, value: string): Promise<void>
+  /** 主动撤 attempt（用户点「取消」按钮）。 */
+  cancel(): Promise<void>
 }
 
 /** 「pi-ai 桥接」明细行：piAiBridgeRows 的产出，组件照着渲染。 */
