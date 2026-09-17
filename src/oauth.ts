@@ -401,11 +401,14 @@ function respondHandler(): (req: ServerRequest, res: ServerResponse) => void {
           const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
           const attemptId = readString(parsed['attemptId'])
           const promptId = readString(parsed['promptId'])
-          const value = readString(parsed['value'])
-          if (attemptId === undefined || promptId === undefined || value === undefined) {
+          // 空字符串是**合法答案**，不能用 readString（它把 '' 当没传）：Copilot 的第一个
+          // prompt 就是「GitHub Enterprise URL/domain（blank for github.com）」。
+          const rawValue = parsed['value']
+          if (attemptId === undefined || promptId === undefined || typeof rawValue !== 'string') {
             jsonResponse(res, 400, { ok: false, error: '缺少 attemptId / promptId / value' })
             return
           }
+          const value = rawValue
           const attempt = attempts.get(attemptId)
           if (attempt === undefined) {
             jsonResponse(res, 404, { ok: false, error: `attempt 不存在或已结束` })

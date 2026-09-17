@@ -474,7 +474,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       var value: string
       if (prompt.prompt.kind === 'select') value = prev.pendingSelect
       else value = prev.pendingValue
-      if (value === '') return prev
+      // 空字符串是合法答案（Copilot 的「企业域名，留空即 github.com」），不该在这里拦；
+      // secret 那种空提交没意义，由提交按钮的 disabled 兜住。
       prev.attempt.respond(prompt.promptId, value)
         .then(function () {
           setOauth(function (latest) {
@@ -811,7 +812,7 @@ function renderOauthDialog(
               type: 'button',
               className: 'pv_action',
               style: { marginTop: '6px' },
-              disabled: state.pendingBusy || (state.prompt.prompt.kind !== 'select' && state.pendingValue === ''),
+              disabled: state.pendingBusy || (state.prompt.prompt.kind === 'secret' && state.pendingValue === ''),
               onClick: onSubmit,
             },
             t('oauthSubmit'),

@@ -509,5 +509,51 @@ await (async () => {
   }
 })()
 
+/* ----------------------------- Test 11 ----------------------------- */
+/* 空字符串是合法 prompt 答案：Copilot 的第一个 prompt 是「GitHub Enterprise URL/domain
+ * (blank for github.com)」。宿主端曾用 readString 解析 value，'' 被当成没传 → 400。 */
+
+await (async () => {
+  __oauth_reset()
+  const webServer = makeWebServer()
+  const { ctx, authorization } = makeCtx(FLOW_LIST)
+  registerOAuthRoutes(ctx, webServer)
+  let received = null
+  let markReady
+  const ready = new Promise((resolve) => { markReady = resolve })
+  authorization.begin = function (request) {
+    return new Promise(function (resolve) {
+      setImmediate(function () {
+        request.interaction.prompt({ kind: 'text', message: 'Enterprise URL/domain (blank for github.com)' })
+          .then(function (answer) { received = answer; markReady(); resolve({ status: 'authorized' }) })
+        request.signal.addEventListener('abort', function () { resolve({ status: 'cancelled' }) })
+      })
+    })
+  }
+  const beginRes = await callJson(webServer.handlers, '/provider/oauth/begin', { key: FLOW_LIST[0].key })
+  const attemptId = beginRes.body.attemptId
+  const streamRes = openStream(webServer.handlers, attemptId)
+  // 等 prompt 帧
+  await new Promise((resolve, reject) => {
+    const deadline = Date.now() + 200
+    const tick = () => {
+      if (streamRes.sseEvents().some((e) => e.kind === 'prompt')) return resolve()
+      if (Date.now() > deadline) return reject(new Error('等 prompt 超时'))
+      setTimeout(tick, 10)
+    }
+    tick()
+  })
+  const promptFrame = streamRes.sseEvents().find((e) => e.kind === 'prompt')
+  const resp = await callJson(webServer.handlers, '/provider/oauth/respond', {
+    attemptId: attemptId, promptId: promptFrame.promptId, value: '',
+  })
+  check('T11.空答案被接受', resp.body.ok, true)
+  await ready
+  check('T11.flow 收到空字符串（不是 undefined）', received === '', true)
+  await new Promise((r) => setTimeout(r, 30))
+  const settled = streamRes.sseEvents().find((e) => e.kind === 'settled')
+  check('T11.之后照常结算 authorized', settled && settled.status, 'authorized')
+})()
+
 console.log(failed ? '\n有失败用例' : '\nOAuth 测试全部通过')
 if (failed) process.exitCode = 1
