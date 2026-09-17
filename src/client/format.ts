@@ -208,6 +208,11 @@ export function quotaTipOf(account: PlanAccount | undefined | null): string | un
       continue
     }
     var text = shortWindowLabel(windows[i].window) + '余量 ' + String(windows[i].percentLeft) + '%'
+    // 绝对数字也带上：百分比看不出「300 里的 100%」还是「5 里的 100%」，
+    // 对着 GitHub 的用量页核数时这一行才用得上。
+    if (typeof windows[i].limit === 'number' && typeof windows[i].remaining === 'number') {
+      text += '（剩余 ' + String(windows[i].remaining) + '/' + String(windows[i].limit) + '）'
+    }
     if (windows[i].resetAt !== undefined && windows[i].resetAt !== '') {
       text += ' ◷ ' + resetCountdownText(windows[i].resetAt)
     }
