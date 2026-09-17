@@ -329,5 +329,57 @@ await (async () => {
   check('T6.unknown.ok=false', r.body.ok, false)
 })()
 
+/* ----------------------------- Test 7 ----------------------------- */
+/* 回归：cordis 严格模式下 ctx.get('authorization') 抛错时 registerOAuthRoutes 不能挂。
+ * 真实日志：`Error: cannot get property "authorization" without inject`，整插件起不来。
+ * authorizationOf 必须包 try/catch，把错误吞掉，降级成「啥路由都不挂 + warn」。 */
+
+await (async () => {
+  __oauth_reset()
+  const webServer = makeWebServer()
+  let warnCalled = false
+  const ctx = {
+    get: (name) => {
+      if (name === 'authorization') throw new Error('cannot get property "authorization" without inject')
+      return undefined
+    },
+    logger: () => ({
+      info() {},
+      warn: () => { warnCalled = true },
+      error() {},
+    }),
+    effect: (fn) => fn(),
+  }
+  let threw = null
+  try { registerOAuthRoutes(ctx, webServer) }
+  catch (cause) { threw = cause }
+  check('T7.cordis 抛错时不挂', threw === null, true)
+  check('T7.触发 warn', warnCalled, true)
+  check('T7.不挂 flows', webServer.handlers.has('/provider/oauth/flows'), false)
+  check('T7.不挂 begin', webServer.handlers.has('/provider/oauth/begin'), false)
+  check('T7.不挂 stream', webServer.handlers.has('/provider/oauth/stream'), false)
+  check('T7.不挂 respond', webServer.handlers.has('/provider/oauth/respond'), false)
+  check('T7.不挂 cancel', webServer.handlers.has('/provider/oauth/cancel'), false)
+})()
+
+/* ----------------------------- Test 8 ----------------------------- */
+/* ctx.get 返回 undefined：authorization 服务未注册——同样降级（啥路由都不挂）。 */
+
+await (async () => {
+  __oauth_reset()
+  const webServer = makeWebServer()
+  const ctx = {
+    get: () => undefined,
+    logger: () => ({ info() {}, warn() {}, error() {} }),
+    effect: (fn) => fn(),
+  }
+  let threw = null
+  try { registerOAuthRoutes(ctx, webServer) }
+  catch (cause) { threw = cause }
+  check('T8.未挂载时不挂', threw === null, true)
+  check('T8.不挂 flows', webServer.handlers.has('/provider/oauth/flows'), false)
+  check('T8.不挂 begin', webServer.handlers.has('/provider/oauth/begin'), false)
+})()
+
 console.log(failed ? '\n有失败用例' : '\nOAuth 测试全部通过')
 if (failed) process.exitCode = 1
