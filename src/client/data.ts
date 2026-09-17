@@ -9,6 +9,9 @@ import type {
   CatalogModel,
   ModelDetail,
   ModelSelection,
+  OauthAttemptClient,
+  OauthEvent,
+  OauthMethod,
   PlanAccount,
   ProjectionCell,
   SessionsFace,
@@ -363,4 +366,171 @@ export function findModel(groups: CatalogGroup[], providerId: string, modelId: s
     if (group.models[j].id === modelId) return group.models[j]
   }
   return undefined
+}
+
+/* ---------------------------- OAuth ---------------------------- */
+
+/**
+ * 把宿主从 ctx.authorization 同步出来的 flow 列出来：现在主要走 /provider/presets 里
+ * preset.oauth；这条独立接口留给"加卡片时主动探一下能不能 OAuth"的场景。
+ */
+export function loadOauthFlows(): Promise<{ key: string, label: string, methods: OauthMethod[], inFlight: boolean }[]> {
+  return getJson('/provider/oauth/flows').then(function (payload) {
+    var flows: { key: string, label: string, methods: OauthMethod[], inFlight: boolean }[] = []
+    if (payload === null || typeof payload !== 'object') return flows
+    var record = payload as AnyRecord
+    if (!Array.isArray(record.flows)) return flows
+    for (var i = 0; i < record.flows.length; i += 1) {
+      var entry = record.flows[i] as AnyRecord
+      if (typeof entry.key !== 'string') continue
+      var methodsRaw = Array.isArray(entry.methods) ? entry.methods : []
+      var methods: OauthMethod[] = []
+      for (var m = 0; m < methodsRaw.length; m += 1) {
+        var methodRecord = methodsRaw[m] as AnyRecord
+        if (typeof methodRecord.id === 'string') {
+          methods.push({
+            id: methodRecord.id,
+            label: typeof methodRecord.label === 'string' ? methodRecord.label : methodRecord.id,
+          })
+        }
+      }
+      flows.push({
+        key: entry.key,
+        label: typeof entry.label === 'string' ? entry.label : entry.key,
+        methods: methods,
+        inFlight: entry.inFlight === true,
+      })
+    }
+    return flows
+  })
+}
+
+/**
+ * 解析一条 SSE `data:` 帧为事件对象。事件格式：宿主端 `oauth.ts` 写入的 `data: <json>\n\n`。
+ * 不是事件帧（retry: / 空帧 / 注释）返回 undefined。
+ */
+export function parseOauthFrame(payload: string): OauthEvent | undefined {
+  var text = payload === '' ? '' : payload
+  if (text.indexOf('data:') !== 0) return undefined
+  var rest = text.slice(5).trim()
+  if (rest === '') return undefined
+  try {
+    var parsed = JSON.parse(rest) as AnyRecord
+    var kind = parsed.kind
+    if (kind === 'notice') {
+      var notice = parsed.notice as AnyRecord
+      if (notice === null || typeof notice !== 'object') return undefined
+      return {
+        kind: 'notice',
+        notice: {
+          message: typeof notice.message === 'string' ? notice.message : '',
+          url: typeof notice.url === 'string' ? notice.url : undefined,
+          code: typeof notice.code === 'string' ? notice.code : undefined,
+        },
+      }
+    }
+    if (kind === 'prompt') {
+      var prompt = parsed.prompt as AnyRecord
+      var promptId = typeof parsed.promptId === 'string' ? parsed.promptId : ''
+      if (promptId === '' || prompt === null || typeof prompt !== 'object') return undefined
+      var promptKind = prompt.kind
+      if (promptKind === 'text' || promptKind === 'secret') {
+        return {
+          kind: 'prompt',
+          promptId: promptId,
+          prompt: {
+            kind: promptKind,
+            message: typeof prompt.message === 'string' ? prompt.message : '',
+            placeholder: typeof prompt.placeholder === 'string' ? prompt.placeholder : undefined,
+          },
+        }
+      }
+      if (promptKind === 'select') {
+        var opts = Array.isArray(prompt.options) ? prompt.options : []
+        var options: { id: string, label: string, description?: string }[] = []
+        for (var o = 0; o < opts.length; o += 1) {
+          var opt = opts[o] as AnyRecord
+          if (typeof opt.id === 'string') {
+            options.push({
+              id: opt.id,
+              label: typeof opt.label === 'string' ? opt.label : opt.id,
+              description: typeof opt.description === 'string' ? opt.description : undefined,
+            })
+          }
+        }
+        return {
+          kind: 'prompt',
+          promptId: promptId,
+          prompt: { kind: 'select', message: typeof prompt.message === 'string' ? prompt.message : '', options: options },
+        }
+      }
+      return undefined
+    }
+    if (kind === 'settled') {
+      var status = parsed.status
+      if (status !== 'authorized' && status !== 'cancelled' && status !== 'failed') return undefined
+      var result: OauthEvent = {
+        kind: 'settled',
+        status: status,
+        error: typeof parsed.error === 'string' ? parsed.error : undefined,
+      }
+      return result
+    }
+    return undefined
+  } catch (cause) {
+    return undefined
+  }
+}
+
+/**
+ * 起一次 OAuth 登录：POST begin → 拿 attemptId → 开 EventSource 接收事件。
+ *
+ * @param key - flow 的 credential key（`<scope>/<provider-id>`）。
+ * @param method - flow 提供的 method id；不传用第一个。
+ * @param onEvent - 每收一个事件回调；settled 事件**也会**在这里再发一次。
+ * @returns attempt 句柄，外部点「取消」/关弹窗调 cancel() 或 close()。
+ */
+export function startOauthAttempt(
+  key: string,
+  method: string | undefined,
+  onEvent: (event: OauthEvent) => void,
+): Promise<OauthAttemptClient> {
+  return postJson('/provider/oauth/begin', { key: key, method: method === undefined ? undefined : method }).then(function (body) {
+    var record = body === null || typeof body !== 'object' ? {} : (body as AnyRecord)
+    if (record.ok !== true || typeof record.attemptId !== 'string') {
+      var message = typeof record.error === 'string' ? record.error : 'OAuth attempt 起不来'
+      throw new Error(message)
+    }
+    var attemptId = record.attemptId
+    var source: EventSource | undefined
+    try {
+      source = new EventSource('/provider/oauth/stream?attemptId=' + encodeURIComponent(attemptId))
+    } catch (cause) {
+      throw cause instanceof Error ? cause : new Error(String(cause))
+    }
+    source.onmessage = function (ev: MessageEvent<string>): void {
+      var event = parseOauthFrame(typeof ev.data === 'string' ? ev.data : '')
+      if (event !== undefined) onEvent(event)
+    }
+    source.onerror = function (): void {
+      // EventSource 不可恢复错误（流断、404），关掉就好。已 settled 的 attempt 也会触发，
+      // 但因为服务端在 settled 后会 end 流，EventSource 视作正常关，不必报。
+      if (source !== undefined) source.close()
+    }
+    return {
+      attemptId: attemptId,
+      close: function () {
+        if (source !== undefined) source.close()
+      },
+      respond: function (promptId: string, value: string) {
+        return postJson('/provider/oauth/respond', { attemptId: attemptId, promptId: promptId, value: value })
+          .then(function () { return undefined })
+      },
+      cancel: function () {
+        if (source !== undefined) source.close()
+        return postJson('/provider/oauth/cancel', { attemptId: attemptId })
+          .then(function () { return undefined })
+      },
+    }
+  })
 }
