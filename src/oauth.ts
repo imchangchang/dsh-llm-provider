@@ -1,0 +1,519 @@
+/**
+ * OAuth / device-code 登录桥：把宿主 `ctx.authorization` 服务暴露给浏览器端。
+ *
+ * 宿主已经有完整的 flow 注册（来自官方 llm-pi-ai bundle 的 `registerPiAiFlows`，覆盖 31 个
+ * api-key + 6 个 subscription + Codex-only-OAuth），但官方没有把 notice/prompt 推给浏览器的
+ * wire（见 reference/dsh-src/.agents/notes/implemented/architecture/2026-08-13-credential-records-and-authorization-flows.md
+ * "尚未包含的是界面"那段）。本模块补这一段：五条 HTTP 路由把 begin/notify/prompt/respond/cancel
+ * 接出去，浏览器通过 EventSource 拿到实时事件，POST respond 把答案送回去。
+ *
+ * 设计要点：
+ *   - attempt 由 begin() 一次性创建并立刻返回 attemptId；flow 跑在后台，不阻塞 begin 响应。
+ *   - attempt 状态全部在内存里（attemptId → Attempt），不持久化：刷新页面会丢，
+ *     与 dsh-authorization 的"attempt 不可持久"约束对齐（包 README 明文）。
+ *   - 浏览器↔flow 走 SSE（Content-Type: text/event-stream）；event bus 用 Node EventEmitter。
+ *   - prompt 响应把 attempt 闭锁续到用户点击；同一 attempt 的 prompt 一个接一个关。
+ *   - sweep 每分钟清理 5 分钟没活动的 attempt，避免客户端断开后内存泄漏。
+ */
+import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
+import {
+  asRecord,
+  readString,
+  type AnyRecord,
+  type AuthorizationEntry,
+  type AuthorizationInteraction,
+  type AuthorizationNotice,
+  type AuthorizationPrompt,
+  type AuthorizationResponse,
+  type AuthorizationService,
+  type Logger,
+  type PluginContext,
+  type ServerRequest,
+  type ServerResponse,
+  type WebServerService,
+} from './types.js'
+
+/** 5 分钟未活动 → sweep 干掉 attempt。refresh 页面、问句早关都是这条路径。 */
+const ATTEMPT_TTL_MS = 5 * 60 * 1000
+
+/** sweep 周期：60 秒一次。不 unref() 会拦 dsh 关停。 */
+const SWEEP_INTERVAL_MS = 60_000
+
+/** 推给浏览器的事件帧。kind 决定渲染路径：notice = 提示，prompt = 提问（要 respond），settled = 结束。 */
+export type OAuthAttemptEvent =
+  | { kind: 'notice', notice: AuthorizationNotice }
+  | { kind: 'prompt', promptId: string, prompt: AuthorizationPrompt }
+  | { kind: 'settled', status: 'authorized' | 'cancelled' | 'failed', error?: string }
+
+/** 一条 flow 的 interaction 闭包：pendingPrompts 持有 prompt 的 resolver，browser respond 时取出来。 */
+interface PendingPrompt {
+  resolve: (value: string) => void
+  reject: (error: Error) => void
+}
+
+/** 一个 attempt 的全部状态。 */
+interface OAuthAttempt {
+  id: string
+  key: string
+  method: string
+  controller: AbortController
+  bus: EventEmitter
+  pendingPrompts: Map<string, PendingPrompt>
+  settled: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string }
+  createdAt: number
+}
+
+const attempts = new Map<string, OAuthAttempt>()
+
+/** 同一个 key 同时只允许一个 attempt。seam 本身也会拒（ALREADY_IN_FLIGHT），我们这里只是先发制人。 */
+const keyToAttempt = new Map<string, string>()
+
+/**
+ * 把 attempt 状态推给事件总线（bus）。SSE handler 监听这一条把帧写到 socket。
+ * 幂等：bus 已 emit 过同一事件的，attempts 已 settled 时不再 emit。
+ */
+function push(attempt: OAuthAttempt, event: OAuthAttemptEvent): void {
+  attempt.bus.emit('event', event)
+}
+
+/**
+ * 给 attempt 一个终局：写 settled、把还在等的 prompt 都 reject 掉、发 settled 帧、关事件总线。
+ * 同一 attempt 多次 settle 是 no-op（seam 上层不会重发，promise settle 后我们也不再动）。
+ */
+function settle(attempt: OAuthAttempt, status: 'authorized' | 'cancelled' | 'failed', error?: string): void {
+  if (attempt.settled !== undefined) return
+  attempt.settled = { status, error }
+  for (const [promptId, pending] of attempt.pendingPrompts) {
+    pending.reject(new Error(`attempt 已结算（${status}${error === undefined ? '' : '：' + error}）`))
+    attempt.pendingPrompts.delete(promptId)
+  }
+  push(attempt, { kind: 'settled', status, error })
+  attempt.bus.emit('closed')
+}
+
+/** 构建 AuthorizationInteraction：notify 直接转发，prompt 推到 bus 上等浏览器 respond。 */
+function interactionOf(attempt: OAuthAttempt): AuthorizationInteraction {
+  return {
+    notify(notice: AuthorizationNotice): void {
+      push(attempt, { kind: 'notice', notice })
+    },
+    async prompt(prompt: AuthorizationPrompt): Promise<string> {
+      // signal：flow 端撤回本条 prompt（保留 attempt）。signal 一旦 abort，pending 不 resolve，
+      // 但下面 await 拿到的 promise 会转 reject，由 seam / dsh prompt 类型保证。
+      const promptId = randomUUID()
+      return await new Promise<string>((resolve, reject) => {
+        const onAbort = (): void => {
+          attempt.pendingPrompts.delete(promptId)
+          reject(new Error('prompt 已被撤回'))
+        }
+        if (prompt.signal?.aborted === true) {
+          onAbort()
+          return
+        }
+        attempt.pendingPrompts.set(promptId, { resolve, reject })
+        prompt.signal?.addEventListener('abort', onAbort, { once: true })
+        push(attempt, { kind: 'prompt', promptId, prompt })
+      })
+    },
+  }
+}
+
+/** 拿到宿主 authorization 服务（不直引它的类型，按 dsh 暴露的形状就地取）。 */
+function authorizationOf(ctx: PluginContext): AuthorizationService | undefined {
+  const candidate = ctx.get?.('authorization') ?? ctx['authorization']
+  return candidate === null || typeof candidate !== 'object' ? undefined : candidate as AuthorizationService
+}
+
+/** SSE 帧编码：data: <json>\n\n；retry 在第一帧发，告诉 EventSource 多久后重连。 */
+function sseFrame(event: OAuthAttemptEvent | 'retry'): string {
+  if (event === 'retry') return 'retry: 10000\n\n'
+  return `data: ${JSON.stringify(event)}\n\n`
+}
+
+/**
+ * GET /provider/oauth/stream?attemptId=<id> —— SSE 流，推 notice / prompt 等事件。
+ *
+ * 已 settled 的 attempt 立刻回 settled 帧再 end。in-flight 的 attempt 持续推帧直到 closed。
+ */
+function streamHandler(logger: Logger | undefined): (req: ServerRequest, res: ServerResponse) => void {
+  return (req, res) => {
+    const query = readString(asRecord(parseQuery(req.url))['attemptId'])
+    if (query === undefined) {
+      res.writeHead(400)
+      res.end()
+      return
+    }
+    const attempt = attempts.get(query)
+    if (attempt === undefined) {
+      res.writeHead(404)
+      res.end()
+      return
+    }
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      'connection': 'keep-alive',
+    })
+    res.write(sseFrame('retry'))
+    if (attempt.settled !== undefined) {
+      // 已结束：把最终那一帧再发一遍然后关。重新连上的浏览器也能拿到结论。
+      res.write(sseFrame({ kind: 'settled', status: attempt.settled.status, error: attempt.settled.error }))
+      res.end()
+      return
+    }
+    const onEvent = (event: OAuthAttemptEvent): void => {
+      try { res.write(sseFrame(event)) } catch { /* socket closed mid-write */ }
+    }
+    const onClosed = (): void => {
+      try { res.end() } catch { /* already ended */ }
+    }
+    attempt.bus.on('event', onEvent)
+    attempt.bus.once('closed', onClosed)
+    // 浏览器断网 / 关页：清掉 listener，别再往死 socket 写。**不**撤 attempt——
+    // 用户可能只是切到另一个窗口看 device code，回来了继续。
+    const cleanup = (): void => {
+      attempt.bus.off('event', onEvent)
+      attempt.bus.off('closed', onClosed)
+    }
+    req.on('end', cleanup)
+    req.on('close', cleanup)
+  }
+}
+
+/**
+ * 起一个 attempt：创建状态、注册 interaction、后台跑 begin()。
+ *
+ * 流：
+ *   1. 检查同 key 是否已有 attempt：有就 409。
+ *   2. 写 attempt 入 maps，立即返回 attemptId。
+ *   3. 后台 `authorization.begin({ key, method, interaction, signal })`：success → settle 'authorized'，
+ *      catch：controller.signal.aborted → 'cancelled'，否则 → 'failed'。
+ *
+ * 错误时 attempt 仍写到 maps（前端可以 stream 拿到 settled），begin 响应只放尝试开始这一步的成功/失败。
+ */
+function beginHandler(
+  ctx: PluginContext,
+  authorization: AuthorizationService,
+): (req: ServerRequest, res: ServerResponse) => void {
+  return (req, res) => {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' })
+      res.end()
+      return
+    }
+    let body = ''
+    req.on('data', (chunk) => { body += String(chunk) })
+    req.on('end', () => {
+      void (async () => {
+        try {
+          const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
+          const key = readString(parsed['key'])
+          const method = readString(parsed['method'])
+          if (key === undefined) {
+            jsonResponse(res, 400, { ok: false, error: '缺少 key' })
+            return
+          }
+          if (typeof authorization.begin !== 'function') {
+            jsonResponse(res, 500, { ok: false, error: '宿主 authorization 服务不可用' })
+            return
+          }
+          if (keyToAttempt.has(key)) {
+            jsonResponse(res, 409, { ok: false, error: '同 key 已有 attempt 在跑' })
+            return
+          }
+          // 先问 dsh 拿一个 entry；begin 不存在的 key 它会抛 NO_FLOW，错误信息更准。
+          const entry = typeof authorization.describe === 'function' ? authorization.describe(key) : undefined
+          if (entry === undefined) {
+            jsonResponse(res, 404, { ok: false, error: `没有为 ${key} 注册的 OAuth flow` })
+            return
+          }
+          const chosen = method === undefined
+            ? (entry.methods[0]?.id)
+            : (entry.methods.find((m) => m.id === method)?.id ?? method)
+          const attempt: OAuthAttempt = {
+            id: randomUUID(),
+            key,
+            method: chosen,
+            controller: new AbortController(),
+            bus: new EventEmitter(),
+            pendingPrompts: new Map(),
+            settled: undefined,
+            createdAt: Date.now(),
+          }
+          attempts.set(attempt.id, attempt)
+          keyToAttempt.set(key, attempt.id)
+          jsonResponse(res, 200, { ok: true, attemptId: attempt.id, method: chosen, methods: entry.methods })
+          // 后台开跑。**不要 await** —— respond 已经在上面发了，再 await 会卡住下一次 req。
+          runAttempt(ctx, authorization, attempt).catch((cause: unknown) => {
+            const message = cause instanceof Error ? cause.message : String(cause)
+            settle(attempt, 'failed', message)
+          })
+        } catch (error) {
+          jsonResponse(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    })
+  }
+}
+
+/** attempt 后台主体：调 begin、settle、清掉 maps。runAttempt 由 beginHandler 调。 */
+async function runAttempt(
+  ctx: PluginContext,
+  authorization: AuthorizationService,
+  attempt: OAuthAttempt,
+): Promise<void> {
+  const logger = ctx.logger
+  try {
+    const outcome = await authorization.begin!({
+      key: attempt.key,
+      method: attempt.method,
+      interaction: interactionOf(attempt),
+      signal: attempt.controller.signal,
+    })
+    settle(attempt, outcome.status)
+  } catch (cause) {
+    const cancelled = attempt.controller.signal.aborted
+    const message = cause instanceof Error ? cause.message : String(cause)
+    if (typeof logger === 'function') {
+      const log = logger('provider')
+      log[cancelled ? 'info' : 'warn']?.(
+        `${cancelled ? 'cancelled' : 'failed'}: ${attempt.key} — ${message}`,
+      )
+    }
+    settle(attempt, cancelled ? 'cancelled' : 'failed', message)
+  } finally {
+    // 让 begin 的下一次请求可以重开 attempt；不清 EventEmitter 引用会随 attempt 一起被 GC。
+    keyToAttempt.delete(attempt.key)
+    // settled 已写，attempts 留给 SSE handler 追一条 settled 帧用：通常 SSE 会立刻看到 closed，
+    // 5 分钟 TTL 后 sweep 会把 attempts 里这条删掉。保留到 TTL 是为了浏览器刷新页面能拿到结论。
+  }
+}
+
+/** POST /provider/oauth/respond body { attemptId, promptId, value } —— 浏览器对 prompt 的回应。 */
+function respondHandler(): (req: ServerRequest, res: ServerResponse) => void {
+  return (req, res) => {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' })
+      res.end()
+      return
+    }
+    let body = ''
+    req.on('data', (chunk) => { body += String(chunk) })
+    req.on('end', () => {
+      void (async () => {
+        try {
+          const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
+          const attemptId = readString(parsed['attemptId'])
+          const promptId = readString(parsed['promptId'])
+          const value = readString(parsed['value'])
+          if (attemptId === undefined || promptId === undefined || value === undefined) {
+            jsonResponse(res, 400, { ok: false, error: '缺少 attemptId / promptId / value' })
+            return
+          }
+          const attempt = attempts.get(attemptId)
+          if (attempt === undefined) {
+            jsonResponse(res, 404, { ok: false, error: `attempt 不存在或已结束` })
+            return
+          }
+          const pending = attempt.pendingPrompts.get(promptId)
+          if (pending === undefined) {
+            jsonResponse(res, 409, { ok: false, error: 'prompt 不在等待中（已结算 / 已撤回）' })
+            return
+          }
+          attempt.pendingPrompts.delete(promptId)
+          pending.resolve(value)
+          jsonResponse(res, 200, { ok: true })
+        } catch (error) {
+          jsonResponse(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    })
+  }
+}
+
+/** POST /provider/oauth/cancel body { attemptId } —— 浏览器点「取消」撤 attempt。 */
+function cancelHandler(
+  authorization: AuthorizationService,
+): (req: ServerRequest, res: ServerResponse) => void {
+  return (req, res) => {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { allow: 'POST' })
+      res.end()
+      return
+    }
+    let body = ''
+    req.on('data', (chunk) => { body += String(chunk) })
+    req.on('end', () => {
+      void (async () => {
+        try {
+          const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
+          const attemptId = readString(parsed['attemptId'])
+          if (attemptId === undefined) {
+            jsonResponse(res, 400, { ok: false, error: '缺少 attemptId' })
+            return
+          }
+          const attempt = attempts.get(attemptId)
+          if (attempt === undefined) {
+            jsonResponse(res, 404, { ok: false, error: `attempt 不存在` })
+            return
+          }
+          if (attempt.settled !== undefined) {
+            jsonResponse(res, 200, { ok: true, already: attempt.settled.status })
+            return
+          }
+          // 优先走 authorization.cancel(key)：seam 主动清掉 in-flight slot，比单纯 abort signal 更干净。
+          if (typeof authorization.cancel === 'function') {
+            try { authorization.cancel(attempt.key) } catch { /* fallback 到 abort */ }
+          }
+          attempt.controller.abort()
+          jsonResponse(res, 200, { ok: true })
+        } catch (error) {
+          jsonResponse(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+        }
+      })()
+    })
+  }
+}
+
+/** GET /provider/oauth/flows —— 列所有已注册的 flow，浏览器勾选 OAuth provider 用。 */
+function listHandler(authorization: AuthorizationService): (req: ServerRequest, res: ServerResponse) => void {
+  return (_req, res) => {
+    try {
+      const list: readonly AuthorizationEntry[] = typeof authorization.list === 'function'
+        ? authorization.list()
+        : []
+      const flows = list.map((entry) => ({
+        key: entry.key,
+        label: entry.label,
+        methods: entry.methods,
+        inFlight: entry.inFlight,
+      }))
+      jsonResponse(res, 200, { ok: true, flows })
+    } catch (error) {
+      jsonResponse(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+}
+
+/** 简化的 URL query 解析：只要 attemptId 这一项，其它不要。 */
+function parseQuery(url: string | undefined): AnyRecord {
+  if (typeof url !== 'string') return {}
+  const qIndex = url.indexOf('?')
+  if (qIndex < 0) return {}
+  const search = url.slice(qIndex + 1)
+  const out: AnyRecord = {}
+  for (const segment of search.split('&')) {
+    if (segment === '') continue
+    const eq = segment.indexOf('=')
+    if (eq < 0) out[decodeURIComponent(segment)] = ''
+    else out[decodeURIComponent(segment.slice(0, eq))] = decodeURIComponent(segment.slice(eq + 1))
+  }
+  return out
+}
+
+function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
+  if (res.headersSent !== true) {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  }
+  res.end(JSON.stringify(body))
+}
+
+/* ------------------------------------------------------------------ *
+ * 测试钩：暴露 attempt 池与一个伪造 interaction 的工具，让 test/*.mjs
+ * 能注入自家 flow，不用真的 dsh 跑 device code。
+ * ------------------------------------------------------------------ */
+
+export interface OAuthTestHook {
+  attempts: Map<string, OAuthAttempt>
+  keyToAttempt: Map<string, string>
+  /**
+   * 构造一个会注入自定义 interaction 的 begin 实现，绕过 `authorization.begin`。
+   * 测试把 `authorization.begin` 指向这个函数即可模拟 dsh 的行为。
+   */
+  fakeBegin(
+    attemptId: string,
+    options: { resolveAfter?: number, reject?: 'cancel' | 'fail' },
+  ): Promise<{ status: 'authorized' | 'cancelled' }>
+}
+
+export function __testHook(): OAuthTestHook {
+  return {
+    attempts,
+    keyToAttempt,
+    fakeBegin(attemptId, options) {
+      const attempt = attempts.get(attemptId)
+      if (attempt === undefined) return Promise.reject(new Error(`attempt ${attemptId} 不存在`))
+      const delay = options.resolveAfter ?? 0
+      return new Promise((resolve, reject) => {
+        const trigger = (): void => {
+          if (options.reject === 'cancel') {
+            attempt.controller.abort()
+            // 模拟 seam：abort 后 resolve 成 cancelled
+            resolve({ status: 'cancelled' })
+          } else if (options.reject === 'fail') {
+            reject(new Error('simulated failure'))
+          } else {
+            resolve({ status: 'authorized' })
+          }
+        }
+        if (delay === 0) trigger()
+        else setTimeout(trigger, delay)
+      })
+    },
+  }
+}
+
+/** 仅测试用：尝试池大小（用于断言 attempt 是否被回收）。 */
+export function __oauth_attempt_count(): number {
+  return attempts.size
+}
+
+/** 仅测试用：取一条 attempt 看 settled 状态（强类型）。 */
+export function __oauth_attempt(id: string): { settled: undefined | { status: string, error?: string } } | undefined {
+  const attempt = attempts.get(id)
+  return attempt === undefined ? undefined : { settled: attempt.settled }
+}
+
+/** 仅测试用：清空 attempt 池（测试间隔离）。 */
+export function __oauth_reset(): void {
+  for (const a of attempts.values()) a.controller.abort()
+  attempts.clear()
+  keyToAttempt.clear()
+}
+
+/**
+ * 注册全部 OAuth 路由。会话里没 authorization 服务（少数 headless / 不带 credentials 包的组合）
+ * 就只挂 list，list 会回 500，避免路径冲突导致其他路由挂不上。
+ *
+ * @param ctx - 插件上下文，用来读 `ctx.authorization` 与 `ctx.logger`。
+ * @param webServer - 宿主 webserver 服务，路由挂在它上面。
+ */
+export function registerOAuthRoutes(ctx: PluginContext, webServer: WebServerService): void {
+  const authorization = authorizationOf(ctx)
+  const logger = ctx.logger
+  const log = typeof logger === 'function' ? logger('provider') : undefined
+  if (authorization === undefined) {
+    log?.warn?.('oauth 路由未注册：宿主 authorization 服务不可用（该 dsh 组合可能未挂 credentials/authorization）')
+    return
+  }
+  // sweep 周期清理 TTL 到期的 attempt，不阻塞 dsh 关停。
+  const sweeper = setInterval(() => {
+    const cutoff = Date.now() - ATTEMPT_TTL_MS
+    for (const [id, attempt] of attempts) {
+      if (attempt.createdAt < cutoff) {
+        attempt.controller.abort()
+        if (attempt.settled === undefined) settle(attempt, 'cancelled', 'attempt 超时未活动')
+        attempts.delete(id)
+      }
+    }
+  }, SWEEP_INTERVAL_MS)
+  sweeper.unref?.()
+
+  webServer.register({ kind: 'exact', path: '/provider/oauth/flows', handler: listHandler(authorization) })
+  webServer.register({ kind: 'exact', path: '/provider/oauth/begin', handler: beginHandler(ctx, authorization) })
+  webServer.register({ kind: 'exact', path: '/provider/oauth/stream', handler: streamHandler(log) })
+  webServer.register({ kind: 'exact', path: '/provider/oauth/respond', handler: respondHandler() })
+  webServer.register({ kind: 'exact', path: '/provider/oauth/cancel', handler: cancelHandler(authorization) })
+  log?.info?.('oauth 路由已挂载（flows / begin / stream / respond / cancel）')
+}
