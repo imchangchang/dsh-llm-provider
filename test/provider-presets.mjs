@@ -34,9 +34,22 @@ check('每项 id 都是 kebab-case', presets.every((p) => /^[a-z][a-z0-9]*(-[a-z
 check('自定义网关带协议', last.api === 'openai-completions')
 check('目录 provider 一律不带协议', named.every((p) => p.api === undefined))
 
+// 但目录里这家到底有几种协议要报出来（`apis`）：界面靠它决定「路由写死了协议」要不要报警——
+// 单协议写对是白报（用户会去点一个没必要的修正按钮），多协议或跟目录不一致才是真问题。
+const presetOf = (id) => presets.find((p) => p.id === id)
+check('自建网关没有目录协议（apis 空）', Array.isArray(last.apis) && last.apis.length === 0)
+if (presetOf('deepseek') !== undefined) {
+  check('deepseek 单协议（apis 只有一个）', presetOf('deepseek').apis.length === 1)
+}
+if (presetOf('github-copilot') !== undefined) {
+  check('github-copilot 多协议（apis 不止一个）', presetOf('github-copilot').apis.length > 1)
+}
+if (presetOf('openrouter') !== undefined) {
+  check('openrouter 多协议', presetOf('openrouter').apis.length > 1)
+}
+
 // OAuth-only 判定来自 pi-ai 元数据（有 oauth、没有 apiKey），只留一条有理由的例外：
 // Copilot 的 apiKey 路径是个手填 token 的框，那种 token 用户拿不到，界面上当 OAuth-only。
-const presetOf = (id) => presets.find((p) => p.id === id)
 if (presetOf('openai-codex') !== undefined) {
   check('openai-codex（元数据只有 oauth）是 OAuth-only', presetOf('openai-codex').oauthOnly === true)
 }

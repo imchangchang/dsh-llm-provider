@@ -32,6 +32,12 @@ export interface ProviderPreset {
    * 按模型决定。客户端只在 custom 的那条上渲染协议选择框。
    */
   api: string | undefined
+  /**
+   * 目录里这家出现过的协议（去重、排序）。界面用它判断「路由写死了协议」到底要不要报：
+   * 一家多协议时写死必然发错一批（Copilot 三个协议）；单协议时写死跟目录一致就无害，
+   * 跟目录不一致才是真错（用户手填错了）。自建网关没有目录，是空数组。
+   */
+  apis: string[]
   apiKeyEnv: string
   websiteUrl: string | undefined
   models: number
@@ -72,6 +78,8 @@ interface PresetSource {
   api?: string | undefined
   baseURL?: string
   models?: number
+  /** 目录里这家出现过的协议（去重）。一家多协议时「路由写死一个协议」才是问题。 */
+  apis?: Set<string>
   label?: string
   custom?: boolean
 }
@@ -139,6 +147,7 @@ function makePreset(id: string, info: PresetSource): ProviderPreset {
     apiKeyEnv: keyEnvOf(id),
     websiteUrl: websiteOf(id),
     models: typeof info.models === 'number' ? info.models : 0,
+    apis: [...(info.apis ?? [])].sort(),
     billing: findAdapter(id, baseURL) !== undefined,
     custom: info.custom === true,
     oauthOnly: oauthOnlyOf(id),
@@ -155,6 +164,8 @@ export function buildPresets(): ProviderPreset[] {
       byProvider.set(detail.provider, current)
     }
     current.models = (current.models ?? 0) + 1
+    current.apis ??= new Set<string>()
+    current.apis.add(detail.api)
     if (current.baseURL === '' && typeof detail.baseUrl === 'string') current.baseURL = detail.baseUrl
   }
   const presets: ProviderPreset[] = []

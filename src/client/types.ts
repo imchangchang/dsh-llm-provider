@@ -93,6 +93,8 @@ export interface ProviderPreset {
   label: string
   baseURL?: string
   api?: string
+  /** 目录里这家出现过的协议（去重）：多协议时路由写死一个必然发错一批。 */
+  apis?: string[]
   apiKeyEnv?: string
   /** 已经通过 OAuth 登录过：卡片显示登录状态，不再摆密钥输入框。 */
   oauthAuthorized?: boolean

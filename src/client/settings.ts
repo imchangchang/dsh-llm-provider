@@ -1444,6 +1444,19 @@ export function ProviderSettingsSection() {
     }
     return false
   }
+  /**
+   * 目录里这家出现过哪些协议（预设响应里的 `apis`）。空数组 = 目录里没这家或没有协议信息。
+   * @param routeId - 路由 id。
+   */
+  function apisOfRoute(routeId: string): string[] {
+    for (var pi = 0; pi < presets.length; pi += 1) {
+      if (presets[pi].id === routeId) {
+        var list = presets[pi].apis
+        return Array.isArray(list) ? list : []
+      }
+    }
+    return []
+  }
   var modelsByProvider: Record<string, CatalogModel[]> = {}
   for (var gi = 0; gi < catalogGroups.length; gi += 1) {
     modelsByProvider[catalogGroups[gi].id] = catalogGroups[gi].models
@@ -1587,17 +1600,26 @@ export function ProviderSettingsSection() {
         // 账号声明的可用模型（OAuth 登录时 pi-ai 记下的）：卡片列的是 pi-ai 静态目录，
         // 与实际权益不是一回事（Copilot 目录 28 个、账号只有 6 个能用），按清单过滤一次，
         // 免得卡片吹的模型数跟选择器里能选的对不上。
-        // 路由写死 api 的告警：官方适配器里 `request.api ?? base?.api ?? routeApi`，
-        // 路由的 api 覆盖每个模型自己的协议。pi-ai 目录里的 provider 往往是多协议的
-        // （Copilot：claude 走 anthropic、gpt-5.x 走 responses、gemini 走 completions），
-        // 写死一个就会让另一批发错端点、报 400。目录能给出 base?.api，删掉这个字段即可。
-        if (typeof account.api === 'string' && account.api !== '' && knownCatalogRoute(account.id)) {
+        // 路由写死 api 的告警：官方适配器里 `request.api ?? base?.api ?? routeApi`，路由的 api
+        // 覆盖每个模型自己的协议。分两种情况，别一律报警（DeepSeek 这类单协议 provider 写对了
+        // 是白报，用户会去点一个没必要的修正按钮）：
+        //   - 目录多协议（Copilot：claude 走 anthropic、gpt-5.x 走 responses）：写死必然让另一
+        //     批发错端点、报 400。
+        //   - 目录单协议但写死的跟它不一致：那是真配错了，照样发错。
+        var pinnedApi = typeof account.api === 'string' && account.api !== '' ? account.api : undefined
+        var catalogApis = apisOfRoute(account.id)
+        var apiPinnedWrong = pinnedApi !== undefined && knownCatalogRoute(account.id)
+          && (catalogApis.length > 1 || (catalogApis.length === 1 && catalogApis[0] !== pinnedApi))
+        if (apiPinnedWrong) {
           bodyRows.push(
             react.createElement(
               'div',
               { className: 'plan_note plan_warnText', key: 'api-pinned' },
-              '这条路由写死了协议（' + String(account.api) + '），会覆盖每个模型自己的协议；'
-              + '这类 provider 的目录是多协议的，写死会让一部分模型发出 400。',
+              catalogApis.length > 1
+                ? '这条路由写死了协议（' + String(pinnedApi) + '），会覆盖每个模型自己的协议；'
+                  + '这家目录是多协议的（' + catalogApis.join(' / ') + '），写死会让一部分模型发出 400。'
+                : '这条路由写死的协议（' + String(pinnedApi) + '）跟目录里的（' + catalogApis[0] + '）不一致，'
+                  + '发送会走错协议。',
               react.createElement(
                 'button',
                 {
