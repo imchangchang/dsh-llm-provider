@@ -128,8 +128,22 @@ function interactionOf(attempt: OAuthAttempt): AuthorizationInteraction {
 
 /** 拿到宿主 authorization 服务（不直引它的类型，按 dsh 暴露的形状就地取）。 */
 function authorizationOf(ctx: PluginContext): AuthorizationService | undefined {
-  const candidate = ctx.get?.('authorization') ?? ctx['authorization']
-  return candidate === null || typeof candidate !== 'object' ? undefined : candidate as AuthorizationService
+  // 只走 ctx.get：cordis 严格模式下 `ctx.authorization` 这种属性访问要求 inject 列表里
+  // 声明 'authorization'。本插件 inject 列表只有 ['llm', 'webServer']——任何 dsh 组合
+  // （含 credentials 包未装的 headless）都不会引这一行；services 找不到就当 undefined，
+  // registerOAuthRoutes 早期 return，**不会**让插件加载失败。
+  //
+  // 老代码用 `ctx.get?.(name) ?? ctx[name]` 做兜底，属性访问在 cordis proxy 下抛
+  // "cannot get property \"authorization\" without inject"，把整个插件挂掉——见
+  // /tmp/dsh-plan-test.log 那次挂掉日志。换成纯 ctx.get + try/catch 即可。
+  try {
+    const candidate = ctx.get?.('authorization')
+    if (candidate === null || typeof candidate !== 'object') return undefined
+    return candidate as AuthorizationService
+  } catch (cause) {
+    // ctx.get 抛错（dsh 内部 mock / 反序列化异常）——同属性访问一样的处理：当作未挂载。
+    return undefined
+  }
 }
 
 /** SSE 帧编码：data: <json>\n\n；retry 在第一帧发，告诉 EventSource 多久后重连。 */
