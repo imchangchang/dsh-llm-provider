@@ -264,6 +264,7 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 - 同一个 credential key 同时只允许一个 attempt：seam 自己也会拒（`ALREADY_IN_FLIGHT`），我们这里先发制人给 409。
 - 5 分钟未活动的 attempt 被 sweeper 清掉（断网 / 关页后内存不漏）；attempt settled 后保留到 TTL 上限，浏览器重连 SSE 还能拿到结果。
 - 客户端在「添加供应商」表单里识别 `preset.oauth`：按钮替代密码输入框，弹窗实时显示 notice 与 prompt（按 kind 渲染 input / select），settled 后通过 `onAdded` 触发卡片刷新。
+- **pi-ai 目录里有的 provider，路由不写 `api`**。官方适配器是 `const api = request.api ?? base?.api ?? routeApi`——路由上的 `api` 会覆盖**每个模型自己的协议**，而这类目录常常是多协议的（Copilot：claude 系走 `anthropic-messages`、gpt-5.x 走 `openai-responses`、gemini 走 `openai-completions`）。写死一个协议，另一批模型就会发到错的端点：实测 `gpt-5.4` 报 400 `no model endpoints available given user constraints`，因为那条路由写的是 `anthropic-messages`。不写就按模型各自回落；Custom Gateway 不在目录里，必须写。早期版本添加的路由带着这个字段时，卡片展开体会给一条「改成按模型协议」的一键修正（`unset api`）。
 - **OAuth 授权的路由不写 `apiKeyEnv`**。官方适配器的 `resolveApiKey` 只要看到 `apiKeyEnv` 就只认那个 ref，取不到值直接抛 `MISSING_CREDENTIAL`——写上它等于把 OAuth 登录堵死（发送时才报错）。留空才会回落到 pi-ai 自己的凭据解析，从凭据记录里取 grant 换 token。早期版本添加的路由带着这个字段时，卡片展开体会给一条「改用 OAuth 认证」的一键修正（`unset apiKeyEnv`）。
 
 边界：

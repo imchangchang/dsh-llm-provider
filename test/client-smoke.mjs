@@ -259,11 +259,15 @@ rowsCheck('强制选档时其它档照常可点', effortRowDisabled(false, false
 // 官方适配器看到 apiKeyEnv 就只认那个 ref，取不到值直接抛 MISSING_CREDENTIAL——
 // 给 OAuth 路由写上它，等于把 OAuth 登录堵死（线上实测踩到）。
 const formFixture = { api: 'anthropic-messages', baseURL: ' https://api.individual.githubcopilot.com ', apiKeyEnv: 'GITHUB_COPILOT_API_KEY' }
-const oauthProfile = routeProfileOf(formFixture, true)
+const oauthProfile = routeProfileOf(formFixture, true, false)
 rowsCheck('OAuth 路由不写 apiKeyEnv', oauthProfile.apiKeyEnv === undefined)
-rowsCheck('OAuth 路由仍写 api 与 baseURL', oauthProfile.api === 'anthropic-messages' && oauthProfile.baseURL === 'https://api.individual.githubcopilot.com')
-const keyProfile = routeProfileOf(formFixture, false)
+rowsCheck('目录里的 provider 不写 api（否则覆盖每个模型的协议）', oauthProfile.api === undefined)
+rowsCheck('baseURL 照旧写', oauthProfile.baseURL === 'https://api.individual.githubcopilot.com')
+const keyProfile = routeProfileOf(formFixture, false, false)
 rowsCheck('非 OAuth 路由照旧写 apiKeyEnv', keyProfile.apiKeyEnv === 'GITHUB_COPILOT_API_KEY')
+rowsCheck('非 OAuth 的目录 provider 也不写 api', keyProfile.api === undefined)
+const customProfile = routeProfileOf(formFixture, false, true)
+rowsCheck('Custom Gateway 必须写 api（目录里查不到）', customProfile.api === 'anthropic-messages')
 
 // ---- 重置倒计时：天数到两位数就只留天数（卡片头部最挤的一段）----
 const inFuture = (ms) => new Date(Date.now() + ms).toISOString()

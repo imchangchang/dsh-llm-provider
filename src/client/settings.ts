@@ -44,8 +44,18 @@ import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, Headli
 export function routeProfileOf(
   form: { api: string, baseURL: string, apiKeyEnv: string },
   oauthAuthorized: boolean,
+  custom: boolean,
 ): AnyRecord {
-  var profile: AnyRecord = { api: form.api, baseURL: form.baseURL.trim() }
+  var profile: AnyRecord = { baseURL: form.baseURL.trim() }
+  // **pi-ai 自带目录的 provider 不写 api**：官方适配器里
+  //   `const api = request.api ?? base?.api ?? routeApi`
+  // ——路由上的 api 会覆盖每个模型自己的协议。而 Copilot 这种目录是多协议的
+  // （claude-* 走 anthropic-messages、gpt-5.x 走 openai-responses、gemini 走
+  // openai-completions），写死一个协议就会让另一批模型发错端点：实测 gpt-5.4 报
+  // 400「no model endpoints available given user constraints」，因为那条路由写的是
+  // anthropic-messages。不写 api 就回落到每个模型目录里的 api。Custom Gateway 不在目录
+  // 里，没有可回落的东西，必须写。
+  if (custom === true) profile.api = form.api
   if (oauthAuthorized !== true) profile.apiKeyEnv = form.apiKeyEnv.trim()
   return profile
 }
@@ -395,7 +405,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   function add() {
     setBusy(true)
     setNote(null)
-    var profile = routeProfileOf(form, oauthAuthorized)
+    var profile = routeProfileOf(form, oauthAuthorized, customPicked)
     var typedKey = form.key.trim()
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
@@ -1171,18 +1181,20 @@ export function ProviderSettingsSection() {
     return ''
   }
   /**
-   * 把某条路由的 `apiKeyEnv` 从配置里删掉（OAuth 路由的修正动作）。
+   * 把某条路由的某个字段从配置里删掉（卡片上的修正动作）。
    * 只删配置里的字段，不动凭据：万一用户之前真存过同名 ref，那也不该由我们顺手清掉。
    * @param account - 卡片对应的额度账户。
+   * @param field - 要删的字段名（`apiKeyEnv` / `api`）。
+   * @param done - 成功提示文案。
    */
-  function dropApiKeyEnv(account: PlanAccount) {
+  function dropRouteField(account: PlanAccount, field: string, done: string) {
     setSavingKey(function (prev: AnyRecord) { return withKey(prev, account.id, true) })
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
-      ops: [{ op: 'unset', path: ['providers', account.id, 'apiKeyEnv'] }],
+      ops: [{ op: 'unset', path: ['providers', account.id, field] }],
     })
       .then(function () {
-        showToast('已把 ' + shortName(account) + ' 改成走 OAuth 认证', true)
+        showToast(done, true)
         setCatTick(function (n: number) { return n + 1 })
         refresh(true)
       })
@@ -1353,6 +1365,17 @@ export function ProviderSettingsSection() {
     ),
   )
   var accounts = plan !== null && Array.isArray(plan.accounts) ? plan.accounts : []
+  /**
+   * 这条路由是不是 pi-ai 目录里的 provider（预设清单里非 custom 的那些）。
+   * 只有它们才有「每个模型自带协议」可回落；Custom Gateway 必须自己写 api。
+   * @param routeId - 路由 id。
+   */
+  function knownCatalogRoute(routeId: string): boolean {
+    for (var pi = 0; pi < presets.length; pi += 1) {
+      if (presets[pi].id === routeId) return presets[pi].custom !== true
+    }
+    return false
+  }
   var modelsByProvider: Record<string, CatalogModel[]> = {}
   for (var gi = 0; gi < catalogGroups.length; gi += 1) {
     modelsByProvider[catalogGroups[gi].id] = catalogGroups[gi].models
@@ -1415,7 +1438,7 @@ export function ProviderSettingsSection() {
                     className: 'pv_action',
                     style: { marginLeft: '8px' },
                     disabled: savingKey[account.id] === true,
-                    onClick: function () { dropApiKeyEnv(account) },
+                    onClick: function () { dropRouteField(account, 'apiKeyEnv', '已把 ' + shortName(account) + ' 改成走 OAuth 认证') },
                   },
                   '改用 OAuth 认证',
                 ),
@@ -1496,6 +1519,31 @@ export function ProviderSettingsSection() {
         // 账号声明的可用模型（OAuth 登录时 pi-ai 记下的）：卡片列的是 pi-ai 静态目录，
         // 与实际权益不是一回事（Copilot 目录 28 个、账号只有 6 个能用），按清单过滤一次，
         // 免得卡片吹的模型数跟选择器里能选的对不上。
+        // 路由写死 api 的告警：官方适配器里 `request.api ?? base?.api ?? routeApi`，
+        // 路由的 api 覆盖每个模型自己的协议。pi-ai 目录里的 provider 往往是多协议的
+        // （Copilot：claude 走 anthropic、gpt-5.x 走 responses、gemini 走 completions），
+        // 写死一个就会让另一批发错端点、报 400。目录能给出 base?.api，删掉这个字段即可。
+        if (typeof account.api === 'string' && account.api !== '' && knownCatalogRoute(account.id)) {
+          bodyRows.push(
+            react.createElement(
+              'div',
+              { className: 'plan_note plan_warnText', key: 'api-pinned' },
+              '这条路由写死了协议（' + String(account.api) + '），会覆盖每个模型自己的协议；'
+              + '这类 provider 的目录是多协议的，写死会让一部分模型发出 400。',
+              react.createElement(
+                'button',
+                {
+                  type: 'button',
+                  className: 'pv_action',
+                  style: { marginLeft: '8px' },
+                  disabled: savingKey[account.id] === true,
+                  onClick: function () { dropRouteField(account, 'api', '已让 ' + shortName(account) + ' 按模型各自的协议发送') },
+                },
+                '改成按模型协议',
+              ),
+            ),
+          )
+        }
         var allModels = modelsByProvider[account.id]
         var available = account.availableModels
         var models = allModels === undefined
