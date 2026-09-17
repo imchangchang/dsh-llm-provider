@@ -211,7 +211,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
         ...routeMeta,
         id: providerId, displayName, kind: 'unknown-provider', authConfigured, baseUrl,
         balances: [], windows: [], fetchedAt, websiteUrl, keyHint, deletable: route.source === 'llm-pi-ai',
-        note: '认不出这个 provider 的额度接口；在 src/adapters/ 加一个适配器并在 registry.ts 注册即可',
+        // OAuth 登录过、但没有额度适配器的（Codex / Claude / xAI 这类）：给用户看得懂的一句，
+        // 别把「去 src/adapters/ 加适配器」这种给贡献者的话摆到界面上。
+        note: oauthAuthorized
+          ? '这条路由靠 OAuth 登录使用，暂时没有余额查询接口'
+          : '认不出这个 provider 的额度接口；在 src/adapters/ 加一个适配器并在 registry.ts 注册即可',
       }
     }
     if (adapter.id === 'qwen-unsupported') {
