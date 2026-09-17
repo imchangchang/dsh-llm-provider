@@ -29,6 +29,27 @@ check('其余按名字升序', ascending)
 check('每项都有名字', presets.every((p) => typeof p.label === 'string' && p.label !== ''))
 check('每项 id 都是 kebab-case', presets.every((p) => /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(p.id)))
 
+// 协议归 pi-ai：目录里每个模型自带 api，路由上写一个会盖掉其余模型（Copilot / OpenRouter
+// 这类一家多协议），所以预设不替目录 provider 挑协议；只有自建网关没目录可回落，才要用户指定。
+check('自定义网关带协议', last.api === 'openai-completions')
+check('目录 provider 一律不带协议', named.every((p) => p.api === undefined))
+
+// OAuth-only 判定来自 pi-ai 元数据（有 oauth、没有 apiKey），只留一条有理由的例外：
+// Copilot 的 apiKey 路径是个手填 token 的框，那种 token 用户拿不到，界面上当 OAuth-only。
+const presetOf = (id) => presets.find((p) => p.id === id)
+if (presetOf('openai-codex') !== undefined) {
+  check('openai-codex（元数据只有 oauth）是 OAuth-only', presetOf('openai-codex').oauthOnly === true)
+}
+if (presetOf('anthropic') !== undefined) {
+  check('anthropic（oauth + apiKey 都有）不是 OAuth-only', presetOf('anthropic').oauthOnly === false)
+}
+if (presetOf('github-copilot') !== undefined) {
+  check('github-copilot 按 OAuth-only 处理（密钥路径拿不到 token）', presetOf('github-copilot').oauthOnly === true)
+}
+if (presetOf('deepseek') !== undefined) {
+  check('纯密钥 provider 不是 OAuth-only', presetOf('deepseek').oauthOnly === false)
+}
+
 // billing 标记 = 这一家有没有余额查询适配器（没有也能添加，只是卡片不显示余量）
 check('自定义网关没有余额适配器', last.billing === false)
 if (presets.some((p) => p.id === 'kimi-coding')) {

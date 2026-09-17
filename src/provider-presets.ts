@@ -9,11 +9,16 @@
  * 契约与官方 Models 页完全一致（写进 settings 的 llm-pi-ai.providers 段）：
  *   - id：路由键，kebab-case（官方正则 ^[a-z][a-z0-9]*(-[a-z0-9]+)*$）
  *   - apiKeyEnv：官方 deriveKeyRef 惯例（路由大写、非字母数字转 _、加 _API_KEY 后缀）
- *   - api：pi-ai wire 协议；baseURL：各家默认端点
+ *   - baseURL：各家默认端点
+ *
+ * 预设**不带协议**：协议是 pi-ai 的事——每个模型在目录里自带 api，路由上的 api 只会盖掉它
+ * （官方适配器 `request.api ?? base?.api ?? routeApi`）。40 家目录里 6 家是多协议
+ * （github-copilot / openrouter / fireworks / opencode / opencode-go / cloudflare-ai-gateway），
+ * 给它们挑「一个」协议必然是错的。只有 EXTRA_PRESETS 那个自建网关没有目录可回落，才要用户指定。
  */
 import { loadModelDetails } from './model-details.js'
 import { activePiAiRoot } from './bridge.js'
-import { piAiName } from './pi-ai-names.js'
+import { piAiName, piAiProviderMeta } from './pi-ai-names.js'
 import { NATIVE_EQUIVALENTS, labelOf, websiteOf } from './routes.js'
 import { findAdapter } from './adapters/registry.js'
 
@@ -22,6 +27,10 @@ export interface ProviderPreset {
   id: string
   label: string
   baseURL: string
+  /**
+   * 只有 EXTRA_PRESETS 里自建的网关有协议——目录 provider 一律 undefined，协议由 pi-ai
+   * 按模型决定。客户端只在 custom 的那条上渲染协议选择框。
+   */
   api: string | undefined
   apiKeyEnv: string
   websiteUrl: string | undefined
@@ -29,9 +38,8 @@ export interface ProviderPreset {
   billing: boolean
   custom: boolean
   /**
-   * OAuth-only：pi-ai 这个 provider 不接受 apiKey，只走 subscription / OAuth。
-   * 客户端就不该给密码输入框 fallback——要么 OAuth 登录成功，要么不可用。
-   * 硬表为准（见 `OAUTH_ONLY_PROVIDERS`），buildPresets 不管 catalog 数据都标 true。
+   * OAuth-only：这家在界面上只给 OAuth 引导，不给密钥输入框（要么登录成功，要么不可用）。
+   * 判定来自 pi-ai 元数据（有 oauth、没有 apiKey），加一条例外见 `KEY_PATH_IS_DEAD_END`。
    */
   oauthOnly: boolean
 }
@@ -53,9 +61,8 @@ export interface ProviderPresetWithMeta extends ProviderPreset {
     inFlight: boolean
   }
   /**
-   * OAuth-only：pi-ai 这个 provider 不接受 apiKey，只走 subscription / OAuth。
-   * 客户端就不该给密码输入框 fallback——要么 OAuth 登录成功，要么不可用。
-   * 硬表为准（见 `OAUTH_ONLY_PROVIDERS`），buildPresets 不管 catalog 数据都标 true。
+   * OAuth-only：这家在界面上只给 OAuth 引导，不给密钥输入框（要么登录成功，要么不可用）。
+   * 判定来自 pi-ai 元数据（有 oauth、没有 apiKey），加一条例外见 `KEY_PATH_IS_DEAD_END`。
    */
   oauthOnly: boolean
 }
@@ -67,15 +74,9 @@ interface PresetSource {
   models?: number
   label?: string
   custom?: boolean
-  /**
-   * OAuth-only：pi-ai 里这个 provider 只走 subscription / OAuth，没有 apiKey 路径——
-   客户端就不该给密码输入框。hardcode 表（pi-ai 0.85.x 当前 OAuth-only 的 provider：
-   * github-copilot / openai-codex；以后 pi-ai 加新的 OAuth-only provider 时跟这里一并加）。
-   */
-  oauthOnly?: boolean
 }
 
-/** pi-ai 目录外只保留一个任意网关入口：端点、协议、名字全由用户自定义。 */
+/** pi-ai 目录外只保留一个任意网关入口：端点、名字由用户自定义；协议也只有这里要选（目录里查不到）。 */
 const EXTRA_PRESETS: (PresetSource & { id: string })[] = [
   { id: 'custom-gateway', label: 'Custom Gateway', baseURL: '', api: 'openai-completions', custom: true },
 ]
@@ -85,11 +86,47 @@ export function keyEnvOf(routeId: string): string {
   return String(routeId).toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_API_KEY'
 }
 
-/** pi-ai 0.85.x 里只走 OAuth / subscription 的 provider id 集。客户端据此把密码输入框换成 OAuth 引导。 */
-const OAUTH_ONLY_PROVIDERS: ReadonlySet<string> = new Set([
-  'github-copilot',
-  'openai-codex',
-])
+/** provider → 目录默认端点（该家第一个模型的 baseUrl）。缓存键是 pi-ai 根目录，换版本自然失效。 */
+let catalogBaseUrls: { root: string | undefined, map: Map<string, string> } | undefined
+
+/**
+ * pi-ai 目录里这家 provider 的默认端点；目录没有就 undefined。
+ *
+ * 路由不再写 baseURL（写了会盖掉每个模型自己的端点，见文件头），但余额查询和界面展示
+ * 仍要知道「这家发到哪」——zai / minimax 这类适配器按 host 选站点（api.z.ai vs
+ * open.bigmodel.cn），拿不到就掉到错误的站点去查。
+ */
+export function catalogBaseUrlOf(providerId: string): string | undefined {
+  const root = activePiAiRoot()
+  if (catalogBaseUrls === undefined || catalogBaseUrls.root !== root) {
+    const map = new Map<string, string>()
+    for (const preset of buildPresets()) {
+      if (preset.baseURL !== '') map.set(preset.id, preset.baseURL)
+    }
+    catalogBaseUrls = { root, map }
+  }
+  return catalogBaseUrls.map.get(providerId)
+}
+
+/**
+ * 元数据里虽有 apiKey 路径、但那路径拿不到密钥的 provider——界面上按 OAuth-only 处理。
+ *
+ * 目前只有 github-copilot：pi-ai 的 apiKey 登录就是 `prompt('Enter GitHub Copilot token')`
+ * 一个手填框，而 copilot token 本身要靠 GitHub 登录换（pi-ai 只提供 OAuth 那条路），
+ * 用户手里根本不会有这种 token，摆个密钥框只会误导。其余 provider 一律以元数据为准：
+ * pi-ai 加了新的 OAuth-only provider（`auth.oauth` 且没有 `auth.apiKey`）会自动跟上。
+ */
+const KEY_PATH_IS_DEAD_END: ReadonlySet<string> = new Set(['github-copilot'])
+
+/** 客户端据此把密码输入框换成 OAuth 引导：pi-ai 里这家只能靠 OAuth（或密钥路径形同虚设）。 */
+function oauthOnlyOf(id: string): boolean {
+  const meta = piAiProviderMeta(id)
+  // 读不到元数据（没装 pi-ai / 版本太老）时只认例外表，至少别把已知的两家判反
+  if (meta === undefined) return KEY_PATH_IS_DEAD_END.has(id) || id === 'openai-codex'
+  if (meta.oauth !== true) return false
+  if (meta.apiKey !== true) return true
+  return KEY_PATH_IS_DEAD_END.has(id)
+}
 
 function makePreset(id: string, info: PresetSource): ProviderPreset {
   const baseURL = typeof info.baseURL === 'string' ? info.baseURL : ''
@@ -104,8 +141,7 @@ function makePreset(id: string, info: PresetSource): ProviderPreset {
     models: typeof info.models === 'number' ? info.models : 0,
     billing: findAdapter(id, baseURL) !== undefined,
     custom: info.custom === true,
-    // OAUTH_ONLY 用硬表为准——pi-ai 0.85.x OAuth-only 的 provider 不会变。
-    oauthOnly: OAUTH_ONLY_PROVIDERS.has(id),
+    oauthOnly: oauthOnlyOf(id),
   }
 }
 
@@ -115,7 +151,7 @@ export function buildPresets(): ProviderPreset[] {
   for (const detail of loadModelDetails(activePiAiRoot())) {
     let current = byProvider.get(detail.provider)
     if (current === undefined) {
-      current = { api: detail.api, baseURL: '', models: 0 }
+      current = { baseURL: '', models: 0 }
       byProvider.set(detail.provider, current)
     }
     current.models = (current.models ?? 0) + 1

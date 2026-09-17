@@ -60,8 +60,18 @@ export function authEntryOf(preset: ProviderPreset | undefined): {
  * 存在凭据记录的 grant 里、不在 ref 那个键空间，写上去等于把这条路堵死。留空 apiKeyEnv，
  * pi-ai 才会走自己的凭据解析拿到 grant。
  *
+ * **协议和端点都属于 pi-ai 目录，不写**：官方适配器里是
+ *   `const api = request.api ?? base?.api ?? routeApi`
+ *   `const baseUrl = request.baseURL ?? base?.baseUrl ?? providerBaseUrl`
+ * ——路由上写了就盖掉每个模型自己的那份，而一家可能多协议多端点（Copilot：claude 走
+ * anthropic-messages、gpt-5.x 走 openai-responses；OpenRouter/Fireworks/opencode 的
+ * anthropic 与 openai 端点还差一个 /v1 后缀）。实测写死 anthropic-messages 让 gpt-5.4 报
+ * 400「no model endpoints available given user constraints」。地址留空同理：**不能写空串**，
+ * `'' ?? x` 不会回落到目录，那是个空端点。用户显式填了（企业版端点、自建网关）才写。
+ *
  * @param form - 表单当前值。
  * @param oauthAuthorized - 这次是否已经走完 OAuth 登录。
+ * @param custom - 是不是自建网关（目录里查不到，协议/端点必须落盘）。
  * @returns 写进 `llm-pi-ai.providers.<routeId>` 的对象。
  */
 export function routeProfileOf(
@@ -69,15 +79,10 @@ export function routeProfileOf(
   oauthAuthorized: boolean,
   custom: boolean,
 ): AnyRecord {
-  var profile: AnyRecord = { baseURL: form.baseURL.trim() }
-  // **pi-ai 自带目录的 provider 不写 api**：官方适配器里
-  //   `const api = request.api ?? base?.api ?? routeApi`
-  // ——路由上的 api 会覆盖每个模型自己的协议。而 Copilot 这种目录是多协议的
-  // （claude-* 走 anthropic-messages、gpt-5.x 走 openai-responses、gemini 走
-  // openai-completions），写死一个协议就会让另一批模型发错端点：实测 gpt-5.4 报
-  // 400「no model endpoints available given user constraints」，因为那条路由写的是
-  // anthropic-messages。不写 api 就回落到每个模型目录里的 api。Custom Gateway 不在目录
-  // 里，没有可回落的东西，必须写。
+  var profile: AnyRecord = {}
+  var baseURL = form.baseURL.trim()
+  if (baseURL !== '') profile.baseURL = baseURL
+  // 自建网关不在目录里，没有可回落的东西，协议必须写（表单里也只有它渲染协议选择框）。
   if (custom === true) profile.api = form.api
   if (oauthAuthorized !== true) profile.apiKeyEnv = form.apiKeyEnv.trim()
   return profile
@@ -391,7 +396,10 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     setUseKeyInsteadChoice(null)
     patchForm({
       routeId: preset.id,
-      baseURL: preset.baseURL,
+      // 地址不预填：目录 provider 的端点由 pi-ai 按模型决定（一家可能多端点，比如
+      // firefox 的 anthropic 用 /inference、openai 用 /inference/v1），写进路由会盖掉。
+      // preset.baseURL 只当占位提示；用户想覆盖（企业版端点、带占位符的网关）再自己填。
+      baseURL: '',
       api: preset.api,
       apiKeyEnv: preset.apiKeyEnv,
       websiteUrl: preset.websiteUrl,
@@ -401,16 +409,19 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     setNote(null)
   }
   function runTest() {
-    if (form.routeId.trim() === '' || form.baseURL.trim() === '' || form.key.trim() === '') {
-      setTest({ phase: 'fail', message: '路由 ID / API 地址 / API 密钥都要填' })
+    // 目录里的 provider 不需要地址（目录自带）；自建网关没有目录，必须填。
+    if (form.routeId.trim() === '' || form.key.trim() === '' || (customPicked && form.baseURL.trim() === '')) {
+      setTest({ phase: 'fail', message: customPicked ? '路由 ID / API 地址 / API 密钥都要填' : '路由 ID 和 API 密钥都要填' })
       return
     }
     setTest({ phase: 'run', message: '正在用这把密钥实连供应商探测模型…' })
+    // 目录 provider 不带 api/baseURL（都是 undefined/空）：官方的 discoverModels 对有目录的
+    // provider 直接返回目录，没有目录的（自建网关）才用 api/baseURL 决定往哪发请求。
     apiCall('llm/discoverModels', {
       settingsNs: 'llm-pi-ai',
       request: {
         provider: form.routeId.trim(),
-        baseURL: form.baseURL.trim(),
+        baseURL: form.baseURL.trim() === '' ? undefined : form.baseURL.trim(),
         api: form.api,
         apiKey: form.key.trim(),
       },
@@ -729,8 +740,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
           },
         }),
       ),
-      // API 地址 / 协议：OAuth-only 的供应商不渲染这两行——它们由 preset 带进 form（写配置时照旧
-      // 落盘），用户既不需要填也不需要核对；界面上只留「供应商 / 路由 ID / 登录方式」。
+      // API 地址 / 协议：OAuth-only 的供应商不渲染这两行——都是目录里带着的东西，用户既不需要
+      // 填也不需要核对；界面上只留「供应商 / 路由 ID / 登录方式」。
       oauthOnlyPicked
         ? null
         : react.createElement(
@@ -738,12 +749,18 @@ function AddProviderPanel(props: AddProviderPanelProps) {
             { className: 'pv_line pv_row' },
             react.createElement('span', null, 'API 地址'),
             react.createElement('input', {
-              className: form.baseURL === '' ? 'pv_field pv_key' : 'pv_field pv_ro',
+              className: 'pv_field',
               value: form.baseURL,
-              readOnly: form.baseURL !== '',
+              placeholder: pickedPreset !== undefined && pickedPreset.baseURL !== '' ? pickedPreset.baseURL : 'https://…',
+              title: customPicked
+                ? '自建网关必须自己填端点'
+                : '留空＝用 pi-ai 目录里这家的默认端点（按模型各自的地址发）',
               onChange: function (event: FieldEvent) { patchForm({ baseURL: event.target.value }) },
             }),
           ),
+      // 协议只有自建网关要选：目录里的 provider 由 pi-ai 按模型决定协议（同一家可能多协议，
+      // 比如 Copilot 的 claude 走 anthropic-messages、gpt-5.x 走 openai-responses），路由上写
+      // 一个就会盖掉其余模型。所以目录 provider 这一行只留一句说明，不给选择框。
       oauthOnlyPicked
         ? null
         : react.createElement(
@@ -761,11 +778,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
                   react.createElement('option', { value: 'openai-completions' }, 'OpenAI'),
                   react.createElement('option', { value: 'anthropic-messages' }, 'Anthropic'),
                 )
-              : react.createElement('input', {
-                  className: 'pv_field pv_ro',
-                  value: form.api,
-                  readOnly: true,
-                }),
+              : react.createElement('span', { className: 'pv_hint' }, '由 pi-ai 按模型决定'),
           ),
       // 「登录方式」三态（按 flow 的方法分，不按「有没有 flow」）：
       //   1) flow 有 oauth 方法：渲染 OAuth 按钮；用「改用 API 密钥」可切到密钥输入。

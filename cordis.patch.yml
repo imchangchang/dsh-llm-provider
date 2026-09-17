@@ -40,10 +40,13 @@
       # settings.yaml 层」，见 dsh-settings 的 mergeLayers）而不是启动时往 settings
       # 写——插件不写宿主配置。用户想改就在 settings.yaml 里写同名的
       # llm-pi-ai.providers.deepseek，会覆盖这里的值。
+      #
+      # 不写 api：协议由 pi-ai 目录决定（deepseek 的模型都在 openai-completions 下，
+      # 每个模型自带 api）。路由上写 api 会盖掉模型自己的协议——官方适配器里是
+      # `request.api ?? base?.api ?? routeApi`，多协议的 provider 写死一个就发错端点。
       config:
         providers:
           deepseek:
             displayName: DeepSeek
             apiKeyEnv: DEEPSEEK_API_KEY
-            api: openai-completions
             baseURL: https://api.deepseek.com

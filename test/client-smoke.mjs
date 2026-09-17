@@ -277,7 +277,9 @@ const formFixture = { api: 'anthropic-messages', baseURL: ' https://api.individu
 const oauthProfile = routeProfileOf(formFixture, true, false)
 rowsCheck('OAuth 路由不写 apiKeyEnv', oauthProfile.apiKeyEnv === undefined)
 rowsCheck('目录里的 provider 不写 api（否则覆盖每个模型的协议）', oauthProfile.api === undefined)
-rowsCheck('baseURL 照旧写', oauthProfile.baseURL === 'https://api.individual.githubcopilot.com')
+rowsCheck('用户填了地址才写（企业版端点这类覆盖）', oauthProfile.baseURL === 'https://api.individual.githubcopilot.com')
+rowsCheck('地址留空就不写 baseURL——写空串等于把端点定成空，回落不到目录',
+  routeProfileOf({ ...formFixture, baseURL: '  ' }, false, false).baseURL === undefined)
 const keyProfile = routeProfileOf(formFixture, false, false)
 rowsCheck('非 OAuth 路由照旧写 apiKeyEnv', keyProfile.apiKeyEnv === 'GITHUB_COPILOT_API_KEY')
 rowsCheck('非 OAuth 的目录 provider 也不写 api', keyProfile.api === undefined)
