@@ -406,16 +406,17 @@ export function loadOauthFlows(): Promise<{ key: string, label: string, methods:
 }
 
 /**
- * 解析一条 SSE `data:` 帧为事件对象。事件格式：宿主端 `oauth.ts` 写入的 `data: <json>\n\n`。
- * 不是事件帧（retry: / 空帧 / 注释）返回 undefined。
+ * 解析一条 SSE 事件为事件对象。宿主端写的是 `data: <json>\n\n` 帧，但**EventSource 早已把
+ * `data:` 前缀剥掉**，onmessage 交给我们的就是纯 JSON——两种形态都收（原始帧留给测试和手工喂帧）。
+ * 不是事件（retry: / 空帧 / 注释行）返回 undefined。
  */
 export function parseOauthFrame(payload: string): OauthEvent | undefined {
-  var text = payload === '' ? '' : payload
-  if (text.indexOf('data:') !== 0) return undefined
-  var rest = text.slice(5).trim()
-  if (rest === '') return undefined
+  if (typeof payload !== 'string') return undefined
+  var text = payload.trim()
+  if (text.indexOf('data:') === 0) text = text.slice(5).trim()
+  if (text === '' || text.indexOf('retry:') === 0 || text.indexOf(':') === 0) return undefined
   try {
-    var parsed = JSON.parse(rest) as AnyRecord
+    var parsed = JSON.parse(text) as AnyRecord
     var kind = parsed.kind
     if (kind === 'notice') {
       var notice = parsed.notice as AnyRecord

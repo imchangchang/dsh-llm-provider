@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection } = moduleExports
+const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -199,6 +199,24 @@ rowsCheck('服务没挂上时给原因', offRow !== undefined && typeof offRow.t
 const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: true, flows: 0 })
 rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
 rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
+
+// ---- OAuth SSE 帧解析（EventSource 会剥掉 `data:` 前缀，这里是最容易踩的一处）----
+const promptJson = JSON.stringify({ kind: 'prompt', promptId: 'p1', prompt: { kind: 'text', message: 'Enterprise URL/domain' } })
+const asGiven = parseOauthFrame(promptJson)
+rowsCheck('纯 JSON（onmessage 的实际形态）能解析', asGiven !== undefined && asGiven.kind === 'prompt')
+rowsCheck('解析出的 promptId 保留', asGiven !== undefined && asGiven.promptId === 'p1')
+rowsCheck('解析出的 prompt 内容保留', asGiven !== undefined && asGiven.prompt.kind === 'text')
+const rawFrame = parseOauthFrame('data: ' + promptJson)
+rowsCheck('带 data: 前缀的原始帧也认', rawFrame !== undefined && rawFrame.kind === 'prompt')
+rowsCheck('retry 指令不是事件', parseOauthFrame('retry: 10000') === undefined)
+rowsCheck('注释行不是事件', parseOauthFrame(': keepalive') === undefined)
+rowsCheck('空串不是事件', parseOauthFrame('') === undefined)
+rowsCheck('坏 JSON 不是事件', parseOauthFrame('{oops') === undefined)
+const noticeJson = JSON.stringify({ kind: 'notice', notice: { message: 'go', url: 'https://x/y', code: 'ABCD' } })
+const notice = parseOauthFrame(noticeJson)
+rowsCheck('notice 解析出 url + code', notice !== undefined && notice.notice.url === 'https://x/y' && notice.notice.code === 'ABCD')
+const settledJson = JSON.stringify({ kind: 'settled', status: 'authorized' })
+rowsCheck('settled 解析出状态', parseOauthFrame(settledJson) !== undefined && parseOauthFrame(settledJson).status === 'authorized')
 
 rowsCheck('没检查过上游时说「未检查」', piAiUpstreamText(undefined) === '上游 未检查')
 rowsCheck('检查过就报版本号', piAiUpstreamText({ latest: '0.86.0', lastCheck: new Date().toISOString() }).indexOf('0.86.0') !== -1)
