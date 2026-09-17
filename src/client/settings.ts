@@ -1361,7 +1361,11 @@ export function ProviderSettingsSection() {
   for (var i = 0; i < accounts.length; i += 1) {
     ;(function (account: PlanAccount) {
       var chips = headlineChips(account)
-      var dflt = account.error !== undefined || typeof account.credentialWarning === 'string'
+      // 「OAuth 已授权，但配置里还写着 apiKeyEnv」这种冲突必须默认展开：修正在展开体里，
+      // 藏在折叠区里用户根本发现不了（他就是这么卡住的：发送时才发现 MISSING_CREDENTIAL）。
+      var apiKeyEnvConflict = account.oauthAuthorized === true
+        && typeof account.apiKeyEnv === 'string' && account.apiKeyEnv !== ''
+      var dflt = account.error !== undefined || typeof account.credentialWarning === 'string' || apiKeyEnvConflict
       var expanded = isOpen(account.id, dflt)
 
       var chipEls = []
