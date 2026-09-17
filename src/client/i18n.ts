@@ -19,7 +19,7 @@ export var LOCAL_DICT: Record<'zh' | 'en', Record<string, string>> = {
     oauthSubmit: '提交',
     oauthSelectPlaceholder: '请选择',
     oauthCancelled: '已取消',
-    oauthAuthorized: '登录成功，正在刷新卡片…',
+    oauthAuthorized: '登录成功，凭据已保存',
     oauthFailed: '登录失败：{error}',
   },
   en: {
@@ -34,7 +34,7 @@ export var LOCAL_DICT: Record<'zh' | 'en', Record<string, string>> = {
     oauthSubmit: 'Submit',
     oauthSelectPlaceholder: 'Choose…',
     oauthCancelled: 'Cancelled',
-    oauthAuthorized: 'Authorized, refreshing cards…',
+    oauthAuthorized: 'Authorized — credential saved',
     oauthFailed: 'Sign-in failed: {error}',
   },
 }

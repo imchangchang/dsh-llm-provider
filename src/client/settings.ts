@@ -366,12 +366,17 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     setBusy(true)
     setNote(null)
     var profile = { api: form.api, baseURL: form.baseURL.trim(), apiKeyEnv: form.apiKeyEnv.trim() }
+    var typedKey = form.key.trim()
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
       ops: [{ op: 'set', path: ['providers', form.routeId.trim()], value: profile }],
     })
       .then(function () {
-        return apiCall('credentials/set', { ref: form.apiKeyEnv.trim(), value: form.key.trim() })
+        // 只有手填了密钥才写凭据：OAuth 登录已经把凭据提交到凭据记录里（key 是
+        // `llm-pi-ai/<provider>`，与这里的 apiKeyEnv 是两个键空间），拿空字符串去 set
+        // 只会留下一条没用的空 ref。
+        if (typedKey === '') return undefined
+        return apiCall('credentials/set', { ref: form.apiKeyEnv.trim(), value: typedKey })
       })
       .then(function () {
         setNote('已添加 ' + form.routeId.trim())
@@ -422,10 +427,14 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         if (event.kind === 'settled') {
           next.done = { status: event.status, error: event.error }
           next.pendingBusy = false
-          // 授权成功后：调父组件让卡片刷新；attempt 自己已经关 SSE，不用再 cancel
-          if (event.status === 'authorized' && typeof props.onAdded === 'function') {
-            // setTimeout 把 onAdded 挪出 setOauth，避免在 setState 内触发外部 setState
-            setTimeout(function () { props.onAdded!() }, 0)
+          // 授权成功后：提示下一步（OAuth 只解决凭据，路由还得写进配置），并刷新卡片。
+          if (event.status === 'authorized') {
+            setNote('OAuth 登录成功，凭据已保存。点「添加到列表」把 '
+              + form.routeId.trim() + ' 写进配置即可使用。')
+            if (typeof props.onAdded === 'function') {
+              // setTimeout 把 onAdded 挪出 setOauth，避免在 setState 内触发外部 setState
+              setTimeout(function () { props.onAdded!() }, 0)
+            }
           }
           return next
         }
@@ -495,6 +504,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   var pickedPreset = findById(presets, form.routeId)
   var pickedLabel = pickedPreset === undefined ? form.routeId : pickedPreset.label
   var customPicked = pickedPreset !== undefined && pickedPreset.custom === true
+  // 这次登录是否已授权：授权过就不必再走「填密钥 → 测试」那条路（OAuth 没有密钥可填）。
+  var oauthAuthorized = oauth !== null && oauth.done !== undefined && oauth.done.status === 'authorized'
   var pickItems = []
   for (var pk = 0; pk < presets.length; pk += 1) {
     ;(function (preset) {
@@ -692,8 +703,10 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         react.createElement('button', {
           type: 'button',
           className: 'pv_action',
-          disabled: busy || test.phase !== 'ok',
-          title: test.phase === 'ok' ? '' : '先通过测试才能添加',
+          // OAuth 授权过的不用再测：登录那一步已经实连过（拉过模型列表），而「测试」是拿密钥
+          // 做草稿探测，OAuth 这条路本来就没有密钥可填。
+          disabled: busy || (test.phase !== 'ok' && oauthAuthorized !== true),
+          title: test.phase === 'ok' || oauthAuthorized === true ? '' : '先通过测试（或先完成 OAuth 登录）才能添加',
           onClick: add,
         }, busy ? '添加中…' : '添加到列表'),
         react.createElement('button', { type: 'button', className: 'pv_action', style: { marginLeft: 'auto' }, onClick: function () { setOpen(false); setTest({ phase: 'idle', message: '' }); setNote(null) } }, '取消'),
