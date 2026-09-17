@@ -250,13 +250,9 @@ export function headlineChips(account: PlanAccount | undefined | null): Headline
       }
       continue
     }
-    // 有绝对数字就显示「剩余/总额」（300/300），百分比只在算不出绝对量时才用。
-    // percent 仍然带着 —— 颜色分级（点子/文字色）靠它，不显示不等于不用。
-    var hasAbsolute = typeof windows[i].limit === 'number' && typeof windows[i].remaining === 'number'
-      && windows[i].limit > 0
     var chip: HeadlineChip = {
       label: shortWindowLabel(windows[i].window),
-      text: hasAbsolute ? String(windows[i].remaining) + '/' + String(windows[i].limit) : String(windows[i].percentLeft) + '%',
+      text: String(windows[i].percentLeft) + '%',
       percent: windows[i].percentLeft,
       reset: windows[i].resetAt,
     }
