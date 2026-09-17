@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { routeProfileOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText } = moduleExports
+const { routeProfileOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -240,6 +240,14 @@ rowsCheck('select 提问不自动答',
   isSafeBlankPrompt({ kind: 'select', message: 'Select OpenAI Codex login method:', options: [] }) === false)
 rowsCheck('secret 提问不自动答',
   isSafeBlankPrompt({ kind: 'secret', message: 'Enter token' }) === false)
+
+// ---- 账号可用清单过滤（Copilot 目录 28 个、账号只有 6 个，选到别处会 400）----
+const availFixture = ['gpt-5.4', 'gpt-5-mini']
+rowsCheck('清单内的模型可列', modelVisible(availFixture, 'gpt-5.4', false) === true)
+rowsCheck('清单外的不列', modelVisible(availFixture, 'gpt-5.6-sol', false) === false)
+rowsCheck('当前选中的即使在清单外也列（否则像丢了）', modelVisible(availFixture, 'gpt-5.6-sol', true) === true)
+rowsCheck('没有清单时一律可列（api-key 类路由）', modelVisible(undefined, 'any-model', false) === true)
+rowsCheck('空清单同样视为不过滤', modelVisible([], 'any-model', false) === true)
 
 // ---- 强制选档：已经勾选的那一档也要能点（它是确认动作，不是空操作）----
 rowsCheck('强制选档时勾选那档可点', effortRowDisabled(false, true, true) === false)

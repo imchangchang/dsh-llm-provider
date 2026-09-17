@@ -65,6 +65,8 @@ export interface AccountRow extends AccountStatus {
   credentialWarning?: string
   /** 已经通过 OAuth 登录过（凭据记录里是 grant）：卡片据此显示登录状态、不再要密钥。 */
   oauthAuthorized?: boolean
+  /** 这个账号实际可用的模型 id（OAuth 登录时 pi-ai 记下的）。界面按它过滤模型列表。 */
+  availableModels?: string[]
 }
 
 /** 额度快照（/plan/status 的响应体）。 */
@@ -159,22 +161,29 @@ export function apply(ctx: PluginContext, config: unknown): void {
   }
 
   /**
-   * 从 OAuth 凭据记录里取一个能用的 token，喂给额度适配器。
-   *
-   * 走 OAuth 的 provider 没有 apiKeyEnv，凭据在记录的 grant 里；记录本身是 pi-ai 的
-   * `OAuthCredential`，`refresh` 是 GitHub 那个长期 token、`access` 是换来的短命 token。
-   * github-copilot 的配额接口要的是前者。取不到就返回 undefined（适配器会说明「还没登录」）。
+   * 读 OAuth 凭据记录，取出两样东西：
+   *   - `token`：喂给额度适配器用。走 OAuth 的 provider 没有 apiKeyEnv，凭据在 grant 里；
+   *     记录是 pi-ai 的 `OAuthCredential` 原样存的，`refresh` 是 GitHub 那个长期 token、
+   *     `access` 是换来的短命 token。github-copilot 的配额接口要的是前者。
+   *   - `availableModelIds`：登录时 pi-ai 记下的「这个账号能用哪些模型」。**界面必须按它过滤**
+   *     ——pi-ai 的静态目录有 28 个 Copilot 模型，而账号实际只有 6 个能用，选到别的会拿
+   *     400 model_not_supported（实测）。
    * @param providerId - 路由 id。
    */
-  async function oauthTokenFor(providerId: string): Promise<string | undefined> {
+  async function oauthCredentialFor(providerId: string): Promise<{ token?: string, availableModelIds?: string[] }> {
     const key = oauthKeyFor(providerId)
-    if (key === undefined) return undefined
+    if (key === undefined) return {}
     const credentials = service<CredentialsService>('credentials')
-    if (typeof credentials?.readRecord !== 'function') return undefined
+    if (typeof credentials?.readRecord !== 'function') return {}
     try {
       const payload = asRecord(asRecord(await credentials.readRecord(key))['payload'])
-      return readString(payload['refresh']) ?? readString(payload['access'])
-    } catch { return undefined }
+      const rawIds = payload['availableModelIds']
+      const ids = Array.isArray(rawIds) ? rawIds.filter((id): id is string => typeof id === 'string' && id !== '') : undefined
+      return {
+        token: readString(payload['refresh']) ?? readString(payload['access']),
+        ...(ids !== undefined && ids.length > 0 ? { availableModelIds: ids } : {}),
+      }
+    } catch { return {} }
   }
 
   /**
@@ -196,9 +205,15 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const oauthAuthorized = credential.configured ? false : await oauthAuthorizedFor(providerId)
     const authConfigured = credential.configured || oauthAuthorized
     // OAuth 授权过的：适配器要的 key 从凭据记录里取（Copilot 的配额接口要 GitHub token）。
-    const oauthToken = oauthAuthorized ? await oauthTokenFor(providerId) : undefined
-    const queryKey = credential.configured ? credential.key : oauthToken
-    const routeMeta = { api: route.api, apiKeyEnv: route.apiKeyEnv, oauthAuthorized }
+    const oauthCredential = oauthAuthorized ? await oauthCredentialFor(providerId) : {}
+    const queryKey = credential.configured ? credential.key : oauthCredential.token
+    const routeMeta = {
+      api: route.api,
+      apiKeyEnv: route.apiKeyEnv,
+      oauthAuthorized,
+      // 账号声明的可用模型：界面据此过滤模型列表（没有就不挂字段，界面不过滤）。
+      ...(oauthCredential.availableModelIds === undefined ? {} : { availableModels: oauthCredential.availableModelIds }),
+    }
     // 掩码提示（前3+后4）：让界面能认出是哪一把 key（错配一眼可见），值本身不出宿主
     const keyHint = credential.configured ? maskKey(credential.key) : undefined
     const fetchedAt = new Date().toISOString()

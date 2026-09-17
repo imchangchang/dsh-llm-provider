@@ -177,7 +177,24 @@ export function shortWindowLabel(name: unknown): string {
 }
 
 /**
- * 重置倒计时压缩格式（最多两个单位，零尾不显示）：34m / 5h / 5h33m / 3d5h / 17d。
+ * 这个模型该不该列出来（账号可用清单过滤）。
+ *
+ * pi-ai 的静态目录与账号实际权益是两回事：Copilot 目录 28 个模型、登录时拿到的清单只有 6 个，
+ * 选到清单外的会拿 400 `model_not_supported`（实测）。清单缺失时一律允许（api-key 类路由
+ * 本来就没有这份清单）；当前选中的那个也允许，否则用户会以为当前模型凭空消失了。
+ *
+ * @param available - 账号可用模型 id（`PlanAccount.availableModels`），可能没有。
+ * @param modelId - 待判断的模型 id。
+ * @param isCurrent - 它是不是当前选中的模型。
+ * @returns true = 可以列出。
+ */
+export function modelVisible(available: string[] | undefined, modelId: string, isCurrent: boolean): boolean {
+  if (!Array.isArray(available) || available.length === 0) return true
+  if (isCurrent === true) return true
+  return available.indexOf(modelId) >= 0
+}
+
+/** 重置倒计时压缩格式（最多两个单位，零尾不显示）：34m / 5h / 5h33m / 3d5h / 17d。
  *
  * 天数到两位数（≥10 天）就只留天数：那种量级下「17d10h」里的 10h 已经没意义，
  * 反而是卡片头部最挤的一段（用户反馈）。

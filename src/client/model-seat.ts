@@ -11,7 +11,7 @@
 import react from 'react'
 import { accountsById, findModel, loadModelCatalog, loadModelDetailMap, loadPlanStatus, normalizeGroups, onPlanChange, selectionCell, submitSelection, unwrap, usePolledSnapshot } from './data.js'
 import { recordDiagnostic } from './diag.js'
-import { defaultEffortOf, dotClass, effortLabel, formatContext, fuzzyMatch, quotaShortOf, quotaTipOf, reasoningTextOf, toneColor, worstPercent } from './format.js'
+import { defaultEffortOf, dotClass, effortLabel, formatContext, fuzzyMatch, modelVisible, quotaShortOf, quotaTipOf, reasoningTextOf, toneColor, worstPercent } from './format.js'
 import { caretSvg, checkSvg, chevronRightSvg } from './icons.js'
 import type { CatalogGroup, CatalogModel, EffortChoice, FieldEvent, ModelSelection, ModelSwitchSeatProps } from './types.js'
 
@@ -643,11 +643,16 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
       ;(function (g) {
         if (providerFilter !== null && g.id !== providerFilter) return
         var sectionRows = []
+        // 账号声明的可用模型（OAuth 登录时 pi-ai 记下的 availableModelIds）：不在里面的不列。
+        // pi-ai 的静态目录与账号权益是两回事——Copilot 目录 28 个、账号只有 6 个能用，
+        // 选到别的会拿 400 model_not_supported。当前选中的那个照常显示（否则用户会以为丢了）。
+        var avail = accounts[g.id] === undefined ? undefined : accounts[g.id].availableModels
         for (var gm = 0; gm < g.models.length; gm += 1) {
           ;(function (model) {
             if (needle !== '' && fuzzyMatch(query, model.id + ' ' + model.name + ' ' + g.name + ' ' + g.id) !== true) return
             var isCurrent = selection !== undefined && selection !== null
               && selection.provider === g.id && selection.model === model.id
+            if (modelVisible(avail, model.id, isCurrent) !== true) return
             var detail = detailsById[model.id]
             var caps = []
             if (detail !== undefined) {

@@ -22,7 +22,7 @@ import {
   withKey,
   withKeys,
 } from './data.js'
-import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, refreshable, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
+import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, modelVisible, refreshable, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
 import { caretSvg } from './icons.js'
 import { t } from './i18n.js'
 import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, OauthAttemptClient, OauthEvent, OauthPrompt, PlanAccount, ProviderPreset } from './types.js'
@@ -1493,7 +1493,14 @@ export function ProviderSettingsSection() {
           )
         }
         // 模型列表：目录（服务端）为骨架，pi-ai 详情补元数据；悬浮显示 Cherry 式详情卡
-        var models = modelsByProvider[account.id]
+        // 账号声明的可用模型（OAuth 登录时 pi-ai 记下的）：卡片列的是 pi-ai 静态目录，
+        // 与实际权益不是一回事（Copilot 目录 28 个、账号只有 6 个能用），按清单过滤一次，
+        // 免得卡片吹的模型数跟选择器里能选的对不上。
+        var allModels = modelsByProvider[account.id]
+        var available = account.availableModels
+        var models = allModels === undefined
+          ? undefined
+          : allModels.filter(function (m) { return modelVisible(available, m.id, false) })
         if (models === undefined) {
           bodyRows.push(react.createElement('div', { className: 'pv_line', key: 'm-load' }, '模型目录加载中…'))
         } else if (models.length === 0) {
