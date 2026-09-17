@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips } = moduleExports
+const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -240,6 +240,18 @@ rowsCheck('select 提问不自动答',
   isSafeBlankPrompt({ kind: 'select', message: 'Select OpenAI Codex login method:', options: [] }) === false)
 rowsCheck('secret 提问不自动答',
   isSafeBlankPrompt({ kind: 'secret', message: 'Enter token' }) === false)
+
+// ---- 重置倒计时：天数到两位数就只留天数（卡片头部最挤的一段）----
+const inFuture = (ms) => new Date(Date.now() + ms).toISOString()
+const HOUR = 3600000
+rowsCheck('17d10h 只显示天数', resetCountdownText(inFuture(17 * 24 * HOUR + 10 * HOUR)) === '17d')
+rowsCheck('10d 出头也只显示天数', resetCountdownText(inFuture(10 * 24 * HOUR + 5 * HOUR)) === '10d')
+rowsCheck('9d10h 仍给两个单位', resetCountdownText(inFuture(9 * 24 * HOUR + 10 * HOUR)) === '9d10h')
+rowsCheck('4d2h 给两个单位', resetCountdownText(inFuture(4 * 24 * HOUR + 2 * HOUR)) === '4d2h')
+rowsCheck('5h33m 给小时+分钟', resetCountdownText(inFuture(5 * HOUR + 33 * 60000)) === '5h33m')
+rowsCheck('34m 给分钟', resetCountdownText(inFuture(34 * 60000)) === '34m')
+rowsCheck('已过期说即将重置', resetCountdownText(inFuture(-60000)) === '即将重置')
+rowsCheck('坏时间不给文案', resetCountdownText('nonsense') === '')
 
 // ---- OAuth SSE 帧解析（EventSource 会剥掉 `data:` 前缀，这里是最容易踩的一处）----
 const promptJson = JSON.stringify({ kind: 'prompt', promptId: 'p1', prompt: { kind: 'text', message: 'Enterprise URL/domain' } })

@@ -176,7 +176,12 @@ export function shortWindowLabel(name: unknown): string {
   return text === '' ? '窗口' : text.slice(0, 4)
 }
 
-/** 重置倒计时压缩格式（最多两个单位，零尾不显示）：34m / 5h / 5h33m / 3d5h / 4d。 */
+/**
+ * 重置倒计时压缩格式（最多两个单位，零尾不显示）：34m / 5h / 5h33m / 3d5h / 17d。
+ *
+ * 天数到两位数（≥10 天）就只留天数：那种量级下「17d10h」里的 10h 已经没意义，
+ * 反而是卡片头部最挤的一段（用户反馈）。
+ */
 export function resetCountdownText(iso: unknown): string {
   if (typeof iso !== 'string' || iso === '') return ''
   var time = new Date(iso).getTime()
@@ -191,6 +196,7 @@ export function resetCountdownText(iso: unknown): string {
   if (hours < 24) return min > 0 ? String(hours) + 'h' + String(min) + 'm' : String(hours) + 'h'
   var days = Math.floor(hours / 24)
   var restH = hours % 24
+  if (days >= 10) return String(days) + 'd'
   return restH > 0 ? String(days) + 'd' + String(restH) + 'h' : String(days) + 'd'
 }
 

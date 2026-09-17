@@ -185,4 +185,4 @@ export function apply(ctx: ClientContext) {
 export { normalizeSelection, onPlanChange, mergePlanAccount, dropPlanAccount, parseOauthFrame, isSafeBlankPrompt } from './data.js'
 export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort } from './model-seat.js'
 export { piAiBridgeRows, piAiUpstreamText, presetPickState, refreshFailure } from './settings.js'
-export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips } from './format.js'
+export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips, resetCountdownText } from './format.js'
