@@ -204,13 +204,18 @@ export interface AuthorizationService {
 /**
  * cordis 上下文。只声明我们用到的方法，其余走索引签名。
  *
- * `get` 拿服务、直接属性拿服务两种写法宿主都支持（ctx.get('llm') 与 ctx.llm），
- * 代码里用 `service()` 统一收口。
+ * 拿服务一律走 `get`：`ctx.<name>` 那种属性访问在 cordis 严格模式下要求 inject 列表里声明过
+ * `<name>`，否则抛 "cannot get property … without inject"。代码里用 `service()` 统一收口。
  */
 export interface PluginContext {
   get?: (name: string) => unknown
   effect: (fn: () => unknown, label?: string) => void
   inject?: (names: readonly string[], callback: (scope: PluginContext) => void) => void
+  /**
+   * 在当前 fiber 下挂一个子插件（函数 / 类 / `{ apply }` 对象）。返回的 fiber 是 thenable，
+   * await 它等于等这个插件加载完。我们用它把宿主缺的 authorization 服务挂上。
+   */
+  plugin?: (plugin: unknown, config?: unknown) => Promise<unknown>
   logger?: Logger | ((name: string) => Logger)
   [key: string]: unknown
 }

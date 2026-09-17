@@ -8,7 +8,8 @@
  *
  * 测试钩通过 /lib/oauth.js 的 `__testHook` 拿到 attempt 池与 `__oauth_*` 工具，避免私有状态外漏。
  */
-import { registerOAuthRoutes } from '../lib/oauth.js'
+import { ensureAuthorizationService, registerOAuthRoutes } from '../lib/oauth.js'
+import { hostPackageEntry } from '../lib/bridge.js'
 import { __oauth_attempt, __oauth_attempt_count, __oauth_reset } from '../lib/oauth-test-hooks.js'
 
 let failed = false
@@ -418,6 +419,88 @@ await (async () => {
     catch (cause) { threw = cause }
     check(c.name + '.service() 不抛', threw === null, true)
     check(c.name + '.service() 返回 undefined', result, undefined)
+  }
+})()
+
+/* ----------------------------- Test 10 ----------------------------- */
+/* ensureAuthorizationService：原版 dsh 的 bundle 都不挂 authorization 服务，插件得自己补。
+ * 四条路径——服务已在（不动）、缺席（挂上）、加载失败（降级）、ctx.plugin 不可用（降级）。
+ * 用注入的 loader 替身，不依赖本机装没装 dsh。 */
+
+await (async () => {
+  const makeCtx = (options) => {
+    const mounted = []
+    const warnings = []
+    return {
+      mounted,
+      warnings,
+      ctx: {
+        // 服务缺席 / 在场由 options.hasService 决定
+        get: (name) => (name === 'authorization' && options.hasService === true ? { list: () => [] } : undefined),
+        effect: (fn) => fn(),
+        ...(options.hasPlugin === false ? {} : { plugin: async (service) => { mounted.push(service) } }),
+        logger: () => ({ info() {}, warn: (m) => warnings.push(String(m)), error() {} }),
+      },
+    }
+  }
+
+  // a) 服务已在 → 不重复挂
+  {
+    const h = makeCtx({ hasService: true })
+    await ensureAuthorizationService(h.ctx, h.ctx.logger(), async () => ({ default: class {} }))
+    check('T10a.服务已在时不挂', h.mounted.length, 0)
+  }
+
+  // b) 缺席 → 挂上 default 导出
+  {
+    class FakeService {}
+    const h = makeCtx({ hasService: false })
+    await ensureAuthorizationService(h.ctx, h.ctx.logger(), async () => ({ default: FakeService }))
+    check('T10b.缺席时挂上 default', h.mounted.length, 1)
+    check('T10b.挂的是那个服务类', h.mounted[0], FakeService)
+  }
+
+  // c) 没有 default（CJS 风格命名导出）→ 用模块本身兜底
+  {
+    const mod = { AuthorizationService: class {} }
+    const h = makeCtx({ hasService: false })
+    await ensureAuthorizationService(h.ctx, h.ctx.logger(), async () => mod)
+    check('T10c.没有 default 时用模块本身', h.mounted.length, 1)
+    check('T10c.挂的是模块对象', h.mounted[0], mod)
+  }
+
+  // d) 加载失败 → 只 warn，不抛
+  {
+    const h = makeCtx({ hasService: false })
+    let threw = null
+    try {
+      await ensureAuthorizationService(h.ctx, h.ctx.logger(), async () => { throw new Error('包里没有这个模块') })
+    } catch (cause) { threw = cause }
+    check('T10d.加载失败不抛', threw === null, true)
+    check('T10d.没挂任何东西', h.mounted.length, 0)
+    check('T10d.留了一条 warn', h.warnings.length, 1)
+  }
+
+  // e) ctx.plugin 不可用 → 只 warn，不抛
+  {
+    const h = makeCtx({ hasService: false, hasPlugin: false })
+    let threw = null
+    try {
+      await ensureAuthorizationService(h.ctx, h.ctx.logger(), async () => ({ default: class {} }))
+    } catch (cause) { threw = cause }
+    check('T10e.没有 ctx.plugin 不抛', threw === null, true)
+    check('T10e.没挂任何东西', h.mounted.length, 0)
+    check('T10e.留了一条 warn', h.warnings.length, 1)
+  }
+
+  // f) 真解析器：本机装了 dsh 就给路径、没装给 undefined，两种都不许抛
+  {
+    let entry
+    let threw = null
+    try { entry = hostPackageEntry('@deepseek-ai/dsh-authorization') }
+    catch (cause) { threw = cause }
+    check('T10f.hostPackageEntry 不抛', threw === null, true)
+    check('T10f.结果要么 undefined 要么是 lib/index.js', entry === undefined || entry.endsWith('lib/index.js'), true)
   }
 })()
 

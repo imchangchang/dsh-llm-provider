@@ -17,6 +17,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { pathToFileURL } from 'node:url'
+import { hostPackageEntry } from './bridge.js'
 import {
   asRecord,
   readString,
@@ -143,6 +145,56 @@ function authorizationOf(ctx: PluginContext): AuthorizationService | undefined {
   } catch (cause) {
     // ctx.get 抛错（dsh 内部 mock / 反序列化异常）——同属性访问一样的处理：当作未挂载。
     return undefined
+  }
+}
+
+/** 加载一个宿主服务插件（默认走 {@link hostPackageEntry} 找宿主那一份）。测试可注入替身。 */
+export type HostServiceLoader = (specifier: string) => Promise<unknown>
+
+const loadHostService: HostServiceLoader = async (specifier: string) => {
+  const entry = hostPackageEntry(specifier)
+  if (entry === undefined) throw new Error(`宿主安装树里找不到 ${specifier}`)
+  return await import(pathToFileURL(entry).href)
+}
+
+/**
+ * 确保 `ctx.authorization` 在场：缺席就自己把宿主的 authorization seam 挂上。
+ *
+ * **为什么插件要做这件事**：原版 dsh 的两个 bundle（`dsh-base` 86 行、`dsh-web-app` 70 行）
+ * 都没有挂 `@deepseek-ai/dsh-authorization`——凭据侧只挂了 `dsh-credentials-local`。于是
+ * 官方 `llm-pi-ai` 里那句 `ctx.inject(['authorization'], …)` 从不触发、`registerPiAiFlows`
+ * 一次都不跑，OAuth flow 一个都没有：界面上的 OAuth 入口自然也就不存在。挂上这个服务之后
+ * 那段 inject 会按 cordis 的依赖响应式地跑起来，全部 catalog provider 的登录方式自动就位。
+ *
+ * 安全性：服务缺席时挂、在场时不动；拿不到包、加载失败、`ctx.plugin` 不可用都只降级成
+ * 「没有 OAuth 入口」，绝不抛出去——插件加载失败会让整个 dsh 起不来（踩过一次）。
+ *
+ * @param ctx - 插件上下文（要能取到 authorization 与 plugin 两个面）。
+ * @param logger - 宿主日志器，记录挂载结果。
+ * @param load - 宿主服务加载器；默认 {@link loadHostService}，测试注入替身。
+ */
+export async function ensureAuthorizationService(
+  ctx: PluginContext,
+  logger: Logger | undefined,
+  load: HostServiceLoader = loadHostService,
+): Promise<void> {
+  if (authorizationOf(ctx) !== undefined) return
+  const mount = ctx.plugin
+  if (typeof mount !== 'function') {
+    logger?.warn?.('宿主没有 ctx.plugin，authorization 服务无法挂载；OAuth 登录入口不可用')
+    return
+  }
+  try {
+    const mod = await load('@deepseek-ai/dsh-authorization')
+    const service = asRecord(mod)['default'] ?? mod
+    // 服务类经 ctx.plugin 挂进当前 fiber；cordis 的服务注册写在 root 的 store 上，
+    // 所以 llm-pi-ai 那边的 inject 也能看到它。
+    await mount.call(ctx, service)
+    logger?.info?.('已挂载 @deepseek-ai/dsh-authorization（原版 profile 没有这一行）')
+  } catch (error) {
+    logger?.warn?.(
+      `authorization 服务挂载失败，OAuth 登录入口不显示：${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 }
 

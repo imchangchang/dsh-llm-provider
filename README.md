@@ -140,7 +140,7 @@ Takes over the composer's `conversation.input.model` slot and the `/model` comma
 Adds a 「模型服务」 tab to the settings page (the official `ui-settings-models` entry is disabled), with two sub-tabs: 「服务商」 and 「pi-ai 桥接」.
 
 - Cards follow the official PluginCard: status dot, name, website link, one line of quota summary (`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`), and refresh time, per-card refresh and delete on the right. The expanded body shows the route configuration (route ID, masked key, API base URL, protocol, credential name) and that provider's model list with filtering and a detail card.
-- Adding a provider: pick a preset → enter key and endpoint → a live test must pass before it is written. Writes go to `llm-pi-ai.providers` via `settings/mutate` and to the credential store via `credentials/set`, the same storage the official page uses.
+- Adding a provider: pick a preset → enter key and endpoint (presets that ship an OAuth flow offer a sign-in button instead, writing to the same credential store) → a live test must pass before it is written. Writes go to `llm-pi-ai.providers` via `settings/mutate` and to the credential store via `credentials/set`, the same storage the official page uses.
 - Adding a key: when a route exists but has no credential, that row in the card body is an input field (the official Models page is disabled, so this is the only place to enter it). Saving it runs a live quota query immediately. Such providers are labelled 「缺密钥」 in the add-provider list rather than 「已配置」, so they stay selectable.
 - Removing: clears the route and the credential. Built-in native routes cannot be removed here.
 - The 「pi-ai 桥接」 sub-tab shows the current version and source, skipped candidates with reasons, the upstream version and the update button.
@@ -188,6 +188,11 @@ The host compares keys while resolving them for each provider and warns in the U
 | `POST /provider/refresh` | refresh one card's quota (live query, updates the global snapshot) |
 | `POST /provider/remove` | remove a provider (route and credential) |
 | `POST /provider/test` | query one provider's quota with the stored key (read-only, does not update the snapshot) |
+| `GET /provider/oauth/flows` | list the flows registered on `ctx.authorization` (same source as `preset.oauth` on `/provider/presets`) |
+| `POST /provider/oauth/begin` | start one attempt and return its attemptId immediately; the flow runs in the background and pushes events onto the SSE bus |
+| `GET /provider/oauth/stream` | SSE stream: `data: {kind:'notice'|'prompt'|'settled',...}`. 404 for an unknown attempt; an already-settled attempt gets its settled frame at once |
+| `POST /provider/oauth/respond` | the browser's answer to a prompt, routed to the pending resolver by attemptId + promptId |
+| `POST /provider/oauth/cancel` | withdraw an attempt (aborts the local signal and calls `authorization.cancel(key)` so the in-flight slot is released) |
 
 The add-provider form does not call `/provider/test`; it runs the official `llm/discoverModels` draft probe instead.
 
@@ -213,7 +218,6 @@ Dependencies are installed with `scripts/install-deps.sh`, not `npm install` dir
 - **Never modifies third-party files.** Not a byte of pi-ai is patched, even when its model data is a static snapshot that lags behind upstream — patching would break the registry integrity check and make installs unreproducible.
 - **Never modifies official plugins.** Takeover happens by disabling official entries in `cordis.patch.yml` (`llm-pi-ai`, `llm-deepseek`, `ui-model-selection`, `ui-settings-models`); everything else official is untouched. The plugin's own model seat registers with `priority: -10`, which is what would shadow an official occupant at the same slot.
 - **Key values never leave the host process.** The browser half receives conclusions and metadata only (a mask of the first 3 and last 4 characters).
-- **No browser sessions.** Only API-key providers are supported.
 - **The web server has no authentication** (dsh's design; it binds to loopback by default). These routes assume loopback-only reachability: exposing the host on `0.0.0.0` exposes balances and credential names through `/plan/status`.
 
 ## Effect on model requests
@@ -240,23 +244,46 @@ Not implemented yet:
 
 Out of scope:
 
-- Providers that need a browser session (OAuth for Claude, Codex, Gemini, Grok, Copilot). The Kimi console API needs a web-session JWT and is left out for the same reason.
+- The Kimi console API, which needs a web-session JWT.
 - Forking the official plugin sources, or taking on the monorepo layout (which Typert Remote would require).
+
+### OAuth / subscription sign-in
+
+The `dsh-authorization` seam owns the prompt vocabulary, the `AuthInteraction` relay and the commit check; the official `llm-pi-ai` registers a flow for every provider in the pi-ai catalog (31 api-key, 6 subscription, plus Codex-only OAuth). Two pieces were missing: **nobody mounted the service**, and there was no browser-side wire.
+
+**Piece one: stock dsh does not mount the authorization service.** The patch layer of both official bundles (`dsh-base`, 86 rows; `dsh-web-app`, 70 rows) mounts `@deepseek-ai/dsh-credentials-local` (the credential store) and not `@deepseek-ai/dsh-authorization`. The latter declares no `dsh.bundle` field, so it cannot be listed as a profile bundle either — doing so makes dsh fail with "declares no dsh.bundle" and the whole profile refuses to start. The consequence: the official `ctx.inject(['authorization'], …)` inside `llm-pi-ai` never fires, `registerPiAiFlows` never runs, and **no OAuth flow exists at all**, so no sign-in entry appears in the UI.
+
+The plugin fills this at startup: `ensureAuthorizationService()` in `src/oauth.ts` resolves the host's own copy of `@deepseek-ai/dsh-authorization` through the host anchors and mounts it with `ctx.plugin()`. Cordis registers services in the root store, so once it is up the official inject fires reactively and registers every catalog provider's sign-in methods — without touching a line of the official plugin. The observed chain is: service absent → inject registered → we mount → callback fires → `registerFlow` succeeds. A missing package, a failed load or an absent `ctx.plugin` all degrade to "no OAuth entry" instead of throwing, because a plugin that fails to load takes the whole dsh process with it. Resolution deliberately uses the host's copy: shipping a second copy inside a third-party plugin would pull in a second cordis runtime and cross-wire service registration.
+
+**Piece two: the browser-side wire.** That is what this plugin adds (`src/oauth.ts`, routes in the HTTP table below):
+
+- A background attempt plus an in-memory event bus (Node `EventEmitter`), aligned with `dsh-authorization`'s "attempts are not persisted" rule — a page refresh drops the attempt rather than leaving half-initialized state.
+- The browser talks to the host over SSE (`Content-Type: text/event-stream`); the flow pushes `notice` (message + URL + code), `prompt` (text / secret / select) and the final `settled` frame. A browser that reopens the EventSource reads the closing frame instead of restarting the attempt.
+- One attempt per credential key: the seam refuses a second one (`ALREADY_IN_FLIGHT`) and the route answers 409 first.
+- Attempts idle for five minutes are swept (no leak after a dropped connection); a settled attempt stays until that TTL so a reconnect still sees the result.
+- The client recognises `preset.oauth` in the add-provider form: the button replaces the API-key input, the dialog renders notices and prompts by kind (input or select), and a successful sign-in refreshes the cards through `onAdded`.
+
+Boundaries:
+
+- **Attempts are not durable** — a hard limit of `dsh-authorization`: refreshing the page loses the attempt, and an interrupted sign-in has to be redone.
+- **Provider-side text prompts** — for example Copilot enterprise's "GitHub Enterprise URL/domain" arrives as `kind: text` and renders as a plain input.
+- **A failed OAuth attempt writes no credential** — the commit check requires a write observed during that attempt; failures and cancellations travel as an abort signal and the seam reclaims the in-flight slot itself.
 
 ## Source layout
 
 | Path | Purpose |
 |---|---|
 | `src/index.ts` | host entry: mounts the bridge, registers the HTTP routes |
-| `src/bridge.ts` | bridge loading: copy the bundle, pick pi-ai through the check, manage links |
+| `src/bridge.ts` | bridge loading: copy the bundle, pick pi-ai through the check, manage links; `hostPackageEntry()` resolves official packages through the host anchors |
 | `src/updater.ts` | upstream updater: check the registry, verify the tarball, install, mark pending |
 | `src/routes.ts` | route discovery, website links, display name fallback |
-| `src/provider-presets.ts` | preset list for adding a provider (generated from the pi-ai catalog plus Custom Gateway) |
+| `src/provider-presets.ts` | preset list for adding a provider (generated from the pi-ai catalog plus Custom Gateway); marks OAuth-only providers |
+| `src/oauth.ts` | OAuth sign-in bridge: mounts the `authorization` service the official bundles never mount, and exposes its flows to the browser (5 HTTP routes + SSE) |
 | `src/model-details.ts` | model details: read the providers data files of the active pi-ai package |
 | `src/pi-ai-names.ts` | read names from the pi-ai registry (the source of display names) |
 | `src/credential-check.ts` | credential check |
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
 | `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | seven offline tests (no dsh, no services) |
+| `test/*.mjs` | eight offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

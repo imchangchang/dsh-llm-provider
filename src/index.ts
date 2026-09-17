@@ -29,7 +29,7 @@ import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes
 import { presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
 import { findSharedCredentials } from './credential-check.js'
-import { registerOAuthRoutes } from './oauth.js'
+import { ensureAuthorizationService, registerOAuthRoutes } from './oauth.js'
 import type { AccountStatus } from './adapters/shared.js'
 import {
   asRecord,
@@ -74,7 +74,7 @@ export interface PlanSnapshot {
 
 export const Config = bridge.ok ? bridge.plugin.Config : Schema.object({})
 
-export function apply(ctx: PluginContext, config: unknown): void {
+export async function apply(ctx: PluginContext, config: unknown): Promise<void> {
   /** 拿宿主服务：只走 ctx.get，不做属性访问兜底。
    *
    * cordis 严格模式下 `ctx[name]` 这种属性访问要求 inject 列表里声明 `name`，否则抛
@@ -505,6 +505,15 @@ export function apply(ctx: PluginContext, config: unknown): void {
 
   // OAuth / device-code 登录桥：把官方 llm-pi-ai bundle 已经注册到 ctx.authorization 的 flow
   // 暴露给浏览器端（5 条路由：flows / begin / stream / respond / cancel）。详见 ./oauth.ts 头部注释。
+  //
+  // 两件事有先后：**先确保 authorization 服务在场**，再挂路由。原版 dsh 的 bundle 都没挂
+  // 这个服务（见 ensureAuthorizationService 的注释），服务不在时官方 llm-pi-ai 的
+  // inject(['authorization']) 不触发、flow 一个都不注册，界面上的 OAuth 入口也就是空的。
+  // 服务在场后 cordis 会自己把那段 inject 跑起来，不用我们碰官方插件。
+  //
+  // apply 因此是异步的：cordis 会 await 插件返回的 promise（Fiber._execute 处理 thenable），
+  // 路由在服务就位之后才注册。
+  await ensureAuthorizationService(ctx, logger)
   registerOAuthRoutes(ctx, webServer)
 
   logger?.info?.('dsh-llm-provider active: GET /plan/status, GET /provider/status, POST /provider/update, /provider/oauth/*')

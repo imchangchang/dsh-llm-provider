@@ -145,32 +145,41 @@ function resolvePackageRoot(fromFile: string, specifier: string): string | undef
 }
 
 /**
- * 官方 llm-pi-ai bundle 的实际位置。
+ * 沿解析链找宿主包时的锚点文件（文件不必存在，只借它的路径当起点）。
  *
- * 它是桥接要拷的那份源文件。路径同样不写死：按「profile 的 node_modules → dsh 安装目录
- * （全局 node_modules）→ 插件自己」的顺序沿解析链找，找到哪个用哪个。
- * @returns bundle 入口文件的绝对路径；找不到返回 undefined。
+ * 顺序：`$DSH_HOME/profiles/node_modules` → dsh 安装树（Windows 官方安装包放在
+ * `<node>/node_modules`，POSIX 在 `<node>/lib/node_modules`）→ 插件自己。
  */
-function findSourceBundle(): string | undefined {
+function hostAnchors(): string[] {
   const anchors: string[] = []
   try {
     anchors.push(join(resolveDshHome(), 'profiles', 'node_modules', '_anchor.js'))
   } catch { /* 拿不到 DSH_HOME 就少一个锚点 */ }
-  // dsh 的安装树：Windows 的官方安装包放在 <node>/node_modules，POSIX 在 <node>/lib/node_modules
   const nodeDir = dirname(process.execPath)
   anchors.push(join(nodeDir, 'node_modules', '_anchor.js'))
   anchors.push(join(nodeDir, '..', 'lib', 'node_modules', '_anchor.js'))
   anchors.push(join(pluginRoot, '_anchor.js'))
+  return anchors
+}
 
-  const bundleSpec = '@deepseek-ai/dsh-llm-pi-ai'
+/**
+ * 按锚点找一个宿主包（`@deepseek-ai/*`）的入口文件。
+ *
+ * 与 {@link findSourceBundle} 同一套解析：包可能被提升到任意一层 node_modules，也可能嵌在
+ * dsh 包自己的 node_modules 里。用的是宿主那一份——第三方插件自己再装一份同名包会带进第二份
+ * cordis 运行时，服务注册就串了。
+ *
+ * @param specifier - 包名。
+ * @returns 入口文件绝对路径；找不到返回 undefined。
+ */
+export function hostPackageEntry(specifier: string): string | undefined {
   const seen = new Set<string>()
-  for (const anchor of anchors) {
+  for (const anchor of hostAnchors()) {
     const roots: string[] = []
-    const direct = resolvePackageRoot(anchor, bundleSpec)
+    const direct = resolvePackageRoot(anchor, specifier)
     if (direct !== undefined) roots.push(direct)
-    // 也可能是嵌在 dsh 包自己的 node_modules 里（npm 全局安装遇到版本冲突时就这样摆）
     const dshRoot = resolvePackageRoot(anchor, '@deepseek-ai/dsh')
-    if (dshRoot !== undefined) roots.push(join(dshRoot, 'node_modules', ...bundleSpec.split('/')))
+    if (dshRoot !== undefined) roots.push(join(dshRoot, 'node_modules', ...specifier.split('/')))
     for (const root of roots) {
       if (seen.has(root)) continue
       seen.add(root)
@@ -179,6 +188,17 @@ function findSourceBundle(): string | undefined {
     }
   }
   return undefined
+}
+
+/**
+ * 官方 llm-pi-ai bundle 的实际位置。
+ *
+ * 它是桥接要拷的那份源文件。路径同样不写死：按「profile 的 node_modules → dsh 安装目录
+ * （全局 node_modules）→ 插件自己」的顺序沿解析链找，找到哪个用哪个。
+ * @returns bundle 入口文件的绝对路径；找不到返回 undefined。
+ */
+function findSourceBundle(): string | undefined {
+  return hostPackageEntry('@deepseek-ai/dsh-llm-pi-ai')
 }
 
 /**

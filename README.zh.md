@@ -79,11 +79,11 @@ scripts/test-profile.sh stop   # 停掉
 node lib/adapters/run.js all            # 跑全部额度适配器（key 从环境变量或 ~/.dsh/.credentials.yaml 找）
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # 构建 + 七个离线测试；自测与合入跑的就是这条
+npm test                                # 构建 + 八个离线测试；自测与合入跑的就是这条
 npm run typecheck                       # tsc --noEmit（npm test 不含它）
 ```
 
-七个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、供应商预设清单、vendor 状态合并、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
+八个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
 
 ## 实现
 
@@ -248,9 +248,13 @@ npm run typecheck  # tsc --noEmit
 
 ### OAuth / subscription 登录
 
-dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 的中继、commit 校验；官方 `llm-pi-ai` bundle 又在 mount 时把 pi-ai catalog 全部 provider（31 个 api-key + 6 个 subscription + Codex-only-OAuth）注册成 flow——所以**所有走 OAuth / device-code 的 provider 已经能用**，差的只是把 `ctx.authorization` 接到浏览器端。
+dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 的中继、commit 校验；官方 `llm-pi-ai` 又在 mount 时把 pi-ai catalog 全部 provider（31 个 api-key + 6 个 subscription + Codex-only-OAuth）注册成 flow。差的本来有两段：**服务没人挂**，以及浏览器端没有 wire。
 
-本插件补这一段（`src/oauth.ts`，路由见 HTTP 接口表）：
+**第一段：原版 dsh 不挂 authorization 服务。** 两个官方 bundle 的 patch 层（`dsh-base` 86 行、`dsh-web-app` 70 行）都只挂了 `@deepseek-ai/dsh-credentials-local`（凭据存储），没有 `@deepseek-ai/dsh-authorization`。而 `@deepseek-ai/dsh-authorization` 的 package.json 里没有 `dsh.bundle` 字段，所以也不能当 profile bundle 列进去（列了 dsh 直接报 "declares no dsh.bundle"，整个 profile 起不来）。结果是官方 `llm-pi-ai` 里那句 `ctx.inject(['authorization'], …)` 从不触发、`registerPiAiFlows` 一次都不跑，**OAuth flow 一个都没有**——界面上自然也没有 OAuth 入口。
+
+本插件在启动时补这一段：`ensureAuthorizationService()`（`src/oauth.ts`）在服务缺席时，按宿主锚点解析出宿主自己那份 `@deepseek-ai/dsh-authorization`，用 `ctx.plugin()` 挂到当前 fiber 上。cordis 的服务注册写在 root 的 store 上，所以挂完之后官方 `llm-pi-ai` 的 inject 会**响应式地**跑起来，把 catalog 里每个 provider 的登录方式注册齐全——官方插件一行不改。实测链路：服务缺席 → inject 登记 → 我们挂载 → 回调触发 → `registerFlow` 成功。拿不到包、加载失败、`ctx.plugin` 不可用都只降级成「没有 OAuth 入口」，不抛——插件加载失败会让整个 dsh 起不来。解析用宿主那一份、不另装同名包：第三方插件自带一份会引进第二份 cordis 运行时，服务注册就串了。
+
+**第二段：浏览器侧的 wire。** 本插件补这一段（`src/oauth.ts`，路由见 HTTP 接口表）：
 
 - 后台 attempt + 内存事件总线（Node `EventEmitter`），与 `dsh-authorization`「attempt 不可持久」对齐——刷新页面就丢 attempt，不会留下半初始化状态。
 - 浏览器↔宿主走 SSE（`Content-Type: text/event-stream`）；flow 推 `notice`（message + URL + code）、`prompt`（text / secret / select 三种 kind）、`finished`。浏览器重启 EventSource 时直接读 SSE 收尾帧，不必重开 attempt。
@@ -269,16 +273,16 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 | 路径 | 作用 |
 |---|---|
 | `src/index.ts` | 宿主入口：挂桥接、注册 HTTP 路由 |
-| `src/bridge.ts` | 桥接装载：拷 bundle、按检查挑 pi-ai、管理软链 |
+| `src/bridge.ts` | 桥接装载：拷 bundle、按检查挑 pi-ai、管理软链；`hostPackageEntry()` 供按宿主锚点解析官方包 |
 | `src/updater.ts` | 上游更新器：查 registry、校验 tarball、装依赖、标待重启 |
 | `src/routes.ts` | 路由发现、官网链接、显示名兜底 |
 | `src/provider-presets.ts` | 添加供应商的预设清单（pi-ai 目录动态生成 + Custom Gateway） |
-| `src/oauth.ts` | OAuth / device-code 登录桥：把 `ctx.authorization` 暴露给浏览器端（5 条 HTTP 路由 + SSE） |
+| `src/oauth.ts` | OAuth 登录桥：补齐官方没挂的 `authorization` 服务，并把 flow 暴露给浏览器端（5 条 HTTP 路由 + SSE） |
 | `src/model-details.ts` | 模型详情：读生效 pi-ai 包的 providers 数据文件 |
 | `src/pi-ai-names.ts` | 读 pi-ai 注册表里的名字（显示名的来源之一） |
 | `src/credential-check.ts` | 凭据检查 |
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
 | `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
-| `test/*.mjs` | 七个离线测试（不进 dsh、不起服务） |
+| `test/*.mjs` | 八个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |
