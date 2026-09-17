@@ -28,6 +28,12 @@ export interface ProviderPreset {
   models: number
   billing: boolean
   custom: boolean
+  /**
+   * OAuth-only：pi-ai 这个 provider 不接受 apiKey，只走 subscription / OAuth。
+   * 客户端就不该给密码输入框 fallback——要么 OAuth 登录成功，要么不可用。
+   * 硬表为准（见 `OAUTH_ONLY_PROVIDERS`），buildPresets 不管 catalog 数据都标 true。
+   */
+  oauthOnly: boolean
 }
 
 /** 带"已配置"标记的预设（/provider/presets 的响应体）。 */
@@ -46,6 +52,12 @@ export interface ProviderPresetWithMeta extends ProviderPreset {
     methods: { id: string, label: string }[]
     inFlight: boolean
   }
+  /**
+   * OAuth-only：pi-ai 这个 provider 不接受 apiKey，只走 subscription / OAuth。
+   * 客户端就不该给密码输入框 fallback——要么 OAuth 登录成功，要么不可用。
+   * 硬表为准（见 `OAUTH_ONLY_PROVIDERS`），buildPresets 不管 catalog 数据都标 true。
+   */
+  oauthOnly: boolean
 }
 
 /** buildPresets 内部累积的每 provider 信息；目录来源和 EXTRA_PRESETS 都归到这个形状。 */
@@ -55,6 +67,12 @@ interface PresetSource {
   models?: number
   label?: string
   custom?: boolean
+  /**
+   * OAuth-only：pi-ai 里这个 provider 只走 subscription / OAuth，没有 apiKey 路径——
+   客户端就不该给密码输入框。hardcode 表（pi-ai 0.85.x 当前 OAuth-only 的 provider：
+   * github-copilot / openai-codex；以后 pi-ai 加新的 OAuth-only provider 时跟这里一并加）。
+   */
+  oauthOnly?: boolean
 }
 
 /** pi-ai 目录外只保留一个任意网关入口：端点、协议、名字全由用户自定义。 */
@@ -66,6 +84,12 @@ const EXTRA_PRESETS: (PresetSource & { id: string })[] = [
 export function keyEnvOf(routeId: string): string {
   return String(routeId).toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_API_KEY'
 }
+
+/** pi-ai 0.85.x 里只走 OAuth / subscription 的 provider id 集。客户端据此把密码输入框换成 OAuth 引导。 */
+const OAUTH_ONLY_PROVIDERS: ReadonlySet<string> = new Set([
+  'github-copilot',
+  'openai-codex',
+])
 
 function makePreset(id: string, info: PresetSource): ProviderPreset {
   const baseURL = typeof info.baseURL === 'string' ? info.baseURL : ''
@@ -80,6 +104,8 @@ function makePreset(id: string, info: PresetSource): ProviderPreset {
     models: typeof info.models === 'number' ? info.models : 0,
     billing: findAdapter(id, baseURL) !== undefined,
     custom: info.custom === true,
+    // OAUTH_ONLY 用硬表为准——pi-ai 0.85.x OAuth-only 的 provider 不会变。
+    oauthOnly: OAUTH_ONLY_PROVIDERS.has(id),
   }
 }
 

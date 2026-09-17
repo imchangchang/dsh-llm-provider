@@ -84,6 +84,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
    * 路径处理降级（路由 handler 通常会回 500，但不再把整插件拖垮）。
    */
   const service = <T>(serviceName: string): T | undefined => {
+    if (ctx.get === undefined) return undefined
     try {
       const value = ctx.get(serviceName)
       return value === null || value === undefined ? undefined : (value as T)

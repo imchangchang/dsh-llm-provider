@@ -559,21 +559,6 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       react.createElement(
         'div',
         { className: 'pv_line pv_row' },
-        react.createElement('span', null, 'API 密钥'),
-        react.createElement('input', {
-          className: 'pv_field pv_key',
-          type: 'password',
-          placeholder: 'sk-…',
-          value: form.key,
-          onChange: function (event: FieldEvent) { patchForm({ key: event.target.value }) },
-        }),
-        form.websiteUrl === undefined
-          ? null
-          : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer', style: { marginLeft: '8px' } }, '获取密钥 ↗'),
-      ),
-      react.createElement(
-        'div',
-        { className: 'pv_line pv_row' },
         react.createElement('span', null, 'API 地址'),
         react.createElement('input', {
           className: form.baseURL === '' ? 'pv_field pv_key' : 'pv_field pv_ro',
@@ -603,9 +588,11 @@ function AddProviderPanel(props: AddProviderPanelProps) {
               readOnly: true,
             }),
       ),
-      // API 密钥 / OAuth 登录：preset 自带 OAuth flow 就用 OAuth 按钮代替密码输入。
-      // 两条路并存：选了非 default gateway 也能手动填 key 覆盖；OAuth 流结束后
-      // attempt 写进 dsh 凭据服务，照常走与手动填 key 相同的存储路径。
+      // 「登录方式」三态：
+      //   1) OAuth 注册了：渲染 OAuth 按钮（点击起 attempt，弹窗显示 device code / 提示）。
+      //   2) OAuth-only 但 OAuth 未注册（profile 没装 dsh-authorization bundle）：显示
+      //      「本机未挂载 OAuth 服务」提示，**不**给密码框——这个 provider 不接受 apiKey。
+      //   3) 其他：常规密码输入框 + 获取密钥链接。
       pickedPreset !== undefined && pickedPreset.oauth !== undefined
         ? react.createElement(
             'div',
@@ -638,21 +625,32 @@ function AddProviderPanel(props: AddProviderPanelProps) {
                 : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer' }, '获取密钥 ↗'),
             ),
           )
-        : react.createElement(
-            'div',
-            { className: 'pv_line pv_row' },
-            react.createElement('span', null, 'API 密钥'),
-            react.createElement('input', {
-              className: 'pv_field pv_key',
-              type: 'password',
-              placeholder: 'sk-…',
-              value: form.key,
-              onChange: function (event: FieldEvent) { patchForm({ key: event.target.value }) },
-            }),
-            form.websiteUrl === undefined
-              ? null
-              : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer', style: { marginLeft: '8px' } }, '获取密钥 ↗'),
-          ),
+        : pickedPreset !== undefined && pickedPreset.oauthOnly === true
+          ? react.createElement(
+              'div',
+              { className: 'pv_line pv_row' },
+              react.createElement('span', null, '登录方式'),
+              react.createElement(
+                'span',
+                { className: 'plan_note plan_badText' },
+                pickedPreset.label + ' 只走 OAuth / 订阅登录。当前 profile 未挂载 OAuth 服务（@deepseek-ai/dsh-authorization bundle 没列在 profile.bundles 里）。把它加上可保活 OAuth 登录。',
+              ),
+            )
+          : react.createElement(
+              'div',
+              { className: 'pv_line pv_row' },
+              react.createElement('span', null, 'API 密钥'),
+              react.createElement('input', {
+                className: 'pv_field pv_key',
+                type: 'password',
+                placeholder: 'sk-…',
+                value: form.key,
+                onChange: function (event: FieldEvent) { patchForm({ key: event.target.value }) },
+              }),
+              form.websiteUrl === undefined
+                ? null
+                : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer', style: { marginLeft: '8px' } }, '获取密钥 ↗'),
+            ),
       // 凭据名：单独一行小字，不挤在协议行右侧
       react.createElement(
         'div',

@@ -106,6 +106,11 @@ export interface ProviderPreset {
     methods: { id: string, label: string }[]
     inFlight: boolean
   }
+  /**
+   * OAuth-only：pi-ai 这个 provider 不接受 apiKey，只走 subscription / OAuth。
+   * 客户端就不该给密码输入框 fallback——要么 OAuth 登录成功，要么不可用。
+   */
+  oauthOnly?: boolean
 }
 
 /* ---------------------------- OAuth ---------------------------- */
