@@ -200,6 +200,13 @@ const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source:
 rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
 rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
 
+// ---- 只有百分比、没有绝对量的窗口，才退回显示百分比 ----
+const percentOnly = headlineChips({
+  id: 'x', displayName: 'X', kind: 'quota', authConfigured: true, balances: [],
+  windows: [{ window: '5 小时窗口', percentLeft: 84 }],
+})
+rowsCheck('算不出绝对量时退回百分比', percentOnly.some((c) => c.label === '5h' && c.text === '84%'))
+
 // ---- 不带百分比的窗口（Copilot 的「不限量」）也要出 chip，不能整条消失 ----
 const unlimitedChips = headlineChips({
   id: 'github-copilot', displayName: 'GitHub Copilot', kind: 'quota', authConfigured: true,
@@ -210,7 +217,8 @@ const unlimitedChips = headlineChips({
 })
 rowsCheck('不限量窗口出 chip', unlimitedChips.some((c) => c.label === '对话' && c.text === '不限量'))
 rowsCheck('不限量 chip 不带百分比（不参与配色）', unlimitedChips.find((c) => c.label === '对话').percent === undefined)
-rowsCheck('真额度窗口照旧带百分比', unlimitedChips.some((c) => c.label === '高级请求' && c.text === '100%'))
+rowsCheck('有绝对数字的窗口显示 剩余/总额', unlimitedChips.some((c) => c.label === '高级请求' && c.text === '300/300'))
+rowsCheck('绝对数字的窗口仍带 percent（颜色分级要用）', unlimitedChips.find((c) => c.label === '高级请求').percent === 100)
 
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',
