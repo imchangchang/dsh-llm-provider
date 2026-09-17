@@ -201,7 +201,12 @@ export function quotaTipOf(account: PlanAccount | undefined | null): string | un
   var parts: string[] = []
   var windows = Array.isArray(account.windows) ? account.windows : []
   for (var i = 0; i < windows.length; i += 1) {
-    if (typeof windows[i].percentLeft !== 'number') continue
+    if (typeof windows[i].percentLeft !== 'number') {
+      if (typeof windows[i].note === 'string' && windows[i].note !== '') {
+        parts.push(shortWindowLabel(windows[i].window) + ' ' + windows[i].note)
+      }
+      continue
+    }
     var text = shortWindowLabel(windows[i].window) + '余量 ' + String(windows[i].percentLeft) + '%'
     if (windows[i].resetAt !== undefined && windows[i].resetAt !== '') {
       text += ' ◷ ' + resetCountdownText(windows[i].resetAt)
@@ -229,7 +234,17 @@ export function headlineChips(account: PlanAccount | undefined | null): Headline
   var fiveHour: HeadlineChip[] = []
   var others: HeadlineChip[] = []
   for (var i = 0; i < windows.length; i += 1) {
-    if (typeof windows[i].percentLeft !== 'number') continue
+    // 不带百分比的窗口（适配器标了 note，比如 Copilot 的「不限量」）：出一枚纯文字 chip，
+    // 不参与颜色分级，也不跟倒计时。直接 continue 会让它整条消失，用户以为漏了。
+    if (typeof windows[i].percentLeft !== 'number') {
+      var noteText = windows[i].note
+      if (typeof noteText === 'string' && noteText !== '') {
+        var noteChip: HeadlineChip = { label: shortWindowLabel(windows[i].window), text: noteText, percent: undefined }
+        if (/5\s*小时/.test(String(windows[i].window))) fiveHour.push(noteChip)
+        else others.push(noteChip)
+      }
+      continue
+    }
     var chip: HeadlineChip = {
       label: shortWindowLabel(windows[i].window),
       text: String(windows[i].percentLeft) + '%',

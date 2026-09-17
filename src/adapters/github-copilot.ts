@@ -25,17 +25,25 @@ const COPILOT_HEADERS: Record<string, string> = {
   'x-github-api-version': '2022-11-28',
 }
 
-/** 一个配额快照（`quota_snapshots` 的一项）→ 额度窗口。 */
+/**
+ * 一个配额快照（`quota_snapshots` 的一项）→ 额度窗口。
+ *
+ * **不限量要单独认**：Copilot 对 chat / completions 返回 `unlimited: true` 且
+ * entitlement=0、remaining=0、percent_remaining=100。照 percent 显示成「100%」是错的
+ * （看着像"额度全在"，实际是"不计量"），所以这类窗口不给百分比，改成一句说明。
+ */
 function snapshotWindow(label: string, raw: unknown, resetAt: string | undefined): QuotaWindow | undefined {
   const record = asRecord(raw)
+  if (record['unlimited'] === true) return { window: label, note: '不限量' }
   const limit = num(record['entitlement'])
   const remaining = num(record['remaining'])
   if (limit === undefined && remaining === undefined) return undefined
+  // 没有上限也没有剩余（entitlement 0 之类）同样当"不计量"处理，别硬套一个百分比。
+  if (limit === 0 && remaining === 0) return { window: label, note: '不限量' }
   return {
     window: label,
     limit,
     remaining,
-    // 上游的 percent_remaining 是"剩余"语义，但 entitlement 为 0（不限量）时没意义，
     // 与其它适配器一致：优先自己按 limit/remaining 算，算不出才用上游字段。
     percentLeft: percentLeftOf(limit, remaining) ?? clampPercent(record['percent_remaining']),
     resetAt,

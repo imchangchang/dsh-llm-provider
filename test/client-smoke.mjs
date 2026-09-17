@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable } = moduleExports
+const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -199,6 +199,18 @@ rowsCheck('服务没挂上时给原因', offRow !== undefined && typeof offRow.t
 const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: true, flows: 0 })
 rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
 rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
+
+// ---- 不带百分比的窗口（Copilot 的「不限量」）也要出 chip，不能整条消失 ----
+const unlimitedChips = headlineChips({
+  id: 'github-copilot', displayName: 'GitHub Copilot', kind: 'quota', authConfigured: true,
+  balances: [], windows: [
+    { window: '高级请求', limit: 300, remaining: 300, percentLeft: 100, resetAt: '2026-10-01' },
+    { window: '对话', note: '不限量' },
+  ],
+})
+rowsCheck('不限量窗口出 chip', unlimitedChips.some((c) => c.label === '对话' && c.text === '不限量'))
+rowsCheck('不限量 chip 不带百分比（不参与配色）', unlimitedChips.find((c) => c.label === '对话').percent === undefined)
+rowsCheck('真额度窗口照旧带百分比', unlimitedChips.some((c) => c.label === '高级请求' && c.text === '100%'))
 
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',

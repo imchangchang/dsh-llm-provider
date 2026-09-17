@@ -53,6 +53,27 @@ check('请求打到 copilot_internal/user', lastRequest.url, 'https://api.github
 check('用 GitHub token 认证（token 前缀，不是 Bearer）', lastRequest.headers.authorization, 'token gho_token')
 check('带 Copilot 客户端头', lastRequest.headers['editor-version'], 'vscode/1.107.0')
 
+/* ---- 真实返回里的不限量（实测：chat/completions 是 unlimited:true、entitlement 0）----
+ * 照 percent_remaining 显示成 100% 会误导——看着像"额度全在"，其实是"不计量"。 */
+stubFetch(200, {
+  copilot_plan: 'individual',
+  quota_reset_date: '2026-10-01',
+  quota_snapshots: {
+    chat: { overage_count: 0, percent_remaining: 100, quota_id: 'chat', unlimited: true, remaining: 0, entitlement: 0 },
+    completions: { percent_remaining: 100, quota_id: 'completions', unlimited: true, remaining: 0, entitlement: 0 },
+    premium_interactions: { percent_remaining: 100, quota_id: 'premium_interactions', unlimited: false, quota_remaining: 300, remaining: 300, entitlement: 300 },
+  },
+})
+const mixed = await copilot.query({ ...base, key: 'gho_token' })
+// 适配器的窗口顺序：先 premium_interactions，再 chat（completions 拿不到就没这一条）
+check('窗口顺序：高级请求在前', mixed.windows.map((w) => w.window), ['高级请求', '对话'])
+check('真额度照旧算百分比', mixed.windows[0].percentLeft, 100)
+check('真额度带 remaining/limit', [mixed.windows[0].remaining, mixed.windows[0].limit], [300, 300])
+check('真额度带重置日', mixed.windows[0].resetAt, '2026-10-01')
+check('不限量的窗口不给百分比', mixed.windows[1].percentLeft, undefined)
+check('不限量的窗口标成「不限量」', mixed.windows[1].note, '不限量')
+check('不限量的窗口不带倒计时', mixed.windows[1].resetAt, undefined)
+
 /* ---- 免费档：monthly_quotas / limited_user_quotas ---- */
 stubFetch(200, {
   copilot_plan: 'individual',
