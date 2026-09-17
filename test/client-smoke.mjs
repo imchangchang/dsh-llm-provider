@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { routeProfileOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText } = moduleExports
+const { routeProfileOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -240,6 +240,12 @@ rowsCheck('select 提问不自动答',
   isSafeBlankPrompt({ kind: 'select', message: 'Select OpenAI Codex login method:', options: [] }) === false)
 rowsCheck('secret 提问不自动答',
   isSafeBlankPrompt({ kind: 'secret', message: 'Enter token' }) === false)
+
+// ---- 强制选档：已经勾选的那一档也要能点（它是确认动作，不是空操作）----
+rowsCheck('强制选档时勾选那档可点', effortRowDisabled(false, true, true) === false)
+rowsCheck('普通换档时勾选那档置灰（点了也是空操作）', effortRowDisabled(false, true, false) === true)
+rowsCheck('提交中整面板不可点', effortRowDisabled(true, false, true) === true)
+rowsCheck('强制选档时其它档照常可点', effortRowDisabled(false, false, true) === false)
 
 // ---- 写进 settings 的路由配置：OAuth 授权过的不带 apiKeyEnv ----
 // 官方适配器看到 apiKeyEnv 就只认那个 ref，取不到值直接抛 MISSING_CREDENTIAL——

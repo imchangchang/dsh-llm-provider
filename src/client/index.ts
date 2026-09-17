@@ -183,6 +183,6 @@ export function apply(ctx: ClientContext) {
 // 纯函数，离线测试直接调；组件里用的是同一份实现
 
 export { normalizeSelection, onPlanChange, mergePlanAccount, dropPlanAccount, parseOauthFrame, isSafeBlankPrompt } from './data.js'
-export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort } from './model-seat.js'
+export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort, effortRowDisabled } from './model-seat.js'
 export { piAiBridgeRows, piAiUpstreamText, presetPickState, refreshFailure, routeProfileOf } from './settings.js'
 export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips, resetCountdownText } from './format.js'

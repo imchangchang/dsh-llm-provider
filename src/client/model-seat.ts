@@ -74,6 +74,23 @@ export function intervalCenterMap(oldIdx: number, oldLen: number, newLen: number
 }
 
 /**
+ * 推理档位面板里，某一档的行该不该置灰（不可点）。
+ *
+ * 普通换档流程里"点的就是当前那一档"是空操作，置灰即可；**强制选档流程里它恰恰是确认动作**
+ * ——用户选完新模型跳到这个面板，继承下来的那一档已经被打上勾，如果它点不动，用户想「就用
+ * 这一档」就没有出口（只能去点别的档再点回来，或者关掉菜单重来）。所以那种情况下必须可点。
+ *
+ * @param busy - 正在提交，整面板都不可点。
+ * @param isCurrent - 这一行就是当前（或强制流程里预选）的那一档。
+ * @param forcedPick - 是否处于「选完新模型、强制确认档位」的流程。
+ * @returns true = 置灰不可点。
+ */
+export function effortRowDisabled(busy: boolean, isCurrent: boolean, forcedPick: boolean): boolean {
+  if (busy === true) return true
+  return isCurrent === true && forcedPick !== true
+}
+
+/**
  * 切换模型时算"上一档"应该带过去的继承档位：
  *   1. 新模型没有 reasoning 元数据 → undefined（面板走空态）。
  *   2. 上一档是 undefined：
@@ -725,7 +742,7 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
       var pReasoning = pendingPick !== null ? pendingReasoning : reasoning
       var pEffective = pendingPick !== null ? pendingEffectiveEffort : effectiveEffort
       var headerNote = pendingPick !== null
-        ? '已选 ' + String(pendingPick.provider) + '/' + String(pendingPick.model) + '，请确认推理强度'
+        ? '已选 ' + String(pendingPick.provider) + '/' + String(pendingPick.model) + '，请确认推理强度（点一档即确认，含已勾选那档）'
         : null
       var choices: EffortChoice[] = []
       if (defaultEffortOf(pModel) === undefined) {
@@ -743,7 +760,7 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
             key: level.label,
             type: 'button',
             className: 'ms_option',
-            disabled: busy || isCur,
+            disabled: effortRowDisabled(busy, isCur, pendingPick !== null),
             onClick: function () { chooseEffort(level.effort) },
           },
           react.createElement('span', { className: 'ms_name' }, level.label),
