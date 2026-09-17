@@ -850,15 +850,14 @@ function renderOauthDialog(
     if (valueEl === null || text === undefined) return null
     return react.createElement(
       'div',
-      { style: { display: 'flex', gap: '10px', alignItems: 'center', marginTop: '6px' } },
-      react.createElement('span', { style: { flex: '0 0 48px', opacity: 0.6, fontSize: '0.9em' } }, label),
-      react.createElement('span', { style: { flex: '1 1 auto', minWidth: '0', wordBreak: 'break-all' } }, valueEl),
+      { className: 'pv_oauthRow' },
+      react.createElement('span', { className: 'pv_oauthLabel' }, label),
+      react.createElement('span', { className: 'pv_oauthValue' }, valueEl),
       react.createElement(
         'button',
         {
           type: 'button',
-          className: 'pv_action',
-          style: { marginLeft: '0', flex: '0 0 auto', minWidth: '62px', textAlign: 'center' },
+          className: 'pv_action pv_oauthCopy',
           title: title,
           onClick: function () { onCopy(text, what) },
         },
@@ -868,9 +867,9 @@ function renderOauthDialog(
   }
   return react.createElement(
     'div',
-    { className: 'pv_oauth', style: { border: '1px solid var(--pv-line, #e5e5e5)', borderRadius: '8px', padding: '12px', marginTop: '12px', background: 'var(--pv-bg-soft, #fafafa)' } },
-    react.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } },
-      react.createElement('strong', null, dialogTitle),
+    { className: 'pv_oauth' },
+    react.createElement('div', { className: 'pv_oauthHead' },
+      react.createElement('span', { className: 'pv_oauthTitle' }, dialogTitle),
       state.done !== undefined
         ? react.createElement('button', { type: 'button', className: 'pv_action', onClick: onClose }, '×')
         : react.createElement('button', { type: 'button', className: 'pv_action', onClick: onCancel }, t('oauthCancel')),
@@ -878,9 +877,9 @@ function renderOauthDialog(
     state.autoBlanked === true
       ? react.createElement(
           'div',
-          { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '4px', opacity: 0.85 } },
+          { className: 'pv_oauthNote' },
           react.createElement('span', null, t('oauthGithubCom')),
-          react.createElement('button', { type: 'button', className: 'pv_action', style: { marginLeft: '0' }, onClick: onUseEnterprise }, t('oauthUseEnterprise')),
+          react.createElement('button', { type: 'button', className: 'pv_action', onClick: onUseEnterprise }, t('oauthUseEnterprise')),
         )
       : null,
     lastNotice === undefined
@@ -896,32 +895,30 @@ function renderOauthDialog(
           copyRow('验证页', noticeUrl === undefined ? null :
             react.createElement(
               'a',
-              { href: noticeUrl, target: '_blank', rel: 'noreferrer', style: { wordBreak: 'break-all' } },
+              { href: noticeUrl, target: '_blank', rel: 'noreferrer' },
               noticeUrl,
             ), noticeUrl, 'link', '复制链接'),
           noticeCode === undefined
             ? null
             : react.createElement(
                 'div',
-                { style: { marginTop: '2px' } },
-                copyRow('串码', react.createElement('span', { style: { fontFamily: 'monospace', fontSize: '1.4em', letterSpacing: '0.04em' } }, noticeCode),
+                null,
+                copyRow('串码', react.createElement('span', { className: 'pv_oauthCode' }, noticeCode),
                   noticeCode, 'code', '复制串码'),
-                // 缩进到与串码同一列（标签 48px + 间距 10px），别顶到标签下面
-                react.createElement('div', { style: { opacity: 0.7, marginLeft: '58px', marginTop: '2px', fontSize: '0.9em' } }, '在打开的页面里输入这串码完成授权'),
+                react.createElement('div', { className: 'pv_oauthHint' }, '在打开的页面里输入这串码完成授权'),
               ),
         ),
     state.prompt === undefined
       ? null
       : react.createElement(
           'div',
-          { style: { marginTop: '8px' } },
+          { className: 'pv_oauthPrompt' },
           react.createElement('div', null, state.prompt.prompt.kind === 'secret' ? '🔒 ' : '', state.prompt.prompt.message),
           state.prompt.prompt.kind === 'select'
             ? react.createElement(
                 'select',
                 {
-                  className: 'pv_field',
-                  style: { width: '100%', marginTop: '4px' },
+                  className: 'pv_oauthField',
                   value: state.pendingSelect,
                   onChange: onSelectChange,
                   disabled: state.pendingBusy,
@@ -932,8 +929,7 @@ function renderOauthDialog(
                 }),
               )
             : react.createElement('input', {
-                className: 'pv_field',
-                style: { width: '100%', marginTop: '4px' },
+                className: 'pv_oauthField',
                 type: state.prompt.prompt.kind === 'secret' ? 'password' : 'text',
                 placeholder: state.prompt.prompt.placeholder,
                 value: state.pendingValue,
@@ -945,8 +941,7 @@ function renderOauthDialog(
             'button',
             {
               type: 'button',
-              className: 'pv_action',
-              style: { marginTop: '6px' },
+              className: 'pv_action pv_oauthSubmit',
               disabled: state.pendingBusy || (state.prompt.prompt.kind === 'secret' && state.pendingValue === ''),
               onClick: onSubmit,
             },
@@ -956,10 +951,10 @@ function renderOauthDialog(
     state.done === undefined
       ? null
       : state.done.status === 'authorized'
-        ? react.createElement('div', { className: 'plan_note', style: { marginTop: '8px', color: 'var(--pv-ok, #2a7)' } }, '✓ ' + t('oauthAuthorized'))
+        ? react.createElement('div', { className: 'pv_oauthDone pv_oauthDone_ok' }, '✓ ' + t('oauthAuthorized'))
         : state.done.status === 'cancelled'
-          ? react.createElement('div', { className: 'plan_note', style: { marginTop: '8px' } }, t('oauthCancelled'))
-          : react.createElement('div', { className: 'plan_note plan_badText', style: { marginTop: '8px' } }, t('oauthFailed').replace('{error}', state.done.error ?? '')),
+          ? react.createElement('div', { className: 'pv_oauthDone' }, t('oauthCancelled'))
+          : react.createElement('div', { className: 'pv_oauthDone pv_oauthDone_bad' }, t('oauthFailed').replace('{error}', state.done.error ?? '')),
   )
 }
 

@@ -94,6 +94,36 @@ var css =
   'background:var(--dsw-alias-interactive-bg-hover-solid,rgba(0,0,0,.05));border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));' +
   'border-radius:6px;padding:4px 12px;cursor:pointer}' +
   '.pv_action:disabled{opacity:.5;cursor:default}' +
+  // ---- OAuth 登录弹窗（在「添加供应商」表单内）----
+  // 全部走 dsh 的 alias token，字号跟 pv_line 一套（13/12/11），别在组件里写行内 style。
+  '.pv_oauth{margin-top:12px;padding:12px;border:.5px solid var(--dsw-alias-border-l4,rgba(0,0,0,.15));' +
+  'border-radius:12px;background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03))}' +
+  '.pv_oauthHead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}' +
+  '.pv_oauthTitle{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}' +
+  '.pv_oauthHead .pv_action{margin-left:0}' +
+  '.pv_oauthNote{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px;' +
+  'font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}' +
+  '.pv_oauthNote .pv_action{margin-left:0}' +
+  // 两行（验证页 / 串码）共用同一栅格：标签定宽、值占满、复制按钮钉在右侧，按钮因此对齐。
+  '.pv_oauthRow{display:flex;align-items:center;gap:10px;margin-top:6px}' +
+  '.pv_oauthLabel{flex:0 0 48px;font-size:12px;color:var(--dsw-alias-label-tertiary)}' +
+  '.pv_oauthValue{flex:1 1 auto;min-width:0;font-size:12px;line-height:18px;word-break:break-all;' +
+  'color:var(--dsw-alias-label-primary)}' +
+  '.pv_oauthValue a{color:var(--dsw-alias-link);text-decoration:none}' +
+  '.pv_oauthValue a:hover{text-decoration:underline}' +
+  '.pv_oauthCode{font-family:var(--ds-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);' +
+  'font-size:18px;letter-spacing:.04em;color:var(--dsw-alias-label-primary)}' +
+  '.pv_oauthCopy{flex:0 0 auto;margin-left:0;min-width:62px;text-align:center}' +
+  '.pv_oauthHint{margin:2px 0 0 58px;font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary)}' +
+  '.pv_oauthPrompt{margin-top:8px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}' +
+  '.pv_oauthField{box-sizing:border-box;width:100%;margin-top:4px;padding:6px 12px;font:inherit;font-size:12px;' +
+  'color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-3,#fff);' +
+  'border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));border-radius:8px;outline:0}' +
+  '.pv_oauthField:focus{border-color:var(--dsw-alias-brand-primary,var(--dsw-alias-border-l2,rgba(0,0,0,.2)))}' +
+  '.pv_oauthSubmit{margin:6px 0 0;}' +
+  '.pv_oauthDone{margin-top:8px;font-size:12px;line-height:18px}' +
+  '.pv_oauthDone_ok{color:var(--dsw-alias-state-success-primary,#22a06b)}' +
+  '.pv_oauthDone_bad{color:var(--dsw-alias-state-error-primary,#d9534f)}' +
   // ---- Provider 标签：CC Switch 式卡片（字号/间距对齐官方插件页）----
   '.pv_stack{display:flex;flex-direction:column;gap:14px;max-width:600px}' +
   '.pv_pc{list-style:none;border:.5px solid var(--dsw-alias-border-l4,rgba(0,0,0,.15));border-radius:16px;' +
