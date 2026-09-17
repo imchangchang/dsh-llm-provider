@@ -235,6 +235,13 @@ Quota lookups are separate free HTTP calls and add no tokens to model requests. 
 
 ## Known gaps
 
+Honest notes (not verified / not implemented):
+
+- **Multi-endpoint and multi-protocol providers have no live verification.** The decision logic follows the official fallback chain and offline assertions cover it, but no key was available for OpenRouter / Fireworks / opencode / opencode-go / Cloudflare / Bedrock, so no real request was ever sent through them (single-endpoint ones like Copilot and DeepSeek were exercised live).
+- **The available-model list is a login-time snapshot.** pi-ai records `availableModelIds` when an OAuth sign-in completes and the model list is filtered by it; entitlement changes (a newly opened model, an upgraded plan) only show up after signing in again.
+- **Switching an existing OAuth route back to an API key**: the add form offers both paths, but the card has no "switch back to a key" action — that requires deleting and re-adding the route.
+- **The OAuth token field names are pi-ai internals**: the quota adapters read `refresh` / `access` out of the credential record (the Copilot quota endpoint wants the long-lived GitHub token). A rename upstream has to be followed here — the bridge pins the pi-ai version, and the pi-ai health check surfaces upgrades.
+
 Capabilities the official entries have that this plugin does not:
 
 - **Per-model list editing.** `ModelListEditor`, `DeepSeekModelsEditor` and `CustomProviderCard` are not available; per-model parameters have to be edited by hand in `llm-pi-ai.providers.<id>` in `settings.yaml`.

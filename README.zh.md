@@ -239,6 +239,13 @@ npm run typecheck  # tsc --noEmit
 - **「当前模型不可路由」置灰**。官方 `ui-model-selection` 会在当前模型无法路由时把 composer 置灰；该条目被禁用后，当前供应商没配好时输入框照样能用。
 - **官方引导流程**。Models 页带的 DeepSeek 引导没有替代。
 
+如实说明（没验到的、没做的）：
+
+- **多端点 / 多协议的 provider 没有实连验证过**。判定按官方回落链推的、离线断言也覆盖了，但 OpenRouter / Fireworks / opencode / opencode-go / Cloudflare / Bedrock 这几家没有可用的 key，没跑过真实发送（Copilot / DeepSeek 这类单端点是实连过的）。
+- **可用模型是登录时的快照**。OAuth 登录时 pi-ai 记下 `availableModelIds`，模型列表按它过滤；账号权益变了（放开新模型、升级订阅）要重新登录一次才刷新。
+- **已有 OAuth 路由改回密钥路径**：添加表单里两种方式都能选，但卡片上没有「改回密钥」的入口，要改只能删掉路由重建。
+- **OAuth 的 token 字段名是 pi-ai 的内部结构**：额度适配器读凭据记录里的 `refresh` / `access`（Copilot 的配额接口要 GitHub 那个长期 token）。上游改名要跟着改——桥接固定的是 pi-ai 版本，升级时 `pi-ai 体检` 那套会发现。
+
 以后可能补的：
 
 - 侧边栏入口与 `shell.overlay` 全局额度徽标。
