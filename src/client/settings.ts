@@ -280,6 +280,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     pendingValue: string,
     pendingSelect: string,
     pendingBusy: boolean,
+    /** 刚点了「复制」：按钮文案临时变成「已复制」（1.5 秒后自己变回来）。 */
+    copied: boolean,
     done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
   }
   type OAuthFlowSetter = (next: OAuthFlowState | null | ((prev: OAuthFlowState | null) => OAuthFlowState | null)) => void
@@ -404,6 +406,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       pendingValue: '',
       pendingSelect: oauthInfo.methods[0]?.id ?? '',
       pendingBusy: true,
+      copied: false,
       done: undefined,
     })
     startOauthAttempt(oauthInfo.key, oauthInfo.methods[0]?.id, function (event: OauthEvent) {
@@ -453,6 +456,23 @@ function AddProviderPanel(props: AddProviderPanelProps) {
           return { ...prev, done: { status: 'failed', error: String(cause && cause.message ? cause.message : cause) }, pendingBusy: false }
         })
       })
+  }
+  /**
+   * 复制设备码页面链接：链接打不开时（浏览器拦了新窗口、或者用户想换台设备打开）至少能自己粘。
+   * 剪贴板 API 不可用或被拒时什么都不做——链接本身就是可选中复制的文本，不弹错误打扰用户。
+   * @param url - flow 推过来的验证页地址。
+   */
+  function copyOauthLink(url: string) {
+    try {
+      var clipboard = navigator === undefined ? undefined : navigator.clipboard
+      if (clipboard === undefined || typeof clipboard.writeText !== 'function') return
+      clipboard.writeText(url).then(function () {
+        setOauth(function (prev) { return prev === null ? null : { ...prev, copied: true } })
+        setTimeout(function () {
+          setOauth(function (prev) { return prev === null ? null : { ...prev, copied: false } })
+        }, 1500)
+      }, function () { /* 被拒：链接本身可选中，不打扰 */ })
+    } catch (cause) { /* 没有剪贴板 API：同上 */ }
   }
   function cancelOauth() {
     setOauth(function (prev) {
@@ -710,7 +730,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
           ),
       // OAuth 弹窗放在按钮行**上面**：登录是这一步的主事件，按钮是它的后继动作，
       // 摆在下面对不上阅读顺序（用户实测反馈）。
-      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth,
+      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth, copyOauthLink,
         function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingValue: event.target.value } }) },
         function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingSelect: event.target.value } }) },
       ),
@@ -755,17 +775,22 @@ function renderOauthDialog(
     pendingValue: string,
     pendingSelect: string,
     pendingBusy: boolean,
+    copied: boolean,
     done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
   }>,
   preset: ProviderPreset | undefined,
   onCancel: () => void,
   onClose: () => void,
   onSubmit: () => void,
+  onCopyLink: (url: string) => void,
   onValueChange: (event: FieldEvent) => void,
   onSelectChange: (event: FieldEvent) => void,
 ) {
   // 末帧 notice 是 device-code flow 的 URL + code；老帧留作上下文。
   var lastNotice = state.notices.length > 0 ? state.notices[state.notices.length - 1] : undefined
+  // 单独提出来：闭包里读 lastNotice.url 会丢掉 undefined 收窄（TS 不跨闭包保留收窄）。
+  var noticeUrl = lastNotice === undefined ? undefined : lastNotice.url
+  var noticeCode = lastNotice === undefined ? undefined : lastNotice.code
   var dialogTitle = preset === undefined || preset.oauth === undefined
     ? t('oauthDialogTitle').replace('{label}', 'OAuth')
     : t('oauthDialogTitle').replace('{label}', preset.oauth.label)
@@ -784,12 +809,40 @@ function renderOauthDialog(
           'div',
           { className: 'plan_note' },
           react.createElement('div', null, lastNotice.message),
-          lastNotice.url === undefined
+          // 链接给两种用法：点得开就点（新窗口打开），点不开/想在别的设备上打开就复制走。
+          // 地址原样当链接文字显示，不加装饰后缀，选中复制出来是干净的。
+          noticeUrl === undefined
             ? null
-            : react.createElement('a', { href: lastNotice.url, target: '_blank', rel: 'noreferrer' }, lastNotice.url + ' ↗'),
-          lastNotice.code === undefined
+            : react.createElement(
+                'div',
+                { style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '2px', flexWrap: 'wrap' } },
+                react.createElement(
+                  'a',
+                  { href: noticeUrl, target: '_blank', rel: 'noreferrer', style: { wordBreak: 'break-all' } },
+                  noticeUrl,
+                ),
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'pv_action',
+                    style: { marginLeft: '0', flex: '0 0 auto' },
+                    title: '复制链接',
+                    onClick: function () {
+                      if (noticeUrl !== undefined) onCopyLink(noticeUrl)
+                    },
+                  },
+                  state.copied === true ? t('oauthCopied') : t('oauthCopyLink'),
+                ),
+              ),
+          noticeCode === undefined
             ? null
-            : react.createElement('div', { style: { fontFamily: 'monospace', fontSize: '1.5em', marginTop: '4px' } }, lastNotice.code),
+            : react.createElement(
+                'div',
+                { style: { marginTop: '4px' } },
+                react.createElement('div', { style: { fontFamily: 'monospace', fontSize: '1.5em' } }, noticeCode),
+                react.createElement('div', { style: { opacity: 0.7 } }, '在打开的页面里输入这串码完成授权'),
+              ),
         ),
     state.prompt === undefined
       ? null
