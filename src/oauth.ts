@@ -198,6 +198,27 @@ export async function ensureAuthorizationService(
   }
 }
 
+/**
+ * 按请求解析 authorization 服务；不在就回 503 JSON 并返回 undefined。
+ *
+ * **为什么按请求解析而不是注册时解析一次**：`ctx.get()` 默认是 strict 的——提供服务的那条
+ * fiber 没到 active 状态就返回 undefined。`ensureAuthorizationService()` 刚把服务挂上时，
+ * 子 fiber 还在加载，此刻读就是 undefined；注册时读一次会把五条路由全部跳掉（实测：挂载成功、
+ * flows 39 条，但 /provider/oauth/begin 落到 SPA fallback 回 405 空 body，浏览器端表现为
+ * "Unexpected end of JSON input"）。按请求读没有这个竞态。
+ */
+function requireAuthorization(
+  ctx: PluginContext,
+  res: ServerResponse,
+): AuthorizationService | undefined {
+  const service = authorizationOf(ctx)
+  if (service === undefined) {
+    jsonResponse(res, 503, { ok: false, error: '宿主 authorization 服务暂不可用（OAuth 登录暂时不可用）' })
+    return undefined
+  }
+  return service
+}
+
 /** SSE 帧编码：data: <json>\n\n；retry 在第一帧发，告诉 EventSource 多久后重连。 */
 function sseFrame(event: OAuthAttemptEvent | 'retry'): string {
   if (event === 'retry') return 'retry: 10000\n\n'
@@ -267,7 +288,6 @@ function streamHandler(logger: Logger | undefined): (req: ServerRequest, res: Se
  */
 function beginHandler(
   ctx: PluginContext,
-  authorization: AuthorizationService,
 ): (req: ServerRequest, res: ServerResponse) => void {
   return (req, res) => {
     if (req.method !== 'POST') {
@@ -280,6 +300,8 @@ function beginHandler(
     req.on('end', () => {
       void (async () => {
         try {
+          const authorization = requireAuthorization(ctx, res)
+          if (authorization === undefined) return
           const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
           const key = readString(parsed['key'])
           const method = readString(parsed['method'])
@@ -288,7 +310,7 @@ function beginHandler(
             return
           }
           if (typeof authorization.begin !== 'function') {
-            jsonResponse(res, 500, { ok: false, error: '宿主 authorization 服务不可用' })
+            jsonResponse(res, 503, { ok: false, error: '宿主 authorization 服务不提供 begin()' })
             return
           }
           if (keyToAttempt.has(key)) {
@@ -407,7 +429,7 @@ function respondHandler(): (req: ServerRequest, res: ServerResponse) => void {
 
 /** POST /provider/oauth/cancel body { attemptId } —— 浏览器点「取消」撤 attempt。 */
 function cancelHandler(
-  authorization: AuthorizationService,
+  ctx: PluginContext,
 ): (req: ServerRequest, res: ServerResponse) => void {
   return (req, res) => {
     if (req.method !== 'POST') {
@@ -420,6 +442,9 @@ function cancelHandler(
     req.on('end', () => {
       void (async () => {
         try {
+          // cancel 只在服务在时有意义；不在就按「attempt 撤销失败」告诉调用方，别假装成功。
+          const authorization = requireAuthorization(ctx, res)
+          if (authorization === undefined) return
           const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
           const attemptId = readString(parsed['attemptId'])
           if (attemptId === undefined) {
@@ -450,9 +475,11 @@ function cancelHandler(
 }
 
 /** GET /provider/oauth/flows —— 列所有已注册的 flow，浏览器勾选 OAuth provider 用。 */
-function listHandler(authorization: AuthorizationService): (req: ServerRequest, res: ServerResponse) => void {
+function listHandler(ctx: PluginContext): (req: ServerRequest, res: ServerResponse) => void {
   return (_req, res) => {
     try {
+      const authorization = requireAuthorization(ctx, res)
+      if (authorization === undefined) return
       const list: readonly AuthorizationEntry[] = typeof authorization.list === 'function'
         ? authorization.list()
         : []
@@ -516,20 +543,21 @@ export function __oauth_reset(): void {
 }
 
 /**
- * 注册全部 OAuth 路由。会话里没 authorization 服务（少数 headless / 不带 credentials 包的组合）
- * 就只挂 list，list 会回 500，避免路径冲突导致其他路由挂不上。
+ * 注册全部 OAuth 路由。
  *
- * @param ctx - 插件上下文，用来读 `ctx.authorization` 与 `ctx.logger`。
+ * **五条路由无条件注册**，authorization 服务由各 handler 按请求解析（见
+ * {@link requireAuthorization}）：注册时读一次会被 ctx.get 的 strict 语义坑到——服务刚挂上、
+ * fiber 还没 active，读出来是 undefined，五条路由就全没了。服务真不在时 handler 回 503 JSON，
+ * 客户端能显示出原因，而不是让请求落到 SPA fallback 拿一个空 body。
+ *
+ * @param ctx - 插件上下文，用来读 authorization 与 logger。
  * @param webServer - 宿主 webserver 服务，路由挂在它上面。
  */
 export function registerOAuthRoutes(ctx: PluginContext, webServer: WebServerService): void {
-  const authorization = authorizationOf(ctx)
   const logger = ctx.logger
   const log = typeof logger === 'function' ? logger('provider') : undefined
-  if (authorization === undefined) {
-    log?.warn?.('oauth 路由未注册：宿主 authorization 服务不可用（该 dsh 组合可能未挂 credentials/authorization）')
-    return
-  }
+  // 这里**不**报告服务在不在：本函数在 apply 里排在补服务之前（见 index.ts 的顺序注释），
+  // 此刻读不到是常态，报了就是每次都误报。真正的判据在 /provider/status 的 oauth 段。
   // sweep 周期清理 TTL 到期的 attempt，不阻塞 dsh 关停。
   const sweeper = setInterval(() => {
     const cutoff = Date.now() - ATTEMPT_TTL_MS
@@ -543,10 +571,10 @@ export function registerOAuthRoutes(ctx: PluginContext, webServer: WebServerServ
   }, SWEEP_INTERVAL_MS)
   sweeper.unref?.()
 
-  webServer.register({ kind: 'exact', path: '/provider/oauth/flows', handler: listHandler(authorization) })
-  webServer.register({ kind: 'exact', path: '/provider/oauth/begin', handler: beginHandler(ctx, authorization) })
+  webServer.register({ kind: 'exact', path: '/provider/oauth/flows', handler: listHandler(ctx) })
+  webServer.register({ kind: 'exact', path: '/provider/oauth/begin', handler: beginHandler(ctx) })
   webServer.register({ kind: 'exact', path: '/provider/oauth/stream', handler: streamHandler(log) })
   webServer.register({ kind: 'exact', path: '/provider/oauth/respond', handler: respondHandler() })
-  webServer.register({ kind: 'exact', path: '/provider/oauth/cancel', handler: cancelHandler(authorization) })
+  webServer.register({ kind: 'exact', path: '/provider/oauth/cancel', handler: cancelHandler(ctx) })
   log?.info?.('oauth 路由已挂载（flows / begin / stream / respond / cancel，attempts=' + String(__oauth_attempt_count()) + '）')
 }

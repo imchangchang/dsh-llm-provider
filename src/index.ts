@@ -74,7 +74,7 @@ export interface PlanSnapshot {
 
 export const Config = bridge.ok ? bridge.plugin.Config : Schema.object({})
 
-export async function apply(ctx: PluginContext, config: unknown): Promise<void> {
+export function apply(ctx: PluginContext, config: unknown): void {
   /** 拿宿主服务：只走 ctx.get，不做属性访问兜底。
    *
    * cordis 严格模式下 `ctx[name]` 这种属性访问要求 inject 列表里声明 `name`，否则抛
@@ -516,18 +516,21 @@ export async function apply(ctx: PluginContext, config: unknown): Promise<void> 
   // （设置页按钮 → POST /provider/update），替换一律要求验证通过，见 updater.ts 头部注释。
   startBackgroundCheck(logger, bridge.ok ? bridge.piAiVersion : undefined)
 
-  // OAuth / device-code 登录桥：把官方 llm-pi-ai bundle 已经注册到 ctx.authorization 的 flow
-  // 暴露给浏览器端（5 条路由：flows / begin / stream / respond / cancel）。详见 ./oauth.ts 头部注释。
+  // OAuth / device-code 登录桥：把官方 llm-pi-ai 里注册的 flow 暴露给浏览器端
+  // （5 条路由：flows / begin / stream / respond / cancel）。详见 ./oauth.ts 头部注释。
   //
-  // 两件事有先后：**先确保 authorization 服务在场**，再挂路由。原版 dsh 的 bundle 都没挂
-  // 这个服务（见 ensureAuthorizationService 的注释），服务不在时官方 llm-pi-ai 的
-  // inject(['authorization']) 不触发、flow 一个都不注册，界面上的 OAuth 入口也就是空的。
-  // 服务在场后 cordis 会自己把那段 inject 跑起来，不用我们碰官方插件。
-  //
-  // apply 因此是异步的：cordis 会 await 插件返回的 promise（Fiber._execute 处理 thenable），
-  // 路由在服务就位之后才注册。
-  await ensureAuthorizationService(ctx, logger)
+  // 顺序是刻意的：**先挂路由，再去补 authorization 服务，而且不等它**。
+  //   - 路由无条件注册、服务按请求解析，所以服务什么时候就位都不影响 404/405；
+  //   - 挂载是后台动作：它只负责让官方 llm-pi-ai 的 inject(['authorization']) 触发起来
+  //     （原版 dsh 的 bundle 都不挂这个服务，见 ensureAuthorizationService 注释），
+  //     挂上之后 flow 由官方自己按 catalog 注册。
+  // 反过来写（先 await 挂载、再注册路由）踩过两次坑：await 期间若读不到服务（ctx.get 默认
+  // strict，fiber 没 active 就是 undefined）或者干脆挂住，五条路由就一条都不剩，浏览器那边
+  // 只看到 "Unexpected end of JSON input"。
   registerOAuthRoutes(ctx, webServer)
+  void ensureAuthorizationService(ctx, logger).catch((error: unknown) => {
+    logger?.warn?.(`authorization 挂载意外失败：${messageOf(error)}`)
+  })
 
   logger?.info?.('dsh-llm-provider active: GET /plan/status, GET /provider/status, POST /provider/update, /provider/oauth/*')
 }

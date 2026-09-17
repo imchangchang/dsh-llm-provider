@@ -331,40 +331,39 @@ await (async () => {
 })()
 
 /* ----------------------------- Test 7 ----------------------------- */
-/* 回归：cordis 严格模式下 ctx.get('authorization') 抛错时 registerOAuthRoutes 不能挂。
- * 真实日志：`Error: cannot get property "authorization" without inject`，整插件起不来。
- * authorizationOf 必须包 try/catch，把错误吞掉，降级成「啥路由都不挂 + warn」。 */
+/* 回归：cordis 严格模式下 ctx.get('authorization') 抛错（真实日志 `cannot get property
+ * "authorization" without inject`）时 registerOAuthRoutes 不能把插件带崩。
+ * 五条路由照挂，handler 回 503 JSON——**不能**不挂路由：那会让请求落到 SPA fallback，
+ * 客户端拿到空 body，报的是 "Unexpected end of JSON input"（实测踩过）。 */
 
 await (async () => {
   __oauth_reset()
   const webServer = makeWebServer()
-  let warnCalled = false
   const ctx = {
     get: (name) => {
       if (name === 'authorization') throw new Error('cannot get property "authorization" without inject')
       return undefined
     },
-    logger: () => ({
-      info() {},
-      warn: () => { warnCalled = true },
-      error() {},
-    }),
+    logger: () => ({ info() {}, warn() {}, error() {} }),
     effect: (fn) => fn(),
   }
   let threw = null
   try { registerOAuthRoutes(ctx, webServer) }
   catch (cause) { threw = cause }
-  check('T7.cordis 抛错时不挂', threw === null, true)
-  check('T7.触发 warn', warnCalled, true)
-  check('T7.不挂 flows', webServer.handlers.has('/provider/oauth/flows'), false)
-  check('T7.不挂 begin', webServer.handlers.has('/provider/oauth/begin'), false)
-  check('T7.不挂 stream', webServer.handlers.has('/provider/oauth/stream'), false)
-  check('T7.不挂 respond', webServer.handlers.has('/provider/oauth/respond'), false)
-  check('T7.不挂 cancel', webServer.handlers.has('/provider/oauth/cancel'), false)
+  check('T7.cordis 抛错时不崩', threw === null, true)
+  check('T7.照挂 flows', webServer.handlers.has('/provider/oauth/flows'), true)
+  check('T7.照挂 begin', webServer.handlers.has('/provider/oauth/begin'), true)
+  check('T7.照挂 stream', webServer.handlers.has('/provider/oauth/stream'), true)
+  check('T7.照挂 respond', webServer.handlers.has('/provider/oauth/respond'), true)
+  check('T7.照挂 cancel', webServer.handlers.has('/provider/oauth/cancel'), true)
+  // handler 层：服务读不到 → 503 + JSON（不是空 body）
+  const r = await callJson(webServer.handlers, '/provider/oauth/begin', { key: 'any/key' })
+  check('T7.服务读不到时 begin 回 503', r.status, 503)
+  check('T7.503 带 JSON error', typeof r.body.error === 'string' && r.body.error.length > 0, true)
 })()
 
 /* ----------------------------- Test 8 ----------------------------- */
-/* ctx.get 返回 undefined：authorization 服务未注册——同样降级（啥路由都不挂）。 */
+/* ctx.get 返回 undefined：authorization 服务未注册——同一套契约（路由在、回 503）。 */
 
 await (async () => {
   __oauth_reset()
@@ -377,9 +376,15 @@ await (async () => {
   let threw = null
   try { registerOAuthRoutes(ctx, webServer) }
   catch (cause) { threw = cause }
-  check('T8.未挂载时不挂', threw === null, true)
-  check('T8.不挂 flows', webServer.handlers.has('/provider/oauth/flows'), false)
-  check('T8.不挂 begin', webServer.handlers.has('/provider/oauth/begin'), false)
+  check('T8.未挂载时不崩', threw === null, true)
+  check('T8.照挂 flows', webServer.handlers.has('/provider/oauth/flows'), true)
+  check('T8.照挂 begin', webServer.handlers.has('/provider/oauth/begin'), true)
+  // GET flows 也得回 JSON 而不是空 body
+  const res = makeRes()
+  webServer.handlers.get('/provider/oauth/flows')(makeReq('GET', '/provider/oauth/flows', undefined), res)
+  await new Promise((resolve) => setImmediate(resolve))
+  check('T8.flows 回 503', res.status, 503)
+  check('T8.flows body 是 JSON', JSON.parse(res.body).ok, false)
 })()
 
 /* ----------------------------- Test 9 ----------------------------- */
