@@ -79,11 +79,7 @@ const attempts = new Map<string, OAuthAttempt>()
 /** 同一个 key 同时只允许一个 attempt。seam 本身也会拒（ALREADY_IN_FLIGHT），我们这里只是先发制人。 */
 const keyToAttempt = new Map<string, string>()
 
-/**
- * 测试钩：从这里把私有状态喂给 oauth-test-hooks.ts。
- * 这两个 export 不会被 production 代码 import；只通过副作用链路让 tsdown 把它们保留下来。
- * 任何 production 用法都属于误用——attempt 池是 OAuth 路由的私有实现细节。
- */
+/** 供 src/oauth-test-hooks.ts 读取的私有池；production 不引用（见文件末尾的说明段）。 */
 export { attempts, keyToAttempt }
 
 /**
@@ -575,27 +571,10 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 }
 
 /* ------------------------------------------------------------------ *
- * 测试钩：暴露 attempt 池与几只工具，让 test/*.mjs 能注入自家 flow。
- *
- * 这些 export **不被 production 代码引用**——`registerOAuthRoutes` 末尾引用一次纯是为了
- * 防止 tsdown 在 unbundle 模式下的 tree-shake 把它们从 lib/oauth.js 砍掉（test/*.mjs 直接
- * import 这些符号，砍了就 import 失败）。
+ * 测试钩住在 src/oauth-test-hooks.ts（它作为独立的 tsdown entry 转译，见 tsdown.config.ts）。
+ * 这里只把两个私有池给它用——**不被 production 代码引用**，两个 export 存在的意义就是把
+ * attempt 池喂给那个文件；任何 production 用法都是误用。
  * ------------------------------------------------------------------ */
-
-export function __oauth_attempt_count(): number {
-  return attempts.size
-}
-
-export function __oauth_attempt(id: string): { settled: undefined | { status: string, error?: string } } | undefined {
-  const attempt = attempts.get(id)
-  return attempt === undefined ? undefined : { settled: attempt.settled }
-}
-
-export function __oauth_reset(): void {
-  for (const a of attempts.values()) a.controller.abort()
-  attempts.clear()
-  keyToAttempt.clear()
-}
 
 /**
  * 注册全部 OAuth 路由。
@@ -631,5 +610,5 @@ export function registerOAuthRoutes(ctx: PluginContext, webServer: WebServerServ
   webServer.register({ kind: 'exact', path: '/provider/oauth/stream', handler: streamHandler(log) })
   webServer.register({ kind: 'exact', path: '/provider/oauth/respond', handler: respondHandler() })
   webServer.register({ kind: 'exact', path: '/provider/oauth/cancel', handler: cancelHandler(ctx) })
-  log?.info?.('oauth 路由已挂载（flows / begin / stream / respond / cancel，attempts=' + String(__oauth_attempt_count()) + '）')
+  log?.info?.('oauth 路由已挂载（flows / begin / stream / respond / cancel）')
 }

@@ -6,7 +6,8 @@
  * 模拟宿主授权服务（`ctx.authorization`）与 webServer.register，把 5 条路由摘下来
  * 直接调，验证 begin / respond / cancel / stream 的事件流符合预期。
  *
- * 测试钩通过 /lib/oauth.js 的 `__testHook` 拿到 attempt 池与 `__oauth_*` 工具，避免私有状态外漏。
+ * 测试钩（`__oauth_attempt` / `__oauth_reset` / `__oauth_attempt_count`）从
+ * /lib/oauth-test-hooks.js 取——那个文件是独立 tsdown entry，见 tsdown.config.ts 的说明。
  */
 import { ensureAuthorizationService, flowKeyForProvider, registerOAuthRoutes } from '../lib/oauth.js'
 import { hostPackageEntry } from '../lib/bridge.js'
