@@ -75,9 +75,22 @@ export interface PlanSnapshot {
 export const Config = bridge.ok ? bridge.plugin.Config : Schema.object({})
 
 export function apply(ctx: PluginContext, config: unknown): void {
-  /** 拿宿主服务：ctx.get(name) 与 ctx.name 两种写法都支持，这里统一。 */
-  const service = <T>(serviceName: string): T | undefined =>
-    (ctx.get?.(serviceName) ?? ctx[serviceName]) as T | undefined
+  /** 拿宿主服务：只走 ctx.get，不做属性访问兜底。
+   *
+   * cordis 严格模式下 `ctx[name]` 这种属性访问要求 inject 列表里声明 `name`，否则抛
+   * "cannot get property \"X\" without inject"，把整个 handler / apply 挂掉。
+   * 原来 `ctx.get?.(name) ?? ctx[name]` 的写法正是这个 bug 的源头——服务未注册时 ctx.get
+   * 拿不到、走属性访问就抛。改成纯 ctx.get + try/catch：未挂载返回 undefined，调用方按业务
+   * 路径处理降级（路由 handler 通常会回 500，但不再把整插件拖垮）。
+   */
+  const service = <T>(serviceName: string): T | undefined => {
+    try {
+      const value = ctx.get(serviceName)
+      return value === null || value === undefined ? undefined : (value as T)
+    } catch (cause) {
+      return undefined
+    }
+  }
 
   const logger: Logger | undefined = typeof ctx.logger === 'function' ? ctx.logger('provider') : undefined
   const webServer = ctx['webServer'] as WebServerService

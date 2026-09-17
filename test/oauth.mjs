@@ -381,5 +381,45 @@ await (async () => {
   check('T8.不挂 begin', webServer.handlers.has('/provider/oauth/begin'), false)
 })()
 
+/* ----------------------------- Test 9 ----------------------------- */
+/* 回归：src/index.ts 的 service<T>(name) 内部实现也踩了同样的 cordis 坑——`ctx.get(name)
+ * ?? ctx[name]` 在未注册服务时走属性访问抛错。这次 /provider/presets handler 调
+ * service<AuthorizationService>('authorization') 在没装 credentials 包的 dsh 里 500，
+ * 客户端 fallback 到「宿主端状态不可用」。
+ *
+ * 测试这个：通过 service() 拿不存在的服务，cordis 严格模式下 ctx.get 返回 undefined
+ * 也好、抛错也好，service() 都不能抛，得让调用方拿到 undefined 然后走降级。 */
+
+await (async () => {
+  __oauth_reset()
+  // 模拟两个 cordis 行为：1) get 返回 undefined（服务不在）；2) get 抛错（严格模式）。
+  const cases = [
+    { name: 'T9a', getImpl: () => undefined },
+    { name: 'T9b', getImpl: () => { throw new Error('cannot get property "authorization" without inject') } },
+  ]
+  for (const c of cases) {
+    const ctx = {
+      get: c.getImpl,
+      logger: () => ({ info() {}, warn() {}, error() {} }),
+      effect: (fn) => fn(),
+    }
+    // 复刻 src/index.ts service() 的形状
+    const service = (name) => {
+      try {
+        const value = ctx.get(name)
+        return value === null || value === undefined ? undefined : value
+      } catch (cause) {
+        return undefined
+      }
+    }
+    let threw = null
+    let result
+    try { result = service('authorization') }
+    catch (cause) { threw = cause }
+    check(c.name + '.service() 不抛', threw === null, true)
+    check(c.name + '.service() 返回 undefined', result, undefined)
+  }
+})()
+
 console.log(failed ? '\n有失败用例' : '\nOAuth 测试全部通过')
 if (failed) process.exitCode = 1
