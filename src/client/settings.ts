@@ -507,6 +507,9 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   var customPicked = pickedPreset !== undefined && pickedPreset.custom === true
   // 这次登录是否已授权：授权过就不必再走「填密钥 → 测试」那条路（OAuth 没有密钥可填）。
   var oauthAuthorized = oauth !== null && oauth.done !== undefined && oauth.done.status === 'authorized'
+  // OAuth-only 供应商：界面只留「供应商 / 路由 ID / 登录方式」。API 地址与协议由 preset 带进
+  // form（写配置时照旧落盘），用户不需要看见；也没有可测的密钥。
+  var oauthOnlyPicked = pickedPreset !== undefined && pickedPreset.oauthOnly === true
   var pickItems = []
   for (var pk = 0; pk < presets.length; pk += 1) {
     ;(function (preset) {
@@ -594,38 +597,44 @@ function AddProviderPanel(props: AddProviderPanelProps) {
           },
         }),
       ),
-      react.createElement(
-        'div',
-        { className: 'pv_line pv_row' },
-        react.createElement('span', null, 'API 地址'),
-        react.createElement('input', {
-          className: form.baseURL === '' ? 'pv_field pv_key' : 'pv_field pv_ro',
-          value: form.baseURL,
-          readOnly: form.baseURL !== '',
-          onChange: function (event: FieldEvent) { patchForm({ baseURL: event.target.value }) },
-        }),
-      ),
-      react.createElement(
-        'div',
-        { className: 'pv_line pv_row' },
-        react.createElement('span', null, '协议'),
-        customPicked
-          ? react.createElement(
-              'select',
-              {
-                className: 'pv_field',
-                value: form.api,
-                onChange: function (event: FieldEvent) { patchForm({ api: event.target.value }) },
-              },
-              react.createElement('option', { value: 'openai-completions' }, 'OpenAI'),
-              react.createElement('option', { value: 'anthropic-messages' }, 'Anthropic'),
-            )
-          : react.createElement('input', {
-              className: 'pv_field pv_ro',
-              value: form.api,
-              readOnly: true,
+      // API 地址 / 协议：OAuth-only 的供应商不渲染这两行——它们由 preset 带进 form（写配置时照旧
+      // 落盘），用户既不需要填也不需要核对；界面上只留「供应商 / 路由 ID / 登录方式」。
+      oauthOnlyPicked
+        ? null
+        : react.createElement(
+            'div',
+            { className: 'pv_line pv_row' },
+            react.createElement('span', null, 'API 地址'),
+            react.createElement('input', {
+              className: form.baseURL === '' ? 'pv_field pv_key' : 'pv_field pv_ro',
+              value: form.baseURL,
+              readOnly: form.baseURL !== '',
+              onChange: function (event: FieldEvent) { patchForm({ baseURL: event.target.value }) },
             }),
-      ),
+          ),
+      oauthOnlyPicked
+        ? null
+        : react.createElement(
+            'div',
+            { className: 'pv_line pv_row' },
+            react.createElement('span', null, '协议'),
+            customPicked
+              ? react.createElement(
+                  'select',
+                  {
+                    className: 'pv_field',
+                    value: form.api,
+                    onChange: function (event: FieldEvent) { patchForm({ api: event.target.value }) },
+                  },
+                  react.createElement('option', { value: 'openai-completions' }, 'OpenAI'),
+                  react.createElement('option', { value: 'anthropic-messages' }, 'Anthropic'),
+                )
+              : react.createElement('input', {
+                  className: 'pv_field pv_ro',
+                  value: form.api,
+                  readOnly: true,
+                }),
+          ),
       // 「登录方式」三态：
       //   1) OAuth 注册了：渲染 OAuth 按钮（点击起 attempt，弹窗显示 device code / 提示）。
       //   2) OAuth-only 但 OAuth 未注册（profile 没装 dsh-authorization bundle）：显示
@@ -689,18 +698,30 @@ function AddProviderPanel(props: AddProviderPanelProps) {
                 ? null
                 : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer', style: { marginLeft: '8px' } }, '获取密钥 ↗'),
             ),
-      // 凭据名：单独一行小字，不挤在协议行右侧
-      react.createElement(
-        'div',
-        { className: 'pv_line pv_row' },
-        react.createElement('span', null, ''),
-        react.createElement('span', { className: 'pv_hint' }, '密钥存为 ' + form.apiKeyEnv),
+      // 凭据名：单独一行小字，不挤在协议行右侧。OAuth-only 走的不是 apiKeyEnv 那个键空间，
+      // 写这句反而误导，索性不显示。
+      oauthOnlyPicked
+        ? null
+        : react.createElement(
+            'div',
+            { className: 'pv_line pv_row' },
+            react.createElement('span', null, ''),
+            react.createElement('span', { className: 'pv_hint' }, '密钥存为 ' + form.apiKeyEnv),
+          ),
+      // OAuth 弹窗放在按钮行**上面**：登录是这一步的主事件，按钮是它的后继动作，
+      // 摆在下面对不上阅读顺序（用户实测反馈）。
+      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth,
+        function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingValue: event.target.value } }) },
+        function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingSelect: event.target.value } }) },
       ),
       react.createElement(
         'div',
         { className: 'pv_actRow' },
-        react.createElement('button', { type: 'button', className: 'pv_action', style: { marginLeft: '0' }, disabled: test.phase === 'run', onClick: runTest },
-          test.phase === 'run' ? '测试中…' : '测试'),
+        // 「测试」是拿密钥做草稿探测：OAuth-only 没有密钥可填，这个按钮没有意义。
+        oauthOnlyPicked
+          ? null
+          : react.createElement('button', { type: 'button', className: 'pv_action', style: { marginLeft: '0' }, disabled: test.phase === 'run', onClick: runTest },
+              test.phase === 'run' ? '测试中…' : '测试'),
         react.createElement('button', {
           type: 'button',
           className: 'pv_action',
@@ -716,11 +737,6 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         ? null
         : react.createElement('div', { className: 'plan_note' + (test.phase === 'fail' ? ' plan_badText' : '') }, test.message),
       note === null ? null : react.createElement('div', { className: 'plan_note' }, note),
-      // OAuth 弹窗：attempt 期间挂在 form 顶部，独立卡片样式。
-      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth,
-        function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingValue: event.target.value } }) },
-        function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingSelect: event.target.value } }) },
-      ),
     ),
   )
 }

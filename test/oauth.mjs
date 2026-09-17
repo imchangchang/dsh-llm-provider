@@ -281,7 +281,9 @@ await (async () => {
 })()
 
 /* ----------------------------- Test 4 ----------------------------- */
-/* 同 key 第二次 begin → 409 */
+/* 同 key 第二次 begin → **复用**在跑的那个 attempt（不是 409）。
+ * 界面刷新 / 关弹窗会丢掉 attemptId，而宿主里的 attempt 还在等用户回答；回 409 等于把用户
+ * 锁在外面，复用才是「接着上次继续」。 */
 
 await (async () => {
   __oauth_reset()
@@ -293,9 +295,11 @@ await (async () => {
   const a = await callJson(webServer.handlers, '/provider/oauth/begin', { key: FLOW_LIST[0].key })
   const b = await callJson(webServer.handlers, '/provider/oauth/begin', { key: FLOW_LIST[0].key })
   check('T4.a.ok', a.body.ok, true)
-  check('T4.b.ok=false', b.body.ok, false)
-  checkTruthy('T4.b.error 非空', typeof b.body.error === 'string')
-  checkTruthy('T4.a attempt 在池里', __oauth_attempt(a.body.attemptId) !== undefined)
+  check('T4.a 不是复用', a.body.reused, false)
+  check('T4.b.ok=true', b.body.ok, true)
+  check('T4.b 标成复用', b.body.reused, true)
+  check('T4.b 复用同一个 attemptId', b.body.attemptId, a.body.attemptId)
+  check('T4.b 带回 method', b.body.method, 'oauth')
 })()
 
 /* ----------------------------- Test 5 ----------------------------- */
@@ -553,6 +557,51 @@ await (async () => {
   await new Promise((r) => setTimeout(r, 30))
   const settled = streamRes.sseEvents().find((e) => e.kind === 'settled')
   check('T11.之后照常结算 authorized', settled && settled.status, 'authorized')
+})()
+
+/* ----------------------------- Test 12 ----------------------------- */
+/* SSE 回放：flow 在浏览器连上 EventSource 之前就推了 notice / prompt（正常时序就是这样：
+ * 先 POST begin 拿 id，再开 SSE）。后连上的流必须先把已发生的事件补上，否则弹窗永远停在
+ * 「已在登录…」——这就是用户实测到的那个现象。 */
+
+await (async () => {
+  __oauth_reset()
+  const webServer = makeWebServer()
+  const { ctx, authorization } = makeCtx(FLOW_LIST)
+  registerOAuthRoutes(ctx, webServer)
+  let answer = null
+  authorization.begin = function (request) {
+    return new Promise(function (resolve) {
+      setImmediate(function () {
+        // 先推事件，再等回答——模拟 Copilot 的「先问企业域名」。
+        request.interaction.notify({ message: '准备登录', url: 'https://github.com/login/device', code: 'WXYZ-1234' })
+        request.interaction.prompt({ kind: 'text', message: 'Enterprise URL/domain' }).then(function (v) {
+          answer = v
+          resolve({ status: 'authorized' })
+        })
+        request.signal.addEventListener('abort', function () { resolve({ status: 'cancelled' }) })
+      })
+    })
+  }
+  const beginRes = await callJson(webServer.handlers, '/provider/oauth/begin', { key: FLOW_LIST[0].key })
+  const attemptId = beginRes.body.attemptId
+  // 关键：**等事件都发生完**，之后才开流
+  await new Promise((r) => setTimeout(r, 60))
+  const streamRes = openStream(webServer.handlers, attemptId)
+  await new Promise((r) => setTimeout(r, 30))
+  const events = streamRes.sseEvents()
+  check('T12.回放了 notice', events.some((e) => e.kind === 'notice' && e.notice.code === 'WXYZ-1234'), true)
+  const promptFrame = events.find((e) => e.kind === 'prompt')
+  check('T12.回放了 prompt', promptFrame !== undefined, true)
+  // 回放出来的 promptId 仍然可回答
+  const resp = await callJson(webServer.handlers, '/provider/oauth/respond', {
+    attemptId: attemptId, promptId: promptFrame.promptId, value: 'ghe.example.com',
+  })
+  check('T12.回放的 prompt 还能回答', resp.body.ok, true)
+  await new Promise((r) => setTimeout(r, 50))
+  check('T12.flow 收到答案', answer, 'ghe.example.com')
+  const settled = streamRes.sseEvents().find((e) => e.kind === 'settled')
+  check('T12.实时帧照常到达（settled）', settled && settled.status, 'authorized')
 })()
 
 console.log(failed ? '\n有失败用例' : '\nOAuth 测试全部通过')

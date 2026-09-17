@@ -64,6 +64,14 @@ interface OAuthAttempt {
   pendingPrompts: Map<string, PendingPrompt>
   settled: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string }
   createdAt: number
+  /**
+   * 已经推给总线的全部事件（含 settled）。SSE 连上来时先回放这一段再挂监听。
+   *
+   * **为什么必须有**：浏览器是「先 POST begin 拿 attemptId、再开 EventSource」两步，
+   * 而 flow 的第一步（比如 Copilot 问企业域名）往往在两步之间就 emit 了。没有回放时
+   * 那条 prompt 永远到不了界面，弹窗就停在「已在登录…」。页面中途刷新重连同理。
+   */
+  events: OAuthAttemptEvent[]
 }
 
 const attempts = new Map<string, OAuthAttempt>()
@@ -83,6 +91,7 @@ export { attempts, keyToAttempt }
  * 幂等：bus 已 emit 过同一事件的，attempts 已 settled 时不再 emit。
  */
 function push(attempt: OAuthAttempt, event: OAuthAttemptEvent): void {
+  attempt.events.push(event)
   attempt.bus.emit('event', event)
 }
 
@@ -228,7 +237,9 @@ function sseFrame(event: OAuthAttemptEvent | 'retry'): string {
 /**
  * GET /provider/oauth/stream?attemptId=<id> —— SSE 流，推 notice / prompt 等事件。
  *
- * 已 settled 的 attempt 立刻回 settled 帧再 end。in-flight 的 attempt 持续推帧直到 closed。
+ * **连上先回放 attempt.events，再挂实时监听**：浏览器分两步（POST begin 拿 id → 开
+ * EventSource），flow 的第一个 prompt 常常在两步之间就 emit 了，不回放的话它永远到不了界面
+ * （弹窗停在「已在登录…」）。已 settled 的 attempt 回放完直接 end。
  */
 function streamHandler(logger: Logger | undefined): (req: ServerRequest, res: ServerResponse) => void {
   return (req, res) => {
@@ -250,19 +261,22 @@ function streamHandler(logger: Logger | undefined): (req: ServerRequest, res: Se
       'connection': 'keep-alive',
     })
     res.write(sseFrame('retry'))
-    if (attempt.settled !== undefined) {
-      // 已结束：把最终那一帧再发一遍然后关。重新连上的浏览器也能拿到结论。
-      res.write(sseFrame({ kind: 'settled', status: attempt.settled.status, error: attempt.settled.error }))
-      res.end()
-      return
-    }
+    // 回放：先挂监听再回放，否则回放期间新到的事件会漏掉（两次 emit 之间没有 await，
+    // 但 res.write 可能触发 backpressure 的回调边界，宁可把顺序写死）。
+    const buffered = attempt.events.slice()
     const onEvent = (event: OAuthAttemptEvent): void => {
       try { res.write(sseFrame(event)) } catch { /* socket closed mid-write */ }
     }
+    if (attempt.settled !== undefined) {
+      for (const event of buffered) onEvent(event)
+      res.end()
+      return
+    }
+    attempt.bus.on('event', onEvent)
+    for (const event of buffered) onEvent(event)
     const onClosed = (): void => {
       try { res.end() } catch { /* already ended */ }
     }
-    attempt.bus.on('event', onEvent)
     attempt.bus.once('closed', onClosed)
     // 浏览器断网 / 关页：清掉 listener，别再往死 socket 写。**不**撤 attempt——
     // 用户可能只是切到另一个窗口看 device code，回来了继续。
@@ -313,8 +327,19 @@ function beginHandler(
             jsonResponse(res, 503, { ok: false, error: '宿主 authorization 服务不提供 begin()' })
             return
           }
-          if (keyToAttempt.has(key)) {
-            jsonResponse(res, 409, { ok: false, error: '同 key 已有 attempt 在跑' })
+          // 同 key 已有 attempt：**复用**它，而不是回 409。
+          // 界面刷新、弹窗被关掉、切了个标签页都会让浏览器丢掉 attemptId，而 attempt 还在
+          // 宿主里pending（等用户回答 prompt）。这时回 409 等于把用户锁在外面五分钟；
+          // 复用则是「接着上一次继续」——SSE 会回放已经发生的事件，弹窗一开就是当前状态。
+          const existingId = keyToAttempt.get(key)
+          const existing = existingId === undefined ? undefined : attempts.get(existingId)
+          if (existing !== undefined && existing.settled === undefined) {
+            jsonResponse(res, 200, {
+              ok: true,
+              attemptId: existing.id,
+              method: existing.method,
+              reused: true,
+            })
             return
           }
           // 先问 dsh 拿一个 entry；begin 不存在的 key 它会抛 NO_FLOW，错误信息更准。
@@ -334,11 +359,12 @@ function beginHandler(
             bus: new EventEmitter(),
             pendingPrompts: new Map(),
             settled: undefined,
+            events: [],
             createdAt: Date.now(),
           }
           attempts.set(attempt.id, attempt)
           keyToAttempt.set(key, attempt.id)
-          jsonResponse(res, 200, { ok: true, attemptId: attempt.id, method: chosen, methods: entry.methods })
+          jsonResponse(res, 200, { ok: true, attemptId: attempt.id, method: chosen, methods: entry.methods, reused: false })
           // 后台开跑。**不要 await** —— respond 已经在上面发了，再 await 会卡住下一次 req。
           runAttempt(ctx, authorization, attempt).catch((cause: unknown) => {
             const message = cause instanceof Error ? cause.message : String(cause)
