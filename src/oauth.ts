@@ -331,9 +331,17 @@ function beginHandler(
           // 界面刷新、弹窗被关掉、切了个标签页都会让浏览器丢掉 attemptId，而 attempt 还在
           // 宿主里pending（等用户回答 prompt）。这时回 409 等于把用户锁在外面五分钟；
           // 复用则是「接着上一次继续」——SSE 会回放已经发生的事件，弹窗一开就是当前状态。
+          const fresh = parsed['fresh'] === true
           const existingId = keyToAttempt.get(key)
           const existing = existingId === undefined ? undefined : attempts.get(existingId)
-          if (existing !== undefined && existing.settled === undefined) {
+          // fresh：调用方明确要求「重走一遍流程」（比如用户从 github.com 切到 GitHub Enterprise），
+          // 那就先撤掉在跑的那个再建新的，不能复用——复用会让流程停在已经答过的域名上。
+          if (fresh && existing !== undefined && existing.settled === undefined) {
+            existing.controller.abort()
+            settle(existing, 'cancelled', '被新的登录尝试取代')
+            keyToAttempt.delete(key)
+          }
+          if (!fresh && existing !== undefined && existing.settled === undefined) {
             jsonResponse(res, 200, {
               ok: true,
               attemptId: existing.id,

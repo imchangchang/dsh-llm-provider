@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame } = moduleExports
+const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -199,6 +199,18 @@ rowsCheck('服务没挂上时给原因', offRow !== undefined && typeof offRow.t
 const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: true, flows: 0 })
 rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
 rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
+
+// ---- 「留空即默认」的提问识别（Copilot 的企业域名；别的提问绝不能自动答）----
+rowsCheck('识别 Copilot 企业域名提问（placeholder）',
+  isSafeBlankPrompt({ kind: 'text', message: 'GitHub Enterprise URL/domain (blank for github.com)', placeholder: 'company.ghe.com' }) === true)
+rowsCheck('识别 Copilot 企业域名提问（只靠文案也能认）',
+  isSafeBlankPrompt({ kind: 'text', message: 'GitHub Enterprise URL/domain (blank for github.com)' }) === true)
+rowsCheck('粘贴回调 URL 的提问不自动答',
+  isSafeBlankPrompt({ kind: 'text', message: 'Complete login in your browser, or paste the authorization code / redirect URL here:', placeholder: 'http://127.0.0.1:1455/callback' }) === false)
+rowsCheck('select 提问不自动答',
+  isSafeBlankPrompt({ kind: 'select', message: 'Select OpenAI Codex login method:', options: [] }) === false)
+rowsCheck('secret 提问不自动答',
+  isSafeBlankPrompt({ kind: 'secret', message: 'Enter token' }) === false)
 
 // ---- OAuth SSE 帧解析（EventSource 会剥掉 `data:` 前缀，这里是最容易踩的一处）----
 const promptJson = JSON.stringify({ kind: 'prompt', promptId: 'p1', prompt: { kind: 'text', message: 'Enterprise URL/domain' } })

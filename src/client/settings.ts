@@ -10,6 +10,7 @@ import {
   dropPlanAccount,
   findById,
   getJson,
+  isSafeBlankPrompt,
   loadModelCatalog,
   loadModelDetailMap,
   loadPlanStatus,
@@ -282,6 +283,10 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     pendingBusy: boolean,
     /** 刚点了「复制」：按钮文案临时变成「已复制」（1.5 秒后自己变回来）。 */
     copied: boolean,
+    /** 用户是不是选了 GitHub Enterprise：true 才把「企业域名」那个提问显示出来。 */
+    enterprise: boolean,
+    /** 这次流程里自动替用户答过「留空即默认」的提问（弹窗里据此给一行说明 + 切换入口）。 */
+    autoBlanked: boolean,
     done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
   }
   type OAuthFlowSetter = (next: OAuthFlowState | null | ((prev: OAuthFlowState | null) => OAuthFlowState | null)) => void
@@ -396,9 +401,16 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   }
 
   // ---- OAuth 流：把官方 bundle 的 flow 暴露给浏览器，弹窗收 notice / prompt，settled 触发 onAdded ----
-  function startOauth() {
+  /**
+   * 起一次登录。
+   * @param options.enterprise - true 时把 GitHub Copilot 的「企业域名」提问显示出来；
+   *   默认 false：那一步留空即 github.com，替用户答掉（上游每次登录都要问一遍，绝大多数人用不上）。
+   * @param options.fresh - true 时让宿主撤掉在跑的 attempt 重开（切换 Enterprise 要重走流程）。
+   */
+  function startOauth(options?: { enterprise?: boolean, fresh?: boolean }) {
     var oauthInfo = pickedPreset === undefined ? undefined : pickedPreset.oauth
     if (oauthInfo === undefined || oauthInfo.key === '') return
+    var wantEnterprise = options !== undefined && options.enterprise === true
     setOauth({
       attempt: undefined,
       notices: [],
@@ -407,9 +419,19 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       pendingSelect: oauthInfo.methods[0]?.id ?? '',
       pendingBusy: true,
       copied: false,
+      enterprise: wantEnterprise,
+      autoBlanked: false,
       done: undefined,
     })
     startOauthAttempt(oauthInfo.key, oauthInfo.methods[0]?.id, function (event: OauthEvent) {
+      // 返回字符串 = 替用户回答这个 prompt。只对「留空即默认」的那条（Copilot 的企业域名）生效，
+      // 别的提问一律照常显示——粘贴回调 URL 那种自动答空串会直接搞坏登录。
+      if (event.kind === 'prompt' && wantEnterprise !== true && isSafeBlankPrompt(event.prompt)) {
+        setOauth(function (prev) {
+          return prev === null ? null : { ...prev, autoBlanked: true }
+        })
+        return ''
+      }
       setOauth(function (prev) {
         if (prev === null) return null
         var next = { ...prev }
@@ -443,7 +465,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         }
         return prev
       })
-    })
+      return undefined
+    }, options !== undefined && options.fresh === true)
       .then(function (attempt) {
         setOauth(function (prev) {
           if (prev === null) return null
@@ -473,6 +496,16 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         }, 1500)
       }, function () { /* 被拒：链接本身可选中，不打扰 */ })
     } catch (cause) { /* 没有剪贴板 API：同上 */ }
+  }
+  /**
+   * 改用 GitHub Enterprise 重新登录：当前那次已经替用户答过「企业域名」了，没法回头改，
+   * 只能撤掉重开（fresh 让宿主先撤在跑的 attempt，不复用）。
+   */
+  function useEnterpriseOauth() {
+    var current = oauth
+    if (current !== null && current.attempt !== undefined) current.attempt.cancel()
+    // 让 cancel 先送达宿主（abort → settle），再起新的；fresh 也会兜一层。
+    setTimeout(function () { startOauth({ enterprise: true, fresh: true }) }, 50)
   }
   function cancelOauth() {
     setOauth(function (prev) {
@@ -730,7 +763,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
           ),
       // OAuth 弹窗放在按钮行**上面**：登录是这一步的主事件，按钮是它的后继动作，
       // 摆在下面对不上阅读顺序（用户实测反馈）。
-      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth, copyOauthLink,
+      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth, copyOauthLink, useEnterpriseOauth,
         function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingValue: event.target.value } }) },
         function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingSelect: event.target.value } }) },
       ),
@@ -776,6 +809,8 @@ function renderOauthDialog(
     pendingSelect: string,
     pendingBusy: boolean,
     copied: boolean,
+    enterprise: boolean,
+    autoBlanked: boolean,
     done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
   }>,
   preset: ProviderPreset | undefined,
@@ -783,6 +818,7 @@ function renderOauthDialog(
   onClose: () => void,
   onSubmit: () => void,
   onCopyLink: (url: string) => void,
+  onUseEnterprise: () => void,
   onValueChange: (event: FieldEvent) => void,
   onSelectChange: (event: FieldEvent) => void,
 ) {
@@ -803,6 +839,14 @@ function renderOauthDialog(
         ? react.createElement('button', { type: 'button', className: 'pv_action', onClick: onClose }, '×')
         : react.createElement('button', { type: 'button', className: 'pv_action', onClick: onCancel }, t('oauthCancel')),
     ),
+    state.autoBlanked === true
+      ? react.createElement(
+          'div',
+          { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '4px', opacity: 0.85 } },
+          react.createElement('span', null, t('oauthGithubCom')),
+          react.createElement('button', { type: 'button', className: 'pv_action', style: { marginLeft: '0' }, onClick: onUseEnterprise }, t('oauthUseEnterprise')),
+        )
+      : null,
     lastNotice === undefined
       ? react.createElement('div', { className: 'plan_note' }, state.attempt === undefined ? '正在打开浏览器…' : t('oauthInFlight'))
       : react.createElement(

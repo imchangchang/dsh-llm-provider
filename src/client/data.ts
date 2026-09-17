@@ -12,6 +12,7 @@ import type {
   OauthAttemptClient,
   OauthEvent,
   OauthMethod,
+  OauthPrompt,
   PlanAccount,
   ProjectionCell,
   SessionsFace,
@@ -371,6 +372,24 @@ export function findModel(groups: CatalogGroup[], providerId: string, modelId: s
 /* ---------------------------- OAuth ---------------------------- */
 
 /**
+ * 这个 prompt 是不是「留空就等于默认值」的那种？
+ *
+ * 目前只认 pi-ai 的 GitHub Copilot 登录：它会问「GitHub Enterprise URL/domain
+ * (blank for github.com)」，`placeholder` 固定是 `company.ghe.com`。绝大多数人用 github.com，
+ * 这一步纯属多余，客户端直接替用户答空串跳过（企业版用户在弹窗里可以显式切回去）。
+ *
+ * **刻意只认这一条**：anthropic / openrouter 也会推 text prompt（粘贴回调 URL 或授权码），
+ * 那是与本地回调竞速的兜底，自动答空串会直接把登录搞坏。pi-ai 改了这条文案也不会出事——
+ * 匹配不上就退回「照常显示输入框」，只是少省一步。
+ * @param prompt - flow 推来的提问。
+ */
+export function isSafeBlankPrompt(prompt: OauthPrompt): boolean {
+  if (prompt === null || typeof prompt !== 'object' || prompt.kind !== 'text') return false
+  if (prompt.placeholder === 'company.ghe.com') return true
+  return /blank for github\.com/i.test(prompt.message)
+}
+
+/**
  * 把宿主从 ctx.authorization 同步出来的 flow 列出来：现在主要走 /provider/presets 里
  * preset.oauth；这条独立接口留给"加卡片时主动探一下能不能 OAuth"的场景。
  */
@@ -494,9 +513,16 @@ export function parseOauthFrame(payload: string): OauthEvent | undefined {
 export function startOauthAttempt(
   key: string,
   method: string | undefined,
-  onEvent: (event: OauthEvent) => void,
+  onEvent: (event: OauthEvent) => string | undefined,
+  fresh?: boolean,
 ): Promise<OauthAttemptClient> {
-  return postJson('/provider/oauth/begin', { key: key, method: method === undefined ? undefined : method }).then(function (body) {
+  return postJson('/provider/oauth/begin', {
+    key: key,
+    method: method === undefined ? undefined : method,
+    // fresh：宿主上还有这个 key 的未结算 attempt 就先撤掉它，另起一个（用户在弹窗里切
+    // 「改用 GitHub Enterprise」时要重新走一遍流程，不能复用到已经答过域名的那次）。
+    fresh: fresh === true ? true : undefined,
+  }).then(function (body) {
     var record = body === null || typeof body !== 'object' ? {} : (body as AnyRecord)
     if (record.ok !== true || typeof record.attemptId !== 'string') {
       var message = typeof record.error === 'string' ? record.error : 'OAuth attempt 起不来'
@@ -509,16 +535,25 @@ export function startOauthAttempt(
     } catch (cause) {
       throw cause instanceof Error ? cause : new Error(String(cause))
     }
+    // 先建句柄、后挂 onmessage：自动回答要用它，而事件随时可能到达。
+    var client: OauthAttemptClient
     source.onmessage = function (ev: MessageEvent<string>): void {
       var event = parseOauthFrame(typeof ev.data === 'string' ? ev.data : '')
-      if (event !== undefined) onEvent(event)
+      if (event === undefined) return
+      // onEvent 返回字符串 = 这个 prompt 由界面替用户回答（「留空即默认」那一类）。
+      var auto = onEvent(event)
+      if (auto !== undefined && event.kind === 'prompt') {
+        client.respond(event.promptId, auto).catch(function () {
+          /* prompt 已撤回 / 已结束：忽略，界面那边会走 settled */
+        })
+      }
     }
     source.onerror = function (): void {
       // EventSource 不可恢复错误（流断、404），关掉就好。已 settled 的 attempt 也会触发，
       // 但因为服务端在 settled 后会 end 流，EventSource 视作正常关，不必报。
       if (source !== undefined) source.close()
     }
-    return {
+    client = {
       attemptId: attemptId,
       close: function () {
         if (source !== undefined) source.close()
@@ -533,5 +568,6 @@ export function startOauthAttempt(
           .then(function () { return undefined })
       },
     }
+    return client
   })
 }
