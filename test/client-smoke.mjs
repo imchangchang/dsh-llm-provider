@@ -189,6 +189,17 @@ const broken = piAiBridgeRows({ active: false, error: '没有能用的 pi-ai：�
 rowsCheck('桥接挂掉时只报错误行', broken.length === 1 && broken[0].bad === true)
 rowsCheck('没有 bridge 时不出行', piAiBridgeRows(undefined, undefined).length === 0)
 
+// ---- OAuth 体检行（原版 dsh 不挂 authorization 服务，这行是用来看「为什么没有 OAuth 入口」的）----
+const oauthOk = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: true, flows: 38 })
+rowsCheck('OAuth 可用时报条数', oauthOk.some((r) => r.key === 'oauth-ok' && r.value === '38 个登录方式'))
+const oauthOff = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: false, flows: 0 })
+const offRow = oauthOff.find((r) => r.key === 'oauth-off')
+rowsCheck('服务没挂上时报警告行', offRow !== undefined && offRow.warn === true)
+rowsCheck('服务没挂上时给原因', offRow !== undefined && typeof offRow.title === 'string' && offRow.title.indexOf('dsh-authorization') !== -1)
+const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: true, flows: 0 })
+rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
+rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
+
 rowsCheck('没检查过上游时说「未检查」', piAiUpstreamText(undefined) === '上游 未检查')
 rowsCheck('检查过就报版本号', piAiUpstreamText({ latest: '0.86.0', lastCheck: new Date().toISOString() }).indexOf('0.86.0') !== -1)
 

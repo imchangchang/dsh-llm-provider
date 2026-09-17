@@ -314,6 +314,19 @@ export async function apply(ctx: PluginContext, config: unknown): Promise<void> 
             : { active: false, error: bridge.error },
           llmDirectorySize: declaredCount,
           routes,
+          // OAuth 体检：authorization 服务在不在、注册了几条 flow。原版 dsh 不挂这个服务
+          // （见 oauth.ts 的 ensureAuthorizationService），所以「界面没有 OAuth 入口」这件事
+          // 得能一眼看出是哪一步没成：服务没挂上（available:false）还是挂了但没人注册 flow
+          // （available:true, flows:0）。刻意不列 flow 的 key——那是凭据记录名，没必要给浏览器。
+          oauth: ((): { available: boolean, flows: number } => {
+            const authorization = service<AuthorizationService>('authorization')
+            if (authorization === undefined) return { available: false, flows: 0 }
+            try {
+              return { available: true, flows: typeof authorization.list === 'function' ? authorization.list().length : 0 }
+            } catch {
+              return { available: true, flows: 0 }
+            }
+          })(),
           // 只读体检：DeepSeek 走 pi-ai 必须在 settings 的 llm-pi-ai.providers 里有一条
           // deepseek 路由（原生 llm-deepseek 被 cordis.patch.yml 禁用了，全靠这条）。
           // 插件不写宿主配置：缺了就报出来，由用户用「添加 Provider」补。不能静默——

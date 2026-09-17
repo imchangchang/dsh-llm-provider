@@ -44,9 +44,10 @@ function piAiSourceHint(source: unknown): string {
  * 也免得一堆拼字符串的逻辑埋在组件里。
  * @param bridge - /provider/status 的 bridge 段（当前加载的那份）。
  * @param update - 同上的 update 段（上游最新 / 待生效 / 体检没过的）。
+ * @param oauth - 同上的 oauth 段（authorization 服务在不在、注册了几条 flow）。缺省不渲染这一行。
  * @returns `[{ key, text, value?, title?, warn? }]`；value 是右侧的次要文字。
  */
-export function piAiBridgeRows(bridge: unknown, update: unknown): BridgeRow[] {
+export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown): BridgeRow[] {
   var rows: BridgeRow[] = []
   if (bridge === undefined || bridge === null) return rows
   var bridgeRecord = bridge as AnyRecord
@@ -81,6 +82,31 @@ export function piAiBridgeRows(bridge: unknown, update: unknown): BridgeRow[] {
       title: String(skipped.error),
       warn: true,
     })
+  }
+  // OAuth 体检：服务不在 = OAuth 入口整块不会有；服务在但 0 条 flow = 官方 llm-pi-ai 的
+  // inject 还没跑（或 catalog 里没有可登录的 provider）。两种情况给的动作不一样，分开说。
+  if (oauth !== undefined && oauth !== null) {
+    var oauthRecord = oauth as AnyRecord
+    var flows = typeof oauthRecord.flows === 'number' ? oauthRecord.flows : 0
+    if (oauthRecord.available !== true) {
+      rows.push({
+        key: 'oauth-off',
+        text: 'OAuth 登录不可用：authorization 服务没挂上',
+        value: '看原因',
+        title: '原版 dsh 的 bundle 不挂 @deepseek-ai/dsh-authorization，本插件会在启动时补挂。这里为 false 说明补挂失败（宿主里找不到这个包，或加载报错）——看 dsh 启动日志里的 provider 告警',
+        warn: true,
+      })
+    } else if (flows === 0) {
+      rows.push({
+        key: 'oauth-empty',
+        text: 'OAuth 登录：服务在，但没有已注册的登录方式',
+        value: '看原因',
+        title: 'authorization 服务已就位，但没有 flow。官方 llm-pi-ai 会在服务出现后按 pi-ai 目录注册，若长时间为 0 说明这一步没跑起来（provider 列不出登录方式）',
+        warn: true,
+      })
+    } else {
+      rows.push({ key: 'oauth-ok', text: 'OAuth 登录可用', value: String(flows) + ' 个登录方式' })
+    }
   }
   // 最近一次检查更新的结论
   if (update !== undefined && update !== null) {
@@ -1104,8 +1130,9 @@ export function ProviderSettingsSection() {
 
   var bridge = status === null || status.bridge === undefined ? undefined : status.bridge
   var update = status === null || status.update === undefined ? undefined : status.update
+  var oauthStatus = status === null || status.oauth === undefined ? undefined : status.oauth
   // 桥接明细：放在「pi-ai 桥接」二级标签页里展示。行的内容由 piAiBridgeRows 给（纯函数，离线可测）
-  var bridgeRows = piAiBridgeRows(bridge, update)
+  var bridgeRows = piAiBridgeRows(bridge, update, oauthStatus)
   var bridgeLines = []
   for (var bi = 0; bi < bridgeRows.length; bi += 1) {
     var row = bridgeRows[bi]
