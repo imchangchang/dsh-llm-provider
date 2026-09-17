@@ -26,7 +26,7 @@ import { activePiAiRoot, loadBridge, vendorDir } from './bridge.js'
 import { loadModelDetails, type ModelDetail } from './model-details.js'
 import { checkAndUpdate, startBackgroundCheck } from './updater.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
-import { presetsWithMeta } from './provider-presets.js'
+import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
 import { findSharedCredentials } from './credential-check.js'
 import { ensureAuthorizationService, flowKeyForProvider, registerOAuthRoutes } from './oauth.js'
@@ -196,18 +196,28 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const displayName = route.label ?? labelOf(providerId)
     // 官网/控制台链接：卡片名称下的跳转链接（适配器带了自己的就优先用适配器的）
     const websiteUrl = websiteOf(providerId)
-    const baseUrl = typeof route.baseURL === 'string' && route.baseURL !== '' ? route.baseURL : undefined
-    // 路由自身的配置项：卡片展开体和「添加供应商」表单展示同一组信息（缺的字段 JSON 序列化时自然消失）
-    const adapter = findAdapter(providerId, baseUrl)
+    // 端点：只有用户显式写了才算「这条路配的端点」（企业版端点、自建网关这类覆盖）。
+    const configuredBaseUrl = typeof route.baseURL === 'string' && route.baseURL !== '' ? route.baseURL : undefined
+    // 目录里这家的默认端点：发请求时宿主按 `request.baseURL ?? base?.baseUrl ?? providerBaseUrl`
+    // 回落，余额适配器也要知道「发到哪」（zai / minimax 按 host 选站点，拿不到会掉到错的站点）。
+    const catalogBaseUrl = catalogBaseUrlOf(providerId)
     const credential = await resolveKey(route.apiKeyEnv)
     // 有没有 OAuth 授权：手填了 key 就不用查；没 key 时才看凭据记录里有没有 grant。
     // routeMeta 会 spread 进每个返回分支，所以放这里就不必逐分支加。
     const oauthAuthorized = credential.configured ? false : await oauthAuthorizedFor(providerId)
     const authConfigured = credential.configured || oauthAuthorized
+    // 路由自身的配置项：卡片展开体和「添加供应商」表单展示同一组信息（缺的字段 JSON 序列化时自然消失）
+    // 余额适配器的端点参数：路由没写就用目录默认（查额度得打到这家真正的主机）
+    const adapterBaseUrl = configuredBaseUrl ?? catalogBaseUrl
+    const adapter = findAdapter(providerId, adapterBaseUrl)
     // OAuth 授权过的：适配器要的 key 从凭据记录里取（Copilot 的配额接口要 GitHub token）。
     const oauthCredential = oauthAuthorized ? await oauthCredentialFor(providerId) : {}
     const queryKey = credential.configured ? credential.key : oauthCredential.token
     const routeMeta = {
+      // 卡片展示的端点：只认用户写的那个。OAuth 路由的端点由凭据决定——pi-ai 的 toAuth 带
+      // baseUrl，models.js 里 `auth.baseUrl` 覆盖模型自己的（企业版 Copilot 的
+      // api.enterprise.* 就这么来的），摆目录里那个 individual 地址反而是错的。
+      baseUrl: configuredBaseUrl ?? (oauthAuthorized ? undefined : catalogBaseUrl),
       api: route.api,
       apiKeyEnv: route.apiKeyEnv,
       oauthAuthorized,
@@ -224,7 +234,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     if (adapter === undefined) {
       return {
         ...routeMeta,
-        id: providerId, displayName, kind: 'unknown-provider', authConfigured, baseUrl,
+        id: providerId, displayName, kind: 'unknown-provider', authConfigured,
         balances: [], windows: [], fetchedAt, websiteUrl, keyHint, deletable: route.source === 'llm-pi-ai',
         // OAuth 登录过、但没有额度适配器的（Codex / Claude / xAI 这类）：给用户看得懂的一句，
         // 别把「去 src/adapters/ 加适配器」这种给贡献者的话摆到界面上。
@@ -234,7 +244,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       }
     }
     if (adapter.id === 'qwen-unsupported') {
-      const result = await adapter.query({ id: providerId, displayName, key: undefined, baseUrl, extras: {} })
+      const result = await adapter.query({ id: providerId, displayName, key: undefined, baseUrl: adapterBaseUrl, extras: {} })
       if (result.websiteUrl === undefined) result.websiteUrl = websiteUrl
       if (result.keyHint === undefined) result.keyHint = keyHint
       if (result.deletable === undefined) result.deletable = route.source === 'llm-pi-ai'
@@ -244,13 +254,13 @@ export function apply(ctx: PluginContext, config: unknown): void {
     if (!credential.configured && !oauthAuthorized) {
       return {
         ...routeMeta,
-        id: providerId, displayName, kind: 'quota', authConfigured, baseUrl,
+        id: providerId, displayName, kind: 'quota', authConfigured,
         balances: [], windows: [], error: credential.reason, fetchedAt, websiteUrl, keyHint,
         deletable: route.source === 'llm-pi-ai',
       }
     }
     try {
-      const result = await adapter.query({ id: providerId, displayName, key: queryKey, baseUrl, extras: {} })
+      const result = await adapter.query({ id: providerId, displayName, key: queryKey, baseUrl: adapterBaseUrl, extras: {} })
       if (result.websiteUrl === undefined) result.websiteUrl = websiteUrl
       if (result.keyHint === undefined) result.keyHint = keyHint
       if (result.deletable === undefined) result.deletable = route.source === 'llm-pi-ai'
@@ -259,7 +269,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     } catch (error) {
       return {
         ...routeMeta,
-        id: providerId, displayName, kind: 'quota', authConfigured: true, baseUrl,
+        id: providerId, displayName, kind: 'quota', authConfigured: true,
         balances: [], windows: [], error: messageOf(error), fetchedAt, websiteUrl, keyHint,
         deletable: route.source === 'llm-pi-ai',
       }
