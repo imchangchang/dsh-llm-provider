@@ -44,6 +44,7 @@ const KNOWN_WEBSITES: Record<string, string> = {
   'kimi-coding': 'https://www.kimi.com/code',
   'zai-coding-cn': 'https://open.bigmodel.cn',
   'qwen-token-plan-cn': 'https://bailian.console.aliyun.com',
+  'deepseek': 'https://platform.deepseek.com',
   'deepseek-official': 'https://platform.deepseek.com',
   'moonshotai-cn': 'https://platform.moonshot.cn',
   'minimax-cn': 'https://platform.minimaxi.com',
