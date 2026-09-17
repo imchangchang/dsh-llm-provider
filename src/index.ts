@@ -378,7 +378,34 @@ export function apply(ctx: PluginContext, config: unknown): void {
               if (!credential.configured) keyless.add(route.id)
             }
           } catch { /* 路由发现失败就当全部未配置 */ }
-          json(res, 200, { presets: presetsWithMeta(configured, keyless) })
+          const presets = presetsWithMeta(configured, keyless)
+          // OAuth 入口：把 authorization 服务列出的 flow 按 provider id 挂回 preset。
+          // key 是 `<scope>/<provider-id>`，scope 是拥有这条 flow 的插件（来自官方 bundle 的注册）；
+          // 这里按 provider id 后缀对齐，所以 copilot / claude / codex 这些预设能认出自己。
+          const authorization = service<AuthorizationService>('authorization')
+          if (typeof authorization?.list === 'function') {
+            try {
+              const flowsByProvider = new Map<string, AuthorizationEntry>()
+              for (const entry of authorization.list()) {
+                const slash = entry.key.lastIndexOf('/')
+                const providerId = slash < 0 ? entry.key : entry.key.slice(slash + 1)
+                flowsByProvider.set(providerId, entry)
+              }
+              for (const preset of presets) {
+                const flow = flowsByProvider.get(preset.id)
+                if (flow === undefined) continue
+                preset.oauth = {
+                  key: flow.key,
+                  label: flow.label,
+                  methods: flow.methods.map((m) => ({ id: m.id, label: m.label })),
+                  inFlight: flow.inFlight,
+                }
+              }
+            } catch (cause) {
+              logger?.warn?.(`oauth 元信息挂载失败：${messageOf(cause)}`)
+            }
+          }
+          json(res, 200, { presets })
         })()
       },
     }),
