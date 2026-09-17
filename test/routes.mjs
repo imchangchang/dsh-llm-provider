@@ -3,7 +3,7 @@
  *
  *   node test/routes.mjs
  */
-import { labelOf, providerRoutes } from '../lib/routes.js'
+import { labelOf, providerRoutes, websiteOf } from '../lib/routes.js'
 
 let failed = false
 function check(name, actual, expected) {
@@ -78,6 +78,15 @@ check('两条路抛错都被吞掉且不影响原生路由', [...providerRoutes(
 
 check('labelOf 已知 provider 用 pi-ai 名', labelOf('zai-coding-cn'), 'Z.AI Coding CN')
 check('labelOf 未知 provider 按 id 拼', labelOf('my-gateway'), 'My Gateway')
+
+// websiteOf：卡片 ↗ 跳官网的依据。没查到就是 undefined——settings.ts 据此决定不渲染链接。
+check('websiteOf 精确匹配：deepseek → platform.deepseek.com', websiteOf('deepseek'), 'https://platform.deepseek.com')
+check('websiteOf 精确匹配：deepseek-official 与 deepseek 同址', websiteOf('deepseek-official'), 'https://platform.deepseek.com')
+check('websiteOf 精确匹配：kimi-coding → kimi.com/code', websiteOf('kimi-coding'), 'https://www.kimi.com/code')
+check('websiteOf 前缀兜底：未列名的 provider 没匹配就 undefined（不跳到 baseUrl）', websiteOf('openai'), undefined)
+check('websiteOf 前缀兜底：anthropic 也没匹配到，不该瞎给', websiteOf('anthropic'), undefined)
+check('websiteOf 已知 -cn 系列：moonshotai-cn 精确匹配', websiteOf('moonshotai-cn'), 'https://platform.moonshot.cn')
+check('websiteOf 前缀兜底：minimax-intl 这类变体回到 minimax-cn 的官网', websiteOf('minimax-intl'), 'https://platform.minimaxi.com')
 
 console.log(failed ? '\n有失败用例' : '\n路由发现测试全部通过')
 if (failed) process.exitCode = 1

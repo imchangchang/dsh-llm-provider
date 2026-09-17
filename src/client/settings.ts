@@ -1338,9 +1338,8 @@ export function ProviderSettingsSection() {
         }
       }
 
-      var linkUrl = typeof account.websiteUrl === 'string' && account.websiteUrl !== ''
-        ? account.websiteUrl
-        : (typeof account.baseUrl === 'string' && account.baseUrl !== '' ? account.baseUrl : undefined)
+      // 没有官网链接就不显示 ↗：baseUrl 是 API 端点，跳过去没用
+      var linkUrl = typeof account.websiteUrl === 'string' && account.websiteUrl !== '' ? account.websiteUrl : undefined
 
       cards.push(
         react.createElement(
