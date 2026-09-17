@@ -281,8 +281,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     pendingValue: string,
     pendingSelect: string,
     pendingBusy: boolean,
-    /** 刚点了「复制」：按钮文案临时变成「已复制」（1.5 秒后自己变回来）。 */
-    copied: boolean,
+    /** 刚复制的是哪一项：对应按钮文案临时变成「已复制」（1.5 秒后自己变回来）。 */
+    copied: '' | 'link' | 'code',
     /** 用户是不是选了 GitHub Enterprise：true 才把「企业域名」那个提问显示出来。 */
     enterprise: boolean,
     /** 这次流程里自动替用户答过「留空即默认」的提问（弹窗里据此给一行说明 + 切换入口）。 */
@@ -418,7 +418,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       pendingValue: '',
       pendingSelect: oauthInfo.methods[0]?.id ?? '',
       pendingBusy: true,
-      copied: false,
+      copied: '',
       enterprise: wantEnterprise,
       autoBlanked: false,
       done: undefined,
@@ -481,20 +481,22 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       })
   }
   /**
-   * 复制设备码页面链接：链接打不开时（浏览器拦了新窗口、或者用户想换台设备打开）至少能自己粘。
-   * 剪贴板 API 不可用或被拒时什么都不做——链接本身就是可选中复制的文本，不弹错误打扰用户。
-   * @param url - flow 推过来的验证页地址。
+   * 复制链接或串码：链接打不开（浏览器拦了新窗口、或想换台设备打开）时至少能自己粘；串码要在
+   * 另一个页面里手输，能复制就不用对着屏幕敲。
+   * 剪贴板 API 不可用或被拒时什么都不做——文本本身可选中，不弹错误打扰用户。
+   * @param text - 要复制的文本。
+   * @param what - 标记是哪一项，按钮据此显示「已复制」。
    */
-  function copyOauthLink(url: string) {
+  function copyOauthText(text: string, what: 'link' | 'code') {
     try {
       var clipboard = navigator === undefined ? undefined : navigator.clipboard
       if (clipboard === undefined || typeof clipboard.writeText !== 'function') return
-      clipboard.writeText(url).then(function () {
-        setOauth(function (prev) { return prev === null ? null : { ...prev, copied: true } })
+      clipboard.writeText(text).then(function () {
+        setOauth(function (prev) { return prev === null ? null : { ...prev, copied: what } })
         setTimeout(function () {
-          setOauth(function (prev) { return prev === null ? null : { ...prev, copied: false } })
+          setOauth(function (prev) { return prev === null ? null : { ...prev, copied: '' } })
         }, 1500)
-      }, function () { /* 被拒：链接本身可选中，不打扰 */ })
+      }, function () { /* 被拒：文本本身可选中，不打扰 */ })
     } catch (cause) { /* 没有剪贴板 API：同上 */ }
   }
   /**
@@ -763,7 +765,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
           ),
       // OAuth 弹窗放在按钮行**上面**：登录是这一步的主事件，按钮是它的后继动作，
       // 摆在下面对不上阅读顺序（用户实测反馈）。
-      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth, copyOauthLink, useEnterpriseOauth,
+      oauth === null ? null : renderOauthDialog(oauth, pickedPreset, cancelOauth, closeOauth, submitOAuth, copyOauthText, useEnterpriseOauth,
         function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingValue: event.target.value } }) },
         function (event: FieldEvent) { setOauth(function (prev) { return prev === null ? null : { ...prev, pendingSelect: event.target.value } }) },
       ),
@@ -808,7 +810,7 @@ function renderOauthDialog(
     pendingValue: string,
     pendingSelect: string,
     pendingBusy: boolean,
-    copied: boolean,
+    copied: '' | 'link' | 'code',
     enterprise: boolean,
     autoBlanked: boolean,
     done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
@@ -817,7 +819,7 @@ function renderOauthDialog(
   onCancel: () => void,
   onClose: () => void,
   onSubmit: () => void,
-  onCopyLink: (url: string) => void,
+  onCopy: (text: string, what: 'link' | 'code') => void,
   onUseEnterprise: () => void,
   onValueChange: (event: FieldEvent) => void,
   onSelectChange: (event: FieldEvent) => void,
@@ -873,10 +875,10 @@ function renderOauthDialog(
                     style: { marginLeft: '0', flex: '0 0 auto' },
                     title: '复制链接',
                     onClick: function () {
-                      if (noticeUrl !== undefined) onCopyLink(noticeUrl)
+                      if (noticeUrl !== undefined) onCopy(noticeUrl, 'link')
                     },
                   },
-                  state.copied === true ? t('oauthCopied') : t('oauthCopyLink'),
+                  state.copied === 'link' ? t('oauthCopied') : t('oauthCopyLink'),
                 ),
               ),
           noticeCode === undefined
@@ -884,7 +886,24 @@ function renderOauthDialog(
             : react.createElement(
                 'div',
                 { style: { marginTop: '4px' } },
-                react.createElement('div', { style: { fontFamily: 'monospace', fontSize: '1.5em' } }, noticeCode),
+                react.createElement(
+                  'div',
+                  { style: { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' } },
+                  react.createElement('span', { style: { fontFamily: 'monospace', fontSize: '1.5em' } }, noticeCode),
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'pv_action',
+                      style: { marginLeft: '0', flex: '0 0 auto' },
+                      title: '复制串码',
+                      onClick: function () {
+                        if (noticeCode !== undefined) onCopy(noticeCode, 'code')
+                      },
+                    },
+                    state.copied === 'code' ? t('oauthCopied') : t('oauthCopyLink'),
+                  ),
+                ),
                 react.createElement('div', { style: { opacity: 0.7 } }, '在打开的页面里输入这串码完成授权'),
               ),
         ),
