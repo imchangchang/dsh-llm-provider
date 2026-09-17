@@ -27,6 +27,29 @@ import { caretSvg } from './icons.js'
 import { t } from './i18n.js'
 import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, OauthAttemptClient, OauthEvent, OauthPrompt, PlanAccount, ProviderPreset } from './types.js'
 
+/**
+ * 「添加到列表」写进 settings 的路由配置。
+ *
+ * **OAuth 授权过的 provider 绝不写 apiKeyEnv**：官方适配器的 resolveApiKey 只要看到
+ * `apiKeyEnv` 就只认那个 ref，取不到值直接抛 MISSING_CREDENTIAL（实测报错原文：
+ * "its profile resolves GITHUB_COPILOT_API_KEY, which is not set … remove apiKeyEnv only if
+ * this provider should authenticate from pi-ai's own environment discovery"）。OAuth 的凭据
+ * 存在凭据记录的 grant 里、不在 ref 那个键空间，写上去等于把这条路堵死。留空 apiKeyEnv，
+ * pi-ai 才会走自己的凭据解析拿到 grant。
+ *
+ * @param form - 表单当前值。
+ * @param oauthAuthorized - 这次是否已经走完 OAuth 登录。
+ * @returns 写进 `llm-pi-ai.providers.<routeId>` 的对象。
+ */
+export function routeProfileOf(
+  form: { api: string, baseURL: string, apiKeyEnv: string },
+  oauthAuthorized: boolean,
+): AnyRecord {
+  var profile: AnyRecord = { api: form.api, baseURL: form.baseURL.trim() }
+  if (oauthAuthorized !== true) profile.apiKeyEnv = form.apiKeyEnv.trim()
+  return profile
+}
+
 /** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
 function piAiSourceLabel(source: unknown): string {
   if (source === 'dependency') return '兜底依赖'
@@ -372,7 +395,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   function add() {
     setBusy(true)
     setNote(null)
-    var profile = { api: form.api, baseURL: form.baseURL.trim(), apiKeyEnv: form.apiKeyEnv.trim() }
+    var profile = routeProfileOf(form, oauthAuthorized)
     var typedKey = form.key.trim()
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
@@ -1147,6 +1170,29 @@ export function ProviderSettingsSection() {
     if (Array.isArray(account.balances) && account.balances.length > 0) return '（' + account.balances[0].value + '）'
     return ''
   }
+  /**
+   * 把某条路由的 `apiKeyEnv` 从配置里删掉（OAuth 路由的修正动作）。
+   * 只删配置里的字段，不动凭据：万一用户之前真存过同名 ref，那也不该由我们顺手清掉。
+   * @param account - 卡片对应的额度账户。
+   */
+  function dropApiKeyEnv(account: PlanAccount) {
+    setSavingKey(function (prev: AnyRecord) { return withKey(prev, account.id, true) })
+    apiCall('settings/mutate', {
+      ns: 'llm-pi-ai',
+      ops: [{ op: 'unset', path: ['providers', account.id, 'apiKeyEnv'] }],
+    })
+      .then(function () {
+        showToast('已把 ' + shortName(account) + ' 改成走 OAuth 认证', true)
+        setCatTick(function (n: number) { return n + 1 })
+        refresh(true)
+      })
+      .catch(function (cause) {
+        showToast('修改失败：' + String(cause && cause.message ? cause.message : cause), false)
+      })
+      .then(function () {
+        setSavingKey(function (prev: AnyRecord) { return withKey(prev, account.id, false) })
+      })
+  }
   function refreshAccount(account: PlanAccount) {
     setRefreshingFlag(account.id, true)
     postJson('/provider/refresh', { providerId: account.id })
@@ -1348,6 +1394,30 @@ export function ProviderSettingsSection() {
               react.createElement('span', { className: 'pv_field' }, 'OAuth（已授权）'),
             ),
           )
+          // 早期版本（或手改配置）会给 OAuth 路由也写 apiKeyEnv，官方适配器看到它就只认那个
+          // ref、取不到值直接报 MISSING_CREDENTIAL——OAuth 登录等于白做。这里给一条一键修正：
+          // 把 apiKeyEnv 从这条路由的配置里删掉，pi-ai 就会回落到自己的凭据解析（拿到 grant）。
+          if (typeof account.apiKeyEnv === 'string' && account.apiKeyEnv !== '') {
+            bodyRows.push(
+              react.createElement(
+                'div',
+                { className: 'plan_note plan_warnText', key: 'apikeyenv-conflict' },
+                '这条路由写了 apiKeyEnv（' + String(account.apiKeyEnv) + '），官方适配器会只认它，'
+                + '导致 OAuth 登录用不上（发送时报 MISSING_CREDENTIAL）。',
+                react.createElement(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'pv_action',
+                    style: { marginLeft: '8px' },
+                    disabled: savingKey[account.id] === true,
+                    onClick: function () { dropApiKeyEnv(account) },
+                  },
+                  '改用 OAuth 认证',
+                ),
+              ),
+            )
+          }
         }
         var keyless = !oauthLoggedIn && account.authConfigured === false && typeof account.apiKeyEnv === 'string' && account.apiKeyEnv !== ''
         if (!oauthLoggedIn) bodyRows.push(

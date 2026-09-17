@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText } = moduleExports
+const { routeProfileOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -240,6 +240,16 @@ rowsCheck('select 提问不自动答',
   isSafeBlankPrompt({ kind: 'select', message: 'Select OpenAI Codex login method:', options: [] }) === false)
 rowsCheck('secret 提问不自动答',
   isSafeBlankPrompt({ kind: 'secret', message: 'Enter token' }) === false)
+
+// ---- 写进 settings 的路由配置：OAuth 授权过的不带 apiKeyEnv ----
+// 官方适配器看到 apiKeyEnv 就只认那个 ref，取不到值直接抛 MISSING_CREDENTIAL——
+// 给 OAuth 路由写上它，等于把 OAuth 登录堵死（线上实测踩到）。
+const formFixture = { api: 'anthropic-messages', baseURL: ' https://api.individual.githubcopilot.com ', apiKeyEnv: 'GITHUB_COPILOT_API_KEY' }
+const oauthProfile = routeProfileOf(formFixture, true)
+rowsCheck('OAuth 路由不写 apiKeyEnv', oauthProfile.apiKeyEnv === undefined)
+rowsCheck('OAuth 路由仍写 api 与 baseURL', oauthProfile.api === 'anthropic-messages' && oauthProfile.baseURL === 'https://api.individual.githubcopilot.com')
+const keyProfile = routeProfileOf(formFixture, false)
+rowsCheck('非 OAuth 路由照旧写 apiKeyEnv', keyProfile.apiKeyEnv === 'GITHUB_COPILOT_API_KEY')
 
 // ---- 重置倒计时：天数到两位数就只留天数（卡片头部最挤的一段）----
 const inFuture = (ms) => new Date(Date.now() + ms).toISOString()

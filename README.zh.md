@@ -263,6 +263,7 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 - 同一个 credential key 同时只允许一个 attempt：seam 自己也会拒（`ALREADY_IN_FLIGHT`），我们这里先发制人给 409。
 - 5 分钟未活动的 attempt 被 sweeper 清掉（断网 / 关页后内存不漏）；attempt settled 后保留到 TTL 上限，浏览器重连 SSE 还能拿到结果。
 - 客户端在「添加供应商」表单里识别 `preset.oauth`：按钮替代密码输入框，弹窗实时显示 notice 与 prompt（按 kind 渲染 input / select），settled 后通过 `onAdded` 触发卡片刷新。
+- **OAuth 授权的路由不写 `apiKeyEnv`**。官方适配器的 `resolveApiKey` 只要看到 `apiKeyEnv` 就只认那个 ref，取不到值直接抛 `MISSING_CREDENTIAL`——写上它等于把 OAuth 登录堵死（发送时才报错）。留空才会回落到 pi-ai 自己的凭据解析，从凭据记录里取 grant 换 token。早期版本添加的路由带着这个字段时，卡片展开体会给一条「改用 OAuth 认证」的一键修正（`unset apiKeyEnv`）。
 
 边界：
 

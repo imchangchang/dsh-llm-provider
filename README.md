@@ -265,6 +265,7 @@ The plugin fills this at startup: `ensureAuthorizationService()` in `src/oauth.t
 - One attempt per credential key: the seam refuses a second one (`ALREADY_IN_FLIGHT`) and the route answers 409 first.
 - Attempts idle for five minutes are swept (no leak after a dropped connection); a settled attempt stays until that TTL so a reconnect still sees the result.
 - The client recognises `preset.oauth` in the add-provider form: the button replaces the API-key input, the dialog renders notices and prompts by kind (input or select), and a successful sign-in refreshes the cards through `onAdded`.
+- **A route authorised through OAuth carries no `apiKeyEnv`.** The official adapter's `resolveApiKey` honours that field above everything else and throws `MISSING_CREDENTIAL` when it resolves to nothing, so writing it kills the OAuth path (the failure only shows up when a prompt is sent). Leaving it out lets pi-ai fall back to its own credential resolution and pick up the grant. Routes added by earlier versions still carrying the field get a one-click "use OAuth" fix in the card body (it unsets `apiKeyEnv`).
 
 Boundaries:
 
