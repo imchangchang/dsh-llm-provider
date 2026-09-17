@@ -259,7 +259,7 @@ rowsCheck('既没 ok 也没原因时给兜底文案', refreshFailure(undefined) 
 // ---- 老 provider id 的别名（会话里记着 deepseek-official 的那些）----
 // 官方 llm-deepseek 时代的会话记的是 deepseek-official，那条路由已经被本插件接管掉了：
 // 不折的话宿主 prompt() 会直接拒（no adapter serves provider …），连消息都发不出去。
-const { aliasSelection } = moduleExports
+const { aliasSelection, intervalCenterMap, resolveInheritedEffort } = moduleExports
 const catalog = [
   { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', reasoning: { efforts: ['low', 'high', 'max'], default: 'high' } }] },
 ]
@@ -278,6 +278,82 @@ rowsCheck('目录还没加载时不折', aliasSelection({ provider: 'deepseek-of
 rowsCheck('不是别名的原样返回',
   aliasSelection({ provider: 'kimi-coding', model: 'kimi-k2' }, catalog).provider === 'kimi-coding')
 rowsCheck('没有选择时还是 undefined', aliasSelection(undefined, catalog) === undefined)
+
+// ---- 按区间中心映射档位索引（force-effort-pick 流程的档位面板初始选中档位计算）----
+// 5→3 验证：k=0/1/2/3/4 → newIdx=0/0/1/2/2（中段对中段，边界对边界，不会跳到极值）。
+rowsCheck('5档第 1 档 → 3档第 1 档', intervalCenterMap(0, 5, 3) === 0)
+rowsCheck('5档第 2 档 → 3档第 1 档', intervalCenterMap(1, 5, 3) === 0)
+rowsCheck('5档第 3 档 → 3档第 2 档（用户原例）', intervalCenterMap(2, 5, 3) === 1)
+rowsCheck('5档第 4 档 → 3档第 3 档', intervalCenterMap(3, 5, 3) === 2)
+rowsCheck('5档第 5 档 → 3档第 3 档', intervalCenterMap(4, 5, 3) === 2)
+// 5→5 一一对应：区间中心对齐后每档对每档（边界不算）。
+rowsCheck('5→5 全部一一对应', JSON.stringify([0, 1, 2, 3, 4].map((k) => intervalCenterMap(k, 5, 5))) === JSON.stringify([0, 1, 2, 3, 4]))
+// 5→4：k=0/1/2/3/4 → newIdx=0/1/2/2/3（区间中心 (0.1, 0.3, 0.5, 0.7, 0.9)*4-0.5=-0.1/0.7/1.5/2.3/3.1 → round → 0/1/2/2/3）。
+rowsCheck('5档第 3 档 → 4档第 2 档', intervalCenterMap(2, 5, 4) === 2)
+rowsCheck('5档第 5 档 → 4档第 3 档', intervalCenterMap(4, 5, 4) === 3)
+// 边界：单档入多档 → 中间那一档；单档入单档 → 0。
+rowsCheck('1档 → 1档', intervalCenterMap(0, 1, 1) === 0)
+rowsCheck('1档 → 3档落到中间', intervalCenterMap(0, 1, 3) === 1)
+
+// ---- resolveInheritedEffort：切换模型时档位面板的初始选中档位 ----
+// 复用 aliasSelection 那条目录再加几个对照：5 档（low/high/max）、3 档（low/high/max）、
+// 不带 reasoning 的对照组（empty-no-effort-group）。
+const fiveCatalog = [
+  { id: 'a', name: 'A', models: [{ id: 'a5', name: 'A5', reasoning: { efforts: ['low', 'medium', 'high', 'xhigh', 'max'], default: 'high' } }] },
+]
+const threeCatalog = [
+  { id: 'b', name: 'B', models: [{ id: 'b3', name: 'B3', reasoning: { efforts: ['low', 'high', 'max'], default: 'low' } }] },
+]
+const noReasoningCatalog = [
+  { id: 'c', name: 'C', models: [{ id: 'c0', name: 'C0' }] },
+]
+const five = fiveCatalog[0].models[0]
+const three = threeCatalog[0].models[0]
+const noReasoning = noReasoningCatalog[0].models[0]
+
+// 1) priorEffort 在新模型档位表里 → 直接命中（最常见的快速路径）
+rowsCheck('priorEffort 直接命中 → 原样返回',
+  resolveInheritedEffort('max', five, three) === 'max')
+rowsCheck('priorEffort 直接命中（小写）',
+  resolveInheritedEffort('low', three, five) === 'low')
+
+// 2) priorEffort 不在新模型档位表里 → 按区间中心映射；用户原例验证
+rowsCheck('5档第2档「medium」→ 3档第1档「low」（区间中心）',
+  resolveInheritedEffort('medium', five, three) === 'low')
+rowsCheck('5档第3档「high」→ 3档第2档「high」（用户原例）',
+  resolveInheritedEffort('high', five, three) === 'high')
+rowsCheck('5档第4档「xhigh」→ 3档第3档「max」（区间中心）',
+  resolveInheritedEffort('xhigh', five, three) === 'max')
+
+// 3) priorEffort === undefined：分首次选模型 vs 老档是关闭
+rowsCheck('priorEffort undefined + 老模型不存在 → 新模型 defaultEffort',
+  resolveInheritedEffort(undefined, undefined, three) === 'low')
+rowsCheck('priorEffort undefined + 老模型存在 → 保留 undefined（老档是关闭）',
+  resolveInheritedEffort(undefined, five, three) === undefined)
+const threeNoDefault = [{ id: 'd', name: 'D', models: [{ id: 'd0', name: 'D0', reasoning: { efforts: ['low', 'high'], default: undefined } }] }][0].models[0]
+rowsCheck('priorEffort undefined + 老模型不存在 + 新模型无 defaultEffort → undefined',
+  resolveInheritedEffort(undefined, undefined, threeNoDefault) === undefined)
+
+// 4) 新模型没有 reasoning → undefined（空态兜底）
+rowsCheck('新模型没有 reasoning → undefined',
+  resolveInheritedEffort('max', five, noReasoning) === undefined)
+rowsCheck('新模型没有 reasoning + 老档 undefined → undefined',
+  resolveInheritedEffort(undefined, five, noReasoning) === undefined)
+const emptyEffortsModel = [{ id: 'e', name: 'E', models: [{ id: 'e0', name: 'E0', reasoning: { efforts: [], default: undefined } }] }][0].models[0]
+rowsCheck('新模型 reasoning.efforts 空 → undefined',
+  resolveInheritedEffort('max', five, emptyEffortsModel) === undefined)
+
+// 5) 老模型档位表拿不到 / priorEffort 不在里面（脏数据）→ 新模型 defaultEffort
+const orphanPrior = [{ id: 'x', name: 'X', models: [{ id: 'x0', name: 'X0', reasoning: { efforts: ['low', 'high'], default: 'high' } }] }][0].models[0]
+rowsCheck('老模型档位表拿不到（脏数据：priorEffort 不在老档位表里）→ 新模型 defaultEffort',
+  resolveInheritedEffort('medium', orphanPrior, three) === 'low')
+rowsCheck('老模型没有 reasoning + priorEffort 不在新档位表里 → 新模型 defaultEffort',
+  resolveInheritedEffort('medium', noReasoning, three) === 'low')
+
+// 6) 选择就是关闭兜底：priorEffort undefined 且老模型存在 + 新模型也没有 reasoning
+// → 仍然 undefined（用户已经显式选了"不指定档"，不要替他们改成别的）。
+rowsCheck('老档关闭 + 新模型也无 reasoning → undefined',
+  resolveInheritedEffort(undefined, five, noReasoning) === undefined)
 
 if (failures > 0) throw new Error(`桥接明细有 ${failures} 条断言没过`)
 

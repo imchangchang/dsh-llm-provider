@@ -3,6 +3,10 @@
  *   触发器胶囊（模型名 + 思考强度 + Chevron）→ 根菜单两行（模型 / 推理等级，值右对齐 + ›）
  *   → 模型面板（我们的增强：搜索 + provider 过滤 + 能力徽章，样式走官方 token）
  *   → 推理等级面板（Default + 档位，选中打勾）。
+ *
+ * 切换模型时强制选档：选了新模型不再立即关菜单，跳到推理等级面板让用户点一档；
+ * 点档位时优先沿用上一档 id（直接命中），不在新模型档位表里时按"区间中心"做比例映射。
+ * 新模型没有 reasoning 元数据时面板显示空态 +「知道了」按钮提交无档位后关闭。
  */
 import react from 'react'
 import { accountsById, findModel, loadModelCatalog, loadModelDetailMap, loadPlanStatus, normalizeGroups, onPlanChange, selectionCell, submitSelection, unwrap, usePolledSnapshot } from './data.js'
@@ -42,6 +46,83 @@ export function aliasSelection(selection: ModelSelection | undefined, groups: Ca
     : { provider: mapped, model: selection.model }
 }
 
+/**
+ * 把老模型的档位索引按区间中心映射到新模型的档位索引：把 [0, oldLen) 的档位中心
+ * (oldIdx + 0.5) / oldLen 当成 [0, 1) 内的点，再取反 [0, newLen) 的区间中心
+ * (newIdx + 0.5) / newLen。
+ *
+ * 选"区间中心"而不是 Math.round(oldIdx/(oldLen-1) * (newLen-1)) 是为了避开 0.5 边界
+ * 向上舍入的极值偏移——后者会让"老档中段"全部推到新档边界上；区间中心对齐是中段对
+ * 中段、边界对边界，不会跳到极值。
+ *
+ * 例（验证用）：5→3 时 k=0/1/2/3/4 → newIdx=0/0/1/2/2。
+ *
+ * @param oldIdx - 老档位索引（0..oldLen-1）。
+ * @param oldLen - 老档位表长度。
+ * @param newLen - 新档位表长度（≥ 1）。
+ * @returns 新档位索引（0..newLen-1）。
+ */
+export function intervalCenterMap(oldIdx: number, oldLen: number, newLen: number): number {
+  if (newLen <= 1) return 0
+  if (oldLen <= 0) return 0
+  var ratio = (oldIdx + 0.5) / oldLen
+  var raw = ratio * newLen - 0.5
+  var idx = Math.round(raw)
+  if (idx < 0) idx = 0
+  else if (idx > newLen - 1) idx = newLen - 1
+  return idx
+}
+
+/**
+ * 切换模型时算"上一档"应该带过去的继承档位：
+ *   1. 新模型没有 reasoning 元数据 → undefined（面板走空态）。
+ *   2. 上一档是 undefined：
+ *      - 老模型也不存在（首次选模型）→ 新模型 defaultEffort（再否则 undefined）。
+ *      - 老模型存在（用户之前没指定档位）→ undefined（保留"无档"偏好）。
+ *   3. 上一档直接落在新模型档位表里 → 原样返回。
+ *   4. 老模型档位表拿不到或上一档不在里面（脏数据）→ 新模型 defaultEffort。
+ *   5. 否则按区间中心把上一档在老档位表里的索引转投到新档位表里。
+ *
+ * 设计意图：用户已经显式选过的档位偏好应该跟着走，除非新模型不支持——和会话迁
+ * 移里 aliasSelection 的"档位在新模型支持时带过去、不支持时丢掉"同口径（见
+ * `model-seat.ts:31-43`）。
+ *
+ * @param priorEffort - 当前会话的 reasoningEffort（可能 undefined）。
+ * @param priorModel - 老模型在目录里的 CatalogModel（可迁，老数据通过）。
+ * @param newModel - 新模型在目录里的 CatalogModel（可迁，新数据通过）。
+ * @returns 应当作为新模型初始选中档位的 id，或 undefined（让面板走"Default"/空态）。
+ */
+export function resolveInheritedEffort(
+  priorEffort: string | undefined,
+  priorModel: CatalogModel | undefined,
+  newModel: CatalogModel | undefined,
+): string | undefined {
+  // 1. 新模型没 reasoning → undefined
+  if (newModel === undefined || newModel.reasoning === undefined) return undefined
+  var newEfforts = newModel.reasoning.efforts
+  var newDefault = newModel.reasoning.default
+  if (newEfforts.length === 0) return undefined
+
+  // 2. 上一档是 undefined：分"首次选"和"老档是关闭"两种
+  if (priorEffort === undefined) {
+    return priorModel === undefined ? newDefault : undefined
+  }
+
+  // 3. 直接命中
+  if (newEfforts.indexOf(priorEffort) !== -1) return priorEffort
+
+  // 4. 老档位表拿不到 / priorEffort 不在里面
+  var priorEfforts = priorModel !== undefined && priorModel.reasoning !== undefined
+    ? priorModel.reasoning.efforts
+    : undefined
+  if (priorEfforts === undefined || priorEfforts.length === 0) return newDefault
+  var oldIdx = priorEfforts.indexOf(priorEffort)
+  if (oldIdx === -1) return newDefault
+
+  // 5. 按区间中心映射
+  return newEfforts[intervalCenterMap(oldIdx, priorEfforts.length, newEfforts.length)]
+}
+
 export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
   var sessionId = props.sessionId
   var sessions = props.sessions
@@ -77,6 +158,12 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
   var detailsState = react.useState({})
   var detailsById = detailsState[0]
   var setDetailsById = detailsState[1]
+  // 强制选档流程暂存：用户从模型面板点了新模型之后，菜单不立即关，跳到档位面板
+  // 让用户点一档才提交。effortHint 由 resolveInheritedEffort 算出来，作为档位面板
+  // 的初始打勾行（沿用上一档偏好）。提交 / 关闭 / 退回根面板时清掉。
+  var pendingPickState = react.useState(null)
+  var pendingPick = pendingPickState[0]
+  var setPendingPick = pendingPickState[1]
   var rootRef = react.useRef(null)
   var searchRef = react.useRef(null)
 
@@ -289,6 +376,7 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
     setPane('root')
     setProviderFilter(null)
     setQuery('')
+    setPendingPick(null)
     setOpen(true)
   }
 
@@ -308,6 +396,22 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
     ? chosenEffort
     : (reasoning !== undefined ? defaultEffortOf(currentModel) : undefined)
   var effortText = reasoningTextOf(chosenEffort, reasoning, defaultEffortOf(currentModel))
+
+  // 强制选档面板的派生值：用户从模型面板点了新模型之后，菜单不立即关，
+  // 而是切到档位面板让用户点一档。面板要展示新模型的 reasoning 表与
+  // 继承下来的初始选中档位（pendingPick.effortHint）。
+  // 触发器胶囊仍按旧 selection 显示（提交前会话选择不变），所以不替换
+  // 上面的 currentModel/reasoning/effortText 派生。
+  var pendingModel: CatalogModel | undefined = undefined
+  var pendingReasoning = undefined as CatalogModel['reasoning']
+  var pendingEffectiveEffort: string | undefined = undefined
+  if (pendingPick !== null) {
+    pendingModel = findModel(groups, pendingPick.provider, pendingPick.model)
+    if (pendingModel !== undefined && pendingModel.reasoning !== undefined) {
+      pendingReasoning = pendingModel.reasoning
+    }
+    pendingEffectiveEffort = pendingPick.effortHint
+  }
 
   function submit(selectionRequest: ModelSelection): Promise<boolean> {
     if (busy) return Promise.resolve(false)
@@ -340,22 +444,53 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
       // 点的还是当前模型：直接收起（官方行为：选中项再点一次 = 确认并关闭）
       setOpen(false)
       setPane('root')
+      setPendingPick(null)
       return
     }
-    // 只提交 provider/model，档位交给宿主（官方同款：宿主 resolveCallConfig 决定，
-    // 再把最终选择回写投影）。自己塞一个档位等于伪造一次「用户选了这档」。
-    // 选完即关（官方行为）：想接着调档位就重新打开菜单，官方也是这么走的。
-    void submit({ provider: groupId, model: modelId })
+    // 选了新模型：算一次"上一档应该带过去"的值（区间中心映射），
+    // 跳到档位面板让用户点一档才提交——避免官方那种"切完模型立刻变 Default"
+    // 的体验，让用户至少看一眼推理强度面板（这是反向官方口径的产品决策）。
+    // 新模型没有 reasoning 元数据时面板走空态兜底（「知道了」按钮）。
+    var priorModel = selection !== undefined && selection !== null
+      ? findModel(groups, selection.provider, selection.model)
+      : undefined
+    var newModel = findModel(groups, groupId, modelId)
+    var hint = resolveInheritedEffort(chosenEffort, priorModel, newModel)
+    setPendingPick({ provider: groupId, model: modelId, effortHint: hint })
+    setPane('effort')
   }
 
   function chooseEffort(effort: string | undefined) {
+    // 强制选档流程：从 pendingPick 取 provider/model，档位取调用值；不
+    // 走"同档即关"那条路——提交一次才算数（用户没真按一行就不算确认）。
+    if (pendingPick !== null) {
+      var req: ModelSelection = { provider: pendingPick.provider, model: pendingPick.model }
+      if (effort !== undefined) req.reasoningEffort = effort
+      setPendingPick(null)
+      void submit(req)
+      return
+    }
+    // 普通换档流程（用户主动打开菜单换档，不经"选新模型"）：保留原行为——
+    // 点的就是当前那一档就只关闭不提交。
     if (selection === undefined || selection === null) return
     if (effort === effectiveEffort) {
       setOpen(false)
       return
     }
-    var req: ModelSelection = { provider: selection.provider, model: selection.model }
-    if (effort !== undefined) req.reasoningEffort = effort
+    var req2: ModelSelection = { provider: selection.provider, model: selection.model }
+    if (effort !== undefined) req2.reasoningEffort = effort
+    void submit(req2)
+  }
+
+  /**
+   * 强制选档流程里"该模型没有可用档位"分支的收尾：用户在空态面板上点了
+   * 「知道了」，提交无 effort 的新模型选择后关闭（让宿主 resolve；没有
+   * defaultEffort 时 reasoningEffort 留 undefined）。
+   */
+  function dismissPendingPick() {
+    if (pendingPick === null) return
+    var req: ModelSelection = { provider: pendingPick.provider, model: pendingPick.model }
+    setPendingPick(null)
     void submit(req)
   }
 
@@ -560,32 +695,73 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
   }
 
   // ---- 推理等级面板：Default + 档位，选中打勾 ----
+  // 强制选档流程（pendingPick 非空）：面板里的 reasoning / 当前档位 / Default 行
+  // 是否出现都按 pendingModel 算。普通换档流程（pendingPick 为空）：按当前 selection
+  // 的 currentModel 算。
+  // 顶部加一行小提示"已切换到 <新模型 id>，请选择推理强度"，让用户清楚是换模型
+  // 流程（而不是改当前模型的档位）。
   var effortPane = null
-  if (pane === 'effort' && reasoning !== undefined) {
-    var choices: EffortChoice[] = []
-    if (defaultEffortOf(currentModel) === undefined) {
-      choices.push({ effort: undefined, label: 'Default' })
-    }
-    var effList = reasoning.efforts
-    for (var ec = 0; ec < effList.length; ec += 1) {
-      choices.push({ effort: effList[ec], label: effortLabel(effList[ec]) ?? effList[ec] })
-    }
-    var effortRows = choices.map(function (level) {
-      var isCur = effectiveEffort === level.effort
-      return react.createElement(
-        'button',
-        {
-          key: level.label,
-          type: 'button',
-          className: 'ms_option',
-          disabled: busy || isCur,
-          onClick: function () { chooseEffort(level.effort) },
-        },
-        react.createElement('span', { className: 'ms_name' }, level.label),
-        react.createElement('span', { className: 'ms_check' }, isCur ? checkSvg() : null),
+  if (pane === 'effort') {
+    if (pendingPick !== null && pendingReasoning === undefined) {
+      // 空态：新模型没有 reasoning 元数据，用户点了「知道了」就以无 effort 提交。
+      effortPane = react.createElement(
+        'div',
+        { className: 'ms_scroll' },
+        react.createElement('div', { className: 'ms_status' }, '该模型没有可用的推理档位'),
+        react.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'ms_option',
+            disabled: busy,
+            onClick: dismissPendingPick,
+          },
+          react.createElement('span', { className: 'ms_name' }, '知道了'),
+          react.createElement('span', { className: 'ms_check' }),
+        ),
       )
-    })
-    effortPane = react.createElement('div', { className: 'ms_scroll' }, effortRows)
+    } else if (pendingPick !== null || reasoning !== undefined) {
+      var pModel = pendingPick !== null ? pendingModel : currentModel
+      var pReasoning = pendingPick !== null ? pendingReasoning : reasoning
+      var pEffective = pendingPick !== null ? pendingEffectiveEffort : effectiveEffort
+      var headerNote = pendingPick !== null
+        ? '已选 ' + String(pendingPick.provider) + '/' + String(pendingPick.model) + '，请确认推理强度'
+        : null
+      var choices: EffortChoice[] = []
+      if (defaultEffortOf(pModel) === undefined) {
+        choices.push({ effort: undefined, label: 'Default' })
+      }
+      var effList = pReasoning !== undefined ? pReasoning.efforts : []
+      for (var ec = 0; ec < effList.length; ec += 1) {
+        choices.push({ effort: effList[ec], label: effortLabel(effList[ec]) ?? effList[ec] })
+      }
+      var effortRows = choices.map(function (level) {
+        var isCur = pEffective === level.effort
+        return react.createElement(
+          'button',
+          {
+            key: level.label,
+            type: 'button',
+            className: 'ms_option',
+            disabled: busy || isCur,
+            onClick: function () { chooseEffort(level.effort) },
+          },
+          react.createElement('span', { className: 'ms_name' }, level.label),
+          react.createElement('span', { className: 'ms_check' }, isCur ? checkSvg() : null),
+        )
+      })
+      effortPane = react.createElement(
+        'div',
+        { className: 'ms_scroll' },
+        headerNote === null
+          ? null
+          : react.createElement('div', { className: 'ms_status' }, headerNote),
+        effortRows,
+        effortRows.length === 0
+          ? react.createElement('div', { className: 'ms_status' }, '没有可用的推理档位')
+          : null,
+      )
+    }
   }
 
   var menuBody = pane === 'model' ? modelPane : pane === 'effort' ? effortPane : react.createElement('div', { style: { display: 'flex', flexDirection: 'column' } }, rootPane, effortCell)
