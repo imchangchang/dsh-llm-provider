@@ -89,6 +89,11 @@ export interface SettingsService {
 export interface CredentialsService {
   resolve?: (ref: string) => Promise<unknown>
   unset?: (ref: string) => Promise<void>
+  /**
+   * 读一条凭据记录（OAuth 那些是 `kind: 'grant'`）。用来判断某个走 OAuth 的 provider
+   * 是不是已经登录过——API key 走的是 ref，两套键空间互不相干。
+   */
+  readRecord?: (key: string) => Promise<unknown>
 }
 
 /* ---------------------------- Authorization ---------------------------- */

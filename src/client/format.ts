@@ -112,7 +112,9 @@ export function summaryOf(account: PlanAccount | undefined | null): string {
   if (account.authConfigured === false) return shortName(account) + ' 未配置 key'
   if (account.error !== undefined) return shortName(account) + ' 查询失败'
   if (account.kind === 'unsupported') return shortName(account) + ' 看控制台'
-  if (account.kind === 'unknown-provider') return shortName(account) + ' 无适配器'
+  if (account.kind === 'unknown-provider') {
+    return account.oauthAuthorized === true ? shortName(account) + ' 已通过 OAuth 登录' : ''
+  }
   var balances = Array.isArray(account.balances) ? account.balances : []
   if (balances.length > 0) return shortName(account) + ' ' + balances[0].value
   var percent = worstPercent(account)
@@ -140,7 +142,7 @@ export function quotaTextOf(account: PlanAccount | undefined | null): string | u
   if (account.authConfigured === false) return '未配置 key'
   if (account.error !== undefined) return '查询失败'
   if (account.kind === 'unsupported') return '看控制台'
-  if (account.kind === 'unknown-provider') return '无适配器'
+  if (account.kind === 'unknown-provider') return account.oauthAuthorized === true ? '已通过 OAuth 登录' : ''
   var percent = worstPercent(account)
   if (typeof percent === 'number') return '余 ' + String(percent) + '%'
   var balances = Array.isArray(account.balances) ? account.balances : []
@@ -200,7 +202,11 @@ export function headlineChips(account: PlanAccount | undefined | null): Headline
   if (account.authConfigured === false) return [{ text: '未配置 key', percent: 0 }]
   if (account.error !== undefined) return [{ text: '查询失败', percent: 0 }]
   if (account.kind === 'unsupported') return []
-  if (account.kind === 'unknown-provider') return [{ text: '无适配器', percent: undefined }]
+  // 没有额度接口的 provider：查不到余额就不摆余额位。OAuth 登录过的改报登录状态，
+  // 这样卡片头部至少说明白「能用」，而不是一句「无适配器」的开发术语。
+  if (account.kind === 'unknown-provider') {
+    return account.oauthAuthorized === true ? [{ text: '已通过 OAuth 登录', percent: undefined }] : []
+  }
   var windows = Array.isArray(account.windows) ? account.windows : []
   var fiveHour: HeadlineChip[] = []
   var others: HeadlineChip[] = []

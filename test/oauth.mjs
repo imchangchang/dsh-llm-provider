@@ -8,7 +8,7 @@
  *
  * 测试钩通过 /lib/oauth.js 的 `__testHook` 拿到 attempt 池与 `__oauth_*` 工具，避免私有状态外漏。
  */
-import { ensureAuthorizationService, registerOAuthRoutes } from '../lib/oauth.js'
+import { ensureAuthorizationService, flowKeyForProvider, registerOAuthRoutes } from '../lib/oauth.js'
 import { hostPackageEntry } from '../lib/bridge.js'
 import { __oauth_attempt, __oauth_attempt_count, __oauth_reset } from '../lib/oauth-test-hooks.js'
 
@@ -602,6 +602,22 @@ await (async () => {
   check('T12.flow 收到答案', answer, 'ghe.example.com')
   const settled = streamRes.sseEvents().find((e) => e.kind === 'settled')
   check('T12.实时帧照常到达（settled）', settled && settled.status, 'authorized')
+})()
+
+/* ----------------------------- Test 13 ----------------------------- */
+/* provider → OAuth 凭据记录 key 的匹配。卡片状态（显示「已通过 OAuth 登录」还是「未配置 key」）
+ * 全靠它：记录键是 `<scope>/<provider-id>`，scope 是拥有 flow 的插件名，别写死。 */
+
+await (async () => {
+  const keys = ['llm-pi-ai/github-copilot', 'llm-pi-ai/openai-codex', 'llm-pi-ai/anthropic', 'noslash']
+  check('T13.命中 copilot', flowKeyForProvider(keys, 'github-copilot'), 'llm-pi-ai/github-copilot')
+  check('T13.命中 codex', flowKeyForProvider(keys, 'openai-codex'), 'llm-pi-ai/openai-codex')
+  check('T13.没有的 provider → undefined', flowKeyForProvider(keys, 'moonshot'), undefined)
+  check('T13.空列表 → undefined', flowKeyForProvider([], 'github-copilot'), undefined)
+  check('T13.没有斜杠的键按整串比', flowKeyForProvider(keys, 'noslash'), 'noslash')
+  check('T13.scope 改名也认（不写死 llm-pi-ai）',
+    flowKeyForProvider(['dsh-llm-pi-ai/github-copilot'], 'github-copilot'), 'dsh-llm-pi-ai/github-copilot')
+  check('T13.不误配同名前缀', flowKeyForProvider(['llm-pi-ai/github-copilot-enterprise'], 'github-copilot'), undefined)
 })()
 
 console.log(failed ? '\n有失败用例' : '\nOAuth 测试全部通过')

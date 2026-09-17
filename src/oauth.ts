@@ -208,6 +208,24 @@ export async function ensureAuthorizationService(
 }
 
 /**
+ * 从 flow 的凭据记录 key 列表里找出某个 provider 的 key。
+ *
+ * 记录的键是 `<scope>/<provider-id>`，scope 是拥有这条 flow 的插件名（现在是 `llm-pi-ai`）。
+ * 按「最后一个斜杠之后」比对，所以 scope 改名（官方换插件名）也照样对得上。
+ * @param keys - `authorization.list()` 里各条 flow 的 key。
+ * @param providerId - 路由 id（`github-copilot` 这种）。
+ * @returns 匹配到的记录 key；没有返回 undefined。
+ */
+export function flowKeyForProvider(keys: readonly string[], providerId: string): string | undefined {
+  for (const key of keys) {
+    const slash = key.lastIndexOf('/')
+    const id = slash < 0 ? key : key.slice(slash + 1)
+    if (id === providerId) return key
+  }
+  return undefined
+}
+
+/**
  * 按请求解析 authorization 服务；不在就回 503 JSON 并返回 undefined。
  *
  * **为什么按请求解析而不是注册时解析一次**：`ctx.get()` 默认是 strict 的——提供服务的那条

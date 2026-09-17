@@ -386,9 +386,13 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         return apiCall('credentials/set', { ref: form.apiKeyEnv.trim(), value: typedKey })
       })
       .then(function () {
-        setNote('已添加 ' + form.routeId.trim())
+        // 加完就收起面板：下面新出现的卡片才是结果，留着一个填完的表单只是干扰。
+        // 失败仍然留着面板并把原因写在 note 里（好让用户改完重试）。
         setTest({ phase: 'idle', message: '' })
         patchForm({ key: '' })
+        setOauth(null)
+        setNote(null)
+        setOpen(false)
         if (typeof props.onAdded === 'function') props.onAdded()
       })
       .catch(function (cause) {
@@ -1339,8 +1343,21 @@ export function ProviderSettingsSection() {
         // 只有路由、还没密钥时这里就是唯一能补 key 的地方（官方 Models 页已被本插件的
         // cordis.patch.yml 禁用，别处没有入口）。原生路由（source: native）也走同一条
         // credentials/set：凭据名就是它的 apiKeyEnv。
-        var keyless = account.authConfigured === false && typeof account.apiKeyEnv === 'string' && account.apiKeyEnv !== ''
-        bodyRows.push(
+        // OAuth 授权过的 provider 没有 apiKeyEnv 那个键空间里的东西，摆密钥框只会误导；
+        // 这类卡片改显示登录方式一行（值在凭据记录里，浏览器拿不到也不需要）。
+        var oauthLoggedIn = account.oauthAuthorized === true
+        if (oauthLoggedIn) {
+          bodyRows.push(
+            react.createElement(
+              'div',
+              { className: 'pv_line pv_row', key: 'auth' },
+              react.createElement('span', null, '登录方式'),
+              react.createElement('span', { className: 'pv_field' }, 'OAuth（已授权）'),
+            ),
+          )
+        }
+        var keyless = !oauthLoggedIn && account.authConfigured === false && typeof account.apiKeyEnv === 'string' && account.apiKeyEnv !== ''
+        if (!oauthLoggedIn) bodyRows.push(
           react.createElement(
             'div',
             { className: 'pv_line pv_row', key: 'key' },
@@ -1398,7 +1415,7 @@ export function ProviderSettingsSection() {
             ),
           )
         }
-        if (account.apiKeyEnv !== undefined) {
+        if (account.apiKeyEnv !== undefined && !oauthLoggedIn) {
           bodyRows.push(
             react.createElement(
               'div',

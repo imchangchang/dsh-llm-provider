@@ -58,6 +58,8 @@ export interface PlanAccount {
   credentialWarning?: string
   api?: string
   apiKeyEnv?: string
+  /** 已经通过 OAuth 登录过：卡片显示登录状态，不再摆密钥输入框。 */
+  oauthAuthorized?: boolean
   error?: unknown
   fetchedAt?: string
   balances?: BalanceRow[]
@@ -90,6 +92,8 @@ export interface ProviderPreset {
   baseURL?: string
   api?: string
   apiKeyEnv?: string
+  /** 已经通过 OAuth 登录过：卡片显示登录状态，不再摆密钥输入框。 */
+  oauthAuthorized?: boolean
   websiteUrl?: string
   configured?: boolean
   /** 路由在、凭据没值：仍算已配置，但下拉里不该禁选（选中就是去补密钥）。 */

@@ -29,7 +29,7 @@ import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes
 import { presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
 import { findSharedCredentials } from './credential-check.js'
-import { ensureAuthorizationService, registerOAuthRoutes } from './oauth.js'
+import { ensureAuthorizationService, flowKeyForProvider, registerOAuthRoutes } from './oauth.js'
 import type { AccountStatus } from './adapters/shared.js'
 import {
   asRecord,
@@ -63,6 +63,8 @@ export interface AccountRow extends AccountStatus {
   api?: string | undefined
   apiKeyEnv?: string | undefined
   credentialWarning?: string
+  /** 已经通过 OAuth 登录过（凭据记录里是 grant）：卡片据此显示登录状态、不再要密钥。 */
+  oauthAuthorized?: boolean
 }
 
 /** 额度快照（/plan/status 的响应体）。 */
@@ -127,6 +129,36 @@ export function apply(ctx: PluginContext, config: unknown): void {
   }
 
   /**
+   * provider id → 它的 OAuth flow 写在哪个凭据记录上（`<scope>/<provider-id>`）。
+   *
+   * 从 `ctx.authorization.list()` 反查而不是自己拼 scope：scope 是「拥有这条 flow 的插件名」
+   * （现在是 `llm-pi-ai`，将来官方改名也照样对得上）。拿不到就返回 undefined。
+   */
+  function oauthKeyFor(providerId: string): string | undefined {
+    const authorization = service<AuthorizationService>('authorization')
+    if (typeof authorization?.list !== 'function') return undefined
+    try {
+      return flowKeyForProvider(authorization.list().map((entry) => entry.key), providerId)
+    } catch { /* 读不到就当没有 */ }
+  }
+
+  /**
+   * 这个 provider 是不是已经通过 OAuth 登录过（凭据记录里是 grant）。
+   *
+   * 卡片状态不能只看 apiKeyEnv：Copilot / Codex 这类走 OAuth 的 provider 本来就没有
+   * `*_API_KEY`，照旧判会一直显示「未配置 key」——实际早就授权好了。
+   */
+  async function oauthAuthorizedFor(providerId: string): Promise<boolean> {
+    const key = oauthKeyFor(providerId)
+    if (key === undefined) return false
+    const credentials = service<CredentialsService>('credentials')
+    if (typeof credentials?.readRecord !== 'function') return false
+    try {
+      return asRecord(await credentials.readRecord(key))['kind'] === 'grant'
+    } catch { return false }
+  }
+
+  /**
    * 查一个 provider 路由的额度。
    * @param route - 来自 {@link providerRoutes}。
    * @param credentials - 收集 `{provider, ref, value}` 供凭据体检比对；值不外传。
@@ -138,9 +170,13 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const websiteUrl = websiteOf(providerId)
     const baseUrl = typeof route.baseURL === 'string' && route.baseURL !== '' ? route.baseURL : undefined
     // 路由自身的配置项：卡片展开体和「添加供应商」表单展示同一组信息（缺的字段 JSON 序列化时自然消失）
-    const routeMeta = { api: route.api, apiKeyEnv: route.apiKeyEnv }
     const adapter = findAdapter(providerId, baseUrl)
     const credential = await resolveKey(route.apiKeyEnv)
+    // 有没有 OAuth 授权：手填了 key 就不用查；没 key 时才看凭据记录里有没有 grant。
+    // routeMeta 会 spread 进每个返回分支，所以放这里就不必逐分支加。
+    const oauthAuthorized = credential.configured ? false : await oauthAuthorizedFor(providerId)
+    const authConfigured = credential.configured || oauthAuthorized
+    const routeMeta = { api: route.api, apiKeyEnv: route.apiKeyEnv, oauthAuthorized }
     // 掩码提示（前3+后4）：让界面能认出是哪一把 key（错配一眼可见），值本身不出宿主
     const keyHint = credential.configured ? maskKey(credential.key) : undefined
     const fetchedAt = new Date().toISOString()
@@ -151,7 +187,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     if (adapter === undefined) {
       return {
         ...routeMeta,
-        id: providerId, displayName, kind: 'unknown-provider', authConfigured: credential.configured, baseUrl,
+        id: providerId, displayName, kind: 'unknown-provider', authConfigured, baseUrl,
         balances: [], windows: [], fetchedAt, websiteUrl, keyHint, deletable: route.source === 'llm-pi-ai',
         note: '认不出这个 provider 的额度接口；在 src/adapters/ 加一个适配器并在 registry.ts 注册即可',
       }
@@ -167,7 +203,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     if (!credential.configured) {
       return {
         ...routeMeta,
-        id: providerId, displayName, kind: 'quota', authConfigured: false, baseUrl,
+        id: providerId, displayName, kind: 'quota', authConfigured, baseUrl,
         balances: [], windows: [], error: credential.reason, fetchedAt, websiteUrl, keyHint,
         deletable: route.source === 'llm-pi-ai',
       }
@@ -402,7 +438,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
               // 路由在、钥匙没值：插件自己的 config 就声明了 deepseek（没有 key 也能配上路由），
               // 这种"配了一半"的状态若照旧标成"已配置"，用户就既选不了它也补不了 key。
               const credential = await resolveKey(route.apiKeyEnv)
-              if (!credential.configured) keyless.add(route.id)
+              // OAuth 登录过的不算缺密钥：下拉里不该再标「缺密钥」推用户去填 key。
+              if (!credential.configured && !(await oauthAuthorizedFor(route.id))) keyless.add(route.id)
             }
           } catch { /* 路由发现失败就当全部未配置 */ }
           const presets = presetsWithMeta(configured, keyless)
