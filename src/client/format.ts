@@ -94,12 +94,30 @@ export function dotClass(account: PlanAccount | undefined | null): string {
   if (account === undefined || account === null) return 'plan_dot'
   if (account.error !== undefined) return 'plan_dot plan_dot_bad'
   if (account.authConfigured === false) return 'plan_dot plan_dot_warn'
-  if (account.kind === 'unsupported' || account.kind === 'unknown-provider') return 'plan_dot plan_dot_warn'
+  // 没有额度接口的 provider：不拿「黄灯」当默认色——黄=需要留意，会让 OAuth 授权好、
+  // 本来没事的卡片看着像出了问题。已授权的给绿灯（能用），其余保持中性。
+  if (account.kind === 'unknown-provider') {
+    return account.oauthAuthorized === true ? 'plan_dot plan_dot_ok' : 'plan_dot plan_dot_warn'
+  }
+  if (account.kind === 'unsupported') return 'plan_dot plan_dot_warn'
   var percent = worstPercent(account)
   if (percent === undefined) return 'plan_dot plan_dot_ok'
   if (percent <= 10) return 'plan_dot plan_dot_bad'
   if (percent <= 30) return 'plan_dot plan_dot_warn'
   return 'plan_dot plan_dot_ok'
+}
+
+/**
+ * 这张卡片值不值得摆「刷新余量」按钮。
+ *
+ * 没有额度接口的 provider（`unknown-provider`：Copilot / Codex 这类订阅登录的）点了也只是把
+ * 同一句「查不到额度」再算一遍，摆着是假的可操作项。qwen 那种「看控制台」的（unsupported）
+ * 同样没有可刷的东西。真有适配器的（含查询失败）留着——重试是有意义的。
+ * @param account - 该 provider 的额度账户。
+ */
+export function refreshable(account: PlanAccount | undefined | null): boolean {
+  if (account === undefined || account === null) return false
+  return account.kind !== 'unknown-provider' && account.kind !== 'unsupported'
 }
 
 export function shortName(account: PlanAccount): string {

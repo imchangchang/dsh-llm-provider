@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt } = moduleExports
+const { piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -199,6 +199,23 @@ rowsCheck('服务没挂上时给原因', offRow !== undefined && typeof offRow.t
 const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: true, flows: 0 })
 rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
 rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
+
+// ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
+rowsCheck('OAuth 已授权的无额度 provider 用绿灯',
+  dotClass({ id: 'github-copilot', authConfigured: true, oauthAuthorized: true, kind: 'unknown-provider' }) === 'plan_dot plan_dot_ok')
+rowsCheck('未授权的无额度 provider 仍是黄灯',
+  dotClass({ id: 'x', authConfigured: true, kind: 'unknown-provider' }) === 'plan_dot plan_dot_warn')
+rowsCheck('没配 key 依旧是黄灯',
+  dotClass({ id: 'x', authConfigured: false, kind: 'quota' }) === 'plan_dot plan_dot_warn')
+rowsCheck('查询失败是红灯',
+  dotClass({ id: 'x', authConfigured: true, kind: 'quota', error: 'boom' }) === 'plan_dot plan_dot_bad')
+rowsCheck('无额度接口的 provider 不摆刷新',
+  refreshable({ id: 'github-copilot', kind: 'unknown-provider' }) === false)
+rowsCheck('qwen 那种看控制台的也不摆刷新',
+  refreshable({ id: 'qwen', kind: 'unsupported' }) === false)
+rowsCheck('有适配器的摆刷新', refreshable({ id: 'deepseek', kind: 'quota' }) === true)
+rowsCheck('查询失败也摆刷新（重试有意义）',
+  refreshable({ id: 'deepseek', kind: 'quota', error: 'boom' }) === true)
 
 // ---- 「留空即默认」的提问识别（Copilot 的企业域名；别的提问绝不能自动答）----
 rowsCheck('识别 Copilot 企业域名提问（placeholder）',

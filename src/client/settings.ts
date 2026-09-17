@@ -22,7 +22,7 @@ import {
   withKey,
   withKeys,
 } from './data.js'
-import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
+import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, refreshable, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
 import { caretSvg } from './icons.js'
 import { t } from './i18n.js'
 import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, OauthAttemptClient, OauthEvent, OauthPrompt, PlanAccount, ProviderPreset } from './types.js'
@@ -1588,24 +1588,30 @@ export function ProviderSettingsSection() {
               react.createElement(
                 'span',
                 { className: 'pv_metaActs' },
-                account.fetchedAt === undefined
+                // 没有额度接口的 provider：刷新时间与刷新按钮都不摆——刷了也没有新信息，
+                // 摆着就是个假的可操作项。
+                refreshable(account) !== true
+                  ? null
+                  : account.fetchedAt === undefined
+                    ? null
+                    : react.createElement(
+                        'span',
+                        { className: 'pv_fresh', title: '上次刷新 ' + String(account.fetchedAt).slice(11, 19) },
+                        '◷ ' + relativeTime(account.fetchedAt),
+                      ),
+                refreshable(account) !== true
                   ? null
                   : react.createElement(
-                      'span',
-                      { className: 'pv_fresh', title: '上次刷新 ' + String(account.fetchedAt).slice(11, 19) },
-                      '◷ ' + relativeTime(account.fetchedAt),
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'pv_iconBtn' + (refreshingState[0][account.id] === true ? ' pv_spin' : ''),
+                        disabled: refreshingState[0][account.id] === true,
+                        title: refreshingState[0][account.id] === true ? '刷新中…' : '刷新余量' + (account.fetchedAt !== undefined ? '（上次 ' + String(account.fetchedAt).slice(11, 19) + '）' : ''),
+                        onClick: function () { refreshAccount(account) },
+                      },
+                      '↻',
                     ),
-                react.createElement(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'pv_iconBtn' + (refreshingState[0][account.id] === true ? ' pv_spin' : ''),
-                    disabled: refreshingState[0][account.id] === true,
-                    title: refreshingState[0][account.id] === true ? '刷新中…' : '刷新余量' + (account.fetchedAt !== undefined ? '（上次 ' + String(account.fetchedAt).slice(11, 19) + '）' : ''),
-                    onClick: function () { refreshAccount(account) },
-                  },
-                  '↻',
-                ),
                 account.deletable === true
                   ? (delConfirm[account.id] === true
                       ? react.createElement(
