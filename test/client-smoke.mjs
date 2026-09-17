@@ -148,7 +148,7 @@ if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { routeProfileOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
+const { routeProfileOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -254,6 +254,21 @@ rowsCheck('强制选档时勾选那档可点', effortRowDisabled(false, true, tr
 rowsCheck('普通换档时勾选那档置灰（点了也是空操作）', effortRowDisabled(false, true, false) === true)
 rowsCheck('提交中整面板不可点', effortRowDisabled(true, false, true) === true)
 rowsCheck('强制选档时其它档照常可点', effortRowDisabled(false, false, true) === false)
+
+// ---- 认证入口按 flow 的方法分（挂上 authorization 服务后每个 provider 都有 flow）----
+// 只有 api-key 方法的 provider（DeepSeek / OpenAI / Moonshot）必须回到密钥输入框：
+// dsh 把「让你输密钥」也包装成了一次登录，照「有 flow 就显示 OAuth 按钮」会顶掉密钥框。
+const deepseekPreset = { id: 'deepseek', label: 'DeepSeek', oauth: { key: 'llm-pi-ai/deepseek', label: 'DeepSeek', methods: [{ id: 'api-key', label: 'DeepSeek API key' }], inFlight: false } }
+const anthropicPreset = { id: 'anthropic', label: 'Anthropic', oauth: { key: 'llm-pi-ai/anthropic', label: 'Anthropic', methods: [{ id: 'oauth', label: 'Anthropic (Claude Pro/Max)' }, { id: 'api-key', label: 'Anthropic API key' }], inFlight: false } }
+const codexPreset = { id: 'openai-codex', label: 'OpenAI Codex', oauthOnly: true, oauth: { key: 'llm-pi-ai/openai-codex', label: 'OpenAI Codex', methods: [{ id: 'oauth', label: 'OpenAI (ChatGPT Plus/Pro)' }], inFlight: false } }
+rowsCheck('只有 api-key 方法 → 没有 OAuth 入口', authEntryOf(deepseekPreset).oauth === undefined)
+rowsCheck('只有 api-key 方法 → 标记为密钥型', authEntryOf(deepseekPreset).onlyApiKey === true)
+rowsCheck('两者都有 → 认出 OAuth 方法', authEntryOf(anthropicPreset).oauth.id === 'oauth')
+rowsCheck('OAuth 入口用方法自己的标签（不是 provider 名）', authEntryOf(anthropicPreset).oauth.label === 'Anthropic (Claude Pro/Max)')
+rowsCheck('两者都有 → 不算密钥型', authEntryOf(anthropicPreset).onlyApiKey === false)
+rowsCheck('只有 oauth 方法 → 没密钥入口', authEntryOf(codexPreset).onlyApiKey === false)
+rowsCheck('没有 flow → 密钥型', authEntryOf({ id: 'x', label: 'X' }).onlyApiKey === false && authEntryOf({ id: 'x', label: 'X' }).oauth === undefined)
+rowsCheck('预设为空也不炸', authEntryOf(undefined).oauth === undefined)
 
 // ---- 写进 settings 的路由配置：OAuth 授权过的不带 apiKeyEnv ----
 // 官方适配器看到 apiKeyEnv 就只认那个 ref，取不到值直接抛 MISSING_CREDENTIAL——

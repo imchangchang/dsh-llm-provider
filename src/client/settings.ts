@@ -28,6 +28,29 @@ import { t } from './i18n.js'
 import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, OauthAttemptClient, OauthEvent, OauthPrompt, PlanAccount, ProviderPreset } from './types.js'
 
 /**
+ * 一个预设的认证入口，按 flow 的方法区分。
+ *
+ * 挂上 authorization 服务之后**每个 provider 都有 flow**，但方法含义不同：`oauth` 是真·订阅
+ * 登录（device-code / 浏览器），`api-key` 只是 dsh 把「让你输密钥」也包装成了一次登录。所以
+ * 「有 flow 就显示 OAuth 按钮」是错的——DeepSeek / OpenAI / Moonshot 只有 api-key 方法，
+ * 给它们显示「使用 OAuth 登录（DeepSeek）」既误导又顶掉了密钥输入框。
+ *
+ * @param preset - 选中的预设（可能为 undefined）。
+ * @returns `oauth`：可用的 OAuth 方法（没有则 undefined）；`onlyApiKey`：只有 api-key 方法。
+ */
+export function authEntryOf(preset: ProviderPreset | undefined): {
+  oauth: { id: string, label: string } | undefined
+  onlyApiKey: boolean
+} {
+  var methods = preset === undefined || preset.oauth === undefined ? [] : preset.oauth.methods
+  var oauthMethod
+  for (var i = 0; i < methods.length; i += 1) {
+    if (methods[i].id === 'oauth') { oauthMethod = { id: methods[i].id, label: methods[i].label }; break }
+  }
+  return { oauth: oauthMethod, onlyApiKey: methods.length > 0 && oauthMethod === undefined }
+}
+
+/**
  * 「添加到列表」写进 settings 的路由配置。
  *
  * **OAuth 授权过的 provider 绝不写 apiKeyEnv**：官方适配器的 resolveApiKey 只要看到
@@ -323,6 +346,11 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     done: undefined | { status: 'authorized' | 'cancelled' | 'failed', error?: string },
   }
   type OAuthFlowSetter = (next: OAuthFlowState | null | ((prev: OAuthFlowState | null) => OAuthFlowState | null)) => void
+  // 「改用 API 密钥」：两者都支持的 provider 上，用户可以在 OAuth 与密钥之间切。
+  // 默认按 flow 的方法定：只有 api-key 方法的（DeepSeek / OpenAI 这类）就是密钥型。
+  var useKeyState = react.useState(null) as [boolean | null, (next: boolean | null) => void]
+  var useKeyInsteadChoice = useKeyState[0]
+  var setUseKeyInsteadChoice = useKeyState[1]
   var oauthState = react.useState(null) as [OAuthFlowState | null, OAuthFlowSetter]
   var oauth = oauthState[0]
   var setOauth = oauthState[1]
@@ -359,6 +387,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   function pickPreset(id: string) {
     var preset = findById(presets, id)
     if (preset === undefined) return
+    // 换了供应商就回到该方法下的默认入口（密钥型默认密钥，有 OAuth 的默认 OAuth）。
+    setUseKeyInsteadChoice(null)
     patchForm({
       routeId: preset.id,
       baseURL: preset.baseURL,
@@ -405,7 +435,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   function add() {
     setBusy(true)
     setNote(null)
-    var profile = routeProfileOf(form, oauthAuthorized, customPicked)
+    // 只有「这次确实走完 OAuth 登录」才不写 apiKeyEnv；选了密钥路径就照旧写。
+    var profile = routeProfileOf(form, oauthAuthorized && useKeyInstead !== true, customPicked)
     var typedKey = form.key.trim()
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
@@ -602,6 +633,15 @@ function AddProviderPanel(props: AddProviderPanelProps) {
   // OAuth-only 供应商：界面只留「供应商 / 路由 ID / 登录方式」。API 地址与协议由 preset 带进
   // form（写配置时照旧落盘），用户不需要看见；也没有可测的密钥。
   var oauthOnlyPicked = pickedPreset !== undefined && pickedPreset.oauthOnly === true
+  // 认证入口按 flow 的方法分（见 authEntryOf 的注释）：没显式选过就让默认值决定。
+  var authEntry = authEntryOf(pickedPreset)
+  var useKeyInstead = useKeyInsteadChoice === null || useKeyInsteadChoice === undefined
+    ? authEntry.oauth === undefined
+    : useKeyInsteadChoice === true
+  function setUseKeyInstead(next: boolean) {
+    setUseKeyInsteadChoice(next)
+    if (next === true) setOauth(null)
+  }
   var pickItems = []
   for (var pk = 0; pk < presets.length; pk += 1) {
     ;(function (preset) {
@@ -727,12 +767,12 @@ function AddProviderPanel(props: AddProviderPanelProps) {
                   readOnly: true,
                 }),
           ),
-      // 「登录方式」三态：
-      //   1) OAuth 注册了：渲染 OAuth 按钮（点击起 attempt，弹窗显示 device code / 提示）。
-      //   2) OAuth-only 但 OAuth 未注册（profile 没装 dsh-authorization bundle）：显示
-      //      「本机未挂载 OAuth 服务」提示，**不**给密码框——这个 provider 不接受 apiKey。
-      //   3) 其他：常规密码输入框 + 获取密钥链接。
-      pickedPreset !== undefined && pickedPreset.oauth !== undefined
+      // 「登录方式」三态（按 flow 的方法分，不按「有没有 flow」）：
+      //   1) flow 有 oauth 方法：渲染 OAuth 按钮；用「改用 API 密钥」可切到密钥输入。
+      //   2) 只有 api-key 方法（DeepSeek / OpenAI / Moonshot 这类）：常规密钥输入框——
+      //      那条 flow 的全部意义就是「让你输密钥」，不是订阅登录。
+      //   3) OAuth-only 但 OAuth 服务没挂上：红字说明，不给密钥框（这个 provider 不接受 apiKey）。
+      pickedPreset !== undefined && authEntry.oauth !== undefined && useKeyInstead !== true
         ? react.createElement(
             'div',
             { className: 'pv_line pv_row' },
@@ -755,15 +795,23 @@ function AddProviderPanel(props: AddProviderPanelProps) {
                 oauth !== null && oauth.done === undefined
                   ? t('oauthInFlight')
                   : (oauth !== null && oauth.done !== undefined && oauth.done.status === 'authorized'
-                    ? '✓ ' + pickedPreset.oauth!.label + ' · 重新登录'
-                    : t('oauthSignInMethod').replace('{label}', pickedPreset.oauth!.label)),
+                    ? '✓ ' + authEntry.oauth.label + ' · 重新登录'
+                    : t('oauthSignInMethod').replace('{label}', authEntry.oauth.label)),
               ),
+              // 两者都支持的 provider：给一条换回密钥的路（否则用户一旦登录就再也回不去）。
+              authEntry.onlyApiKey === true
+                ? null
+                : react.createElement(
+                    'button',
+                    { type: 'button', className: 'pv_pcLink pv_action', onClick: function () { setUseKeyInstead(true) } },
+                    '改用 API 密钥',
+                  ),
               form.websiteUrl === undefined
                 ? null
                 : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer' }, '获取密钥 ↗'),
             ),
           )
-        : pickedPreset !== undefined && pickedPreset.oauthOnly === true
+        : pickedPreset !== undefined && pickedPreset.oauthOnly === true && authEntry.oauth === undefined
           ? react.createElement(
               'div',
               { className: 'pv_line pv_row' },
@@ -771,7 +819,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
               react.createElement(
                 'span',
                 { className: 'plan_note plan_badText' },
-                pickedPreset.label + ' 只走 OAuth / 订阅登录。当前 profile 未挂载 OAuth 服务（@deepseek-ai/dsh-authorization bundle 没列在 profile.bundles 里）。把它加上可保活 OAuth 登录。',
+                pickedPreset.label + ' 只走 OAuth / 订阅登录，但本机读不到它的登录方式（OAuth 服务没挂上）。重启 dsh 让插件补挂 @deepseek-ai/dsh-authorization 后再试。',
               ),
             )
           : react.createElement(
@@ -785,6 +833,13 @@ function AddProviderPanel(props: AddProviderPanelProps) {
                 value: form.key,
                 onChange: function (event: FieldEvent) { patchForm({ key: event.target.value }) },
               }),
+              authEntry.oauth !== undefined
+                ? react.createElement(
+                    'button',
+                    { type: 'button', className: 'pv_pcLink pv_action', onClick: function () { setUseKeyInstead(false) } },
+                    '改用 OAuth 登录',
+                  )
+                : null,
               form.websiteUrl === undefined
                 ? null
                 : react.createElement('a', { className: 'pv_pcLink', href: form.websiteUrl, target: '_blank', rel: 'noreferrer', style: { marginLeft: '8px' } }, '获取密钥 ↗'),
