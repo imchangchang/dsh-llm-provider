@@ -70,6 +70,13 @@ const attempts = new Map<string, OAuthAttempt>()
 const keyToAttempt = new Map<string, string>()
 
 /**
+ * 测试钩：从这里把私有状态喂给 oauth-test-hooks.ts。
+ * 这两个 export 不会被 production 代码 import；只通过副作用链路让 tsdown 把它们保留下来。
+ * 任何 production 用法都属于误用——attempt 池是 OAuth 路由的私有实现细节。
+ */
+export { attempts, keyToAttempt }
+
+/**
  * 把 attempt 状态推给事件总线（bus）。SSE handler 监听这一条把帧写到 socket。
  * 幂等：bus 已 emit 过同一事件的，attempts 已 settled 时不再 emit。
  */
@@ -420,62 +427,22 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 }
 
 /* ------------------------------------------------------------------ *
- * 测试钩：暴露 attempt 池与一个伪造 interaction 的工具，让 test/*.mjs
- * 能注入自家 flow，不用真的 dsh 跑 device code。
+ * 测试钩：暴露 attempt 池与几只工具，让 test/*.mjs 能注入自家 flow。
+ *
+ * 这些 export **不被 production 代码引用**——`registerOAuthRoutes` 末尾引用一次纯是为了
+ * 防止 tsdown 在 unbundle 模式下的 tree-shake 把它们从 lib/oauth.js 砍掉（test/*.mjs 直接
+ * import 这些符号，砍了就 import 失败）。
  * ------------------------------------------------------------------ */
 
-export interface OAuthTestHook {
-  attempts: Map<string, OAuthAttempt>
-  keyToAttempt: Map<string, string>
-  /**
-   * 构造一个会注入自定义 interaction 的 begin 实现，绕过 `authorization.begin`。
-   * 测试把 `authorization.begin` 指向这个函数即可模拟 dsh 的行为。
-   */
-  fakeBegin(
-    attemptId: string,
-    options: { resolveAfter?: number, reject?: 'cancel' | 'fail' },
-  ): Promise<{ status: 'authorized' | 'cancelled' }>
-}
-
-export function __testHook(): OAuthTestHook {
-  return {
-    attempts,
-    keyToAttempt,
-    fakeBegin(attemptId, options) {
-      const attempt = attempts.get(attemptId)
-      if (attempt === undefined) return Promise.reject(new Error(`attempt ${attemptId} 不存在`))
-      const delay = options.resolveAfter ?? 0
-      return new Promise((resolve, reject) => {
-        const trigger = (): void => {
-          if (options.reject === 'cancel') {
-            attempt.controller.abort()
-            // 模拟 seam：abort 后 resolve 成 cancelled
-            resolve({ status: 'cancelled' })
-          } else if (options.reject === 'fail') {
-            reject(new Error('simulated failure'))
-          } else {
-            resolve({ status: 'authorized' })
-          }
-        }
-        if (delay === 0) trigger()
-        else setTimeout(trigger, delay)
-      })
-    },
-  }
-}
-
-/** 仅测试用：尝试池大小（用于断言 attempt 是否被回收）。 */
 export function __oauth_attempt_count(): number {
   return attempts.size
 }
 
-/** 仅测试用：取一条 attempt 看 settled 状态（强类型）。 */
 export function __oauth_attempt(id: string): { settled: undefined | { status: string, error?: string } } | undefined {
   const attempt = attempts.get(id)
   return attempt === undefined ? undefined : { settled: attempt.settled }
 }
 
-/** 仅测试用：清空 attempt 池（测试间隔离）。 */
 export function __oauth_reset(): void {
   for (const a of attempts.values()) a.controller.abort()
   attempts.clear()
@@ -515,5 +482,5 @@ export function registerOAuthRoutes(ctx: PluginContext, webServer: WebServerServ
   webServer.register({ kind: 'exact', path: '/provider/oauth/stream', handler: streamHandler(log) })
   webServer.register({ kind: 'exact', path: '/provider/oauth/respond', handler: respondHandler() })
   webServer.register({ kind: 'exact', path: '/provider/oauth/cancel', handler: cancelHandler(authorization) })
-  log?.info?.('oauth 路由已挂载（flows / begin / stream / respond / cancel）')
+  log?.info?.('oauth 路由已挂载（flows / begin / stream / respond / cancel，attempts=' + String(__oauth_attempt_count()) + '）')
 }
