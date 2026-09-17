@@ -96,6 +96,8 @@ var css =
   '.pv_action:disabled{opacity:.5;cursor:default}' +
   // ---- OAuth 登录弹窗（在「添加供应商」表单内）----
   // 全部走 dsh 的 alias token，字号跟 pv_line 一套（13/12/11），别在组件里写行内 style。
+  '.pv_loginRow{display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0}' +
+  '.pv_loginRow .pv_action{margin-left:0}' +
   '.pv_oauth{margin-top:12px;padding:12px;border:.5px solid var(--dsw-alias-border-l4,rgba(0,0,0,.15));' +
   'border-radius:12px;background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03))}' +
   '.pv_oauthHead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}' +

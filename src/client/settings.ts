@@ -706,13 +706,12 @@ function AddProviderPanel(props: AddProviderPanelProps) {
             react.createElement('span', null, '登录方式'),
             react.createElement(
               'div',
-              { style: { display: 'flex', gap: '8px', alignItems: 'center', flex: 1 } },
+              { className: 'pv_loginRow' },
               react.createElement(
                 'button',
                 {
                   type: 'button',
                   className: 'pv_action',
-                  style: { marginLeft: '0' },
                   disabled: oauth !== null && oauth.done === undefined,
                   title: oauth !== null && oauth.done === undefined ? t('oauthInFlight') : '',
                   onClick: function () {
