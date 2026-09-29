@@ -300,7 +300,8 @@ export interface PruneResult {
  *   1. **正在用的那份**与「已下载、等重启生效」的那版（protectedVersions）绝不删；
  *   2. 版本**不高于**本机已有的最好那份（dsh 自带 / 兜底依赖，含同名版本）的删掉——
  *      候选排序已经不会再选中它（见 piAiCandidates 的 tie-break），留着只是 80 MB 级重复副本；
- *   3. 其余（比本机新的）只留最新 `keep` 份（默认 1）。
+ *   3. 其余（比本机新的）只留最新 `keep` 份（默认 1）——多留的那份是回滚余地：新版本万一在运行期
+ *      出问题，旧的那份还在，删掉软链就能退回去。
  *
  * @param versions - vendor/pi-ai/ 下已就位的版本（任意顺序）。
  * @param bestLocal - 本机非下载档里最高的版本号；都没有则 undefined（跳过规则 2）。
