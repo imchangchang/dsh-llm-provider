@@ -586,8 +586,7 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     })
     // api/baseURL 只有自建网关才带（目录 provider 的是 undefined/空）：没有目录的才靠它们
     // 决定往哪发请求。
-    apiCall('llm/discoverModels', {
-      settingsNs: 'llm-pi-ai',
+    postJson('/provider/discover', {
       request: {
         provider: form.routeId.trim(),
         baseURL: form.baseURL.trim() === '' ? undefined : form.baseURL.trim(),
@@ -595,8 +594,15 @@ function AddProviderPanel(props: AddProviderPanelProps) {
         apiKey: form.key.trim(),
       },
     })
-      .then(function (value) {
-        var models = Array.isArray(value) ? value : (value !== null && typeof value === 'object' && Array.isArray(value.models) ? value.models : [])
+      .then(function (value: AnyRecord) {
+        // 宿主自己按两代宿主试命名空间（0.1.x 的 llm-pi-ai / 0.2.x 的插件条目 id），
+        // 客户端不再写死；失败时把宿主给的诊断带出来
+        if (value === null || value === undefined || value.ok !== true) {
+          throw new Error(String((value && value.error) || '探测失败'))
+        }
+        var raw: unknown = value.models
+        var rawRecord = raw === null || typeof raw !== 'object' ? undefined : raw as AnyRecord
+        var models = Array.isArray(raw) ? raw : (rawRecord !== undefined && Array.isArray(rawRecord['models']) ? rawRecord['models'] as unknown[] : [])
         var names = []
         for (var i = 0; i < models.length && i < 3; i += 1) {
           var m = models[i]

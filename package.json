@@ -1,6 +1,6 @@
 {
   "name": "@dsh-one/dsh-llm-provider",
-  "version": "0.2.1-alpha.3",
+  "version": "0.2.1-alpha.4",
   "description": "A dsh plugin that replaces the built-in llm-pi-ai and llm-deepseek adapters, the model selector and the Models settings page with self-maintained versions, tracks upstream @earendil-works/pi-ai, adds OAuth/device-code sign-in for subscription providers (Copilot, Codex, Claude…), and adds quota/balance lookups plus a provider management UI",
   "keywords": [
     "dsh",
@@ -25,7 +25,7 @@
     "prepublishOnly": "npm run build",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/routes.mjs && node test/credential-check.mjs && node test/cordis-patch.mjs && node test/pi-ai-probe.mjs && node test/link-removal.mjs && node test/prune-plan.mjs && node test/model-details.mjs && node test/provider-config.mjs && node test/provider-presets.mjs && node test/vendor-status.mjs && node test/oauth.mjs && node test/github-copilot-usage.mjs && node test/client-smoke.mjs"
+    "test": "npm run build && node test/routes.mjs && node test/credential-check.mjs && node test/cordis-patch.mjs && node test/pi-ai-probe.mjs && node test/link-removal.mjs && node test/prune-plan.mjs && node test/model-details.mjs && node test/provider-config.mjs && node test/model-discovery.mjs && node test/provider-presets.mjs && node test/vendor-status.mjs && node test/oauth.mjs && node test/github-copilot-usage.mjs && node test/client-smoke.mjs"
   },
   "main": "lib/index.js",
   "exports": {
