@@ -150,7 +150,8 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 - 卡片照官方 PluginCard：状态点 + 名称 + 官网链接，一行余量摘要（`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`），右侧是刷新时间、单卡刷新、删除。展开体展示路由配置（路由 ID、掩码密钥、凭据名，以及 API 地址 / 协议——协议只在路由真写了时才有，地址没写时摆的是目录默认端点）和该供应商的模型列表（带过滤与详情卡）。
 - 添加供应商：选预设 → 填密钥与端点（带 OAuth 的预设可直接走 OAuth 登录，自动写入同一套凭据存储）→ 通过测试才能写入（目录里有的 provider，这一步读的是 pi-ai 目录、不发请求也不校验密钥，密钥要到发第一条消息时才验；只有自建网关那一步是真·实连探测）。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。路由**已存在**时只逐字段覆盖表单管的键（`baseURL` / `apiKeyEnv` / 自建网关的 `api`），手写的 `models` / `compat` / `retryPolicy` 不动——整对象 `set` 在 dsh-settings 里是覆盖语义，会把它们一起抹掉。
 - 补密钥：路由在、凭据没值时，卡片展开体里那一行就是输入框（官方 Models 页已禁用，这是唯一入口）。存完立刻实查一次额度。这种供应商在添加列表里标「缺密钥」而不是「已配置」，不会被禁选堵住。
-- 删除：清路由 + 清凭据。内置原生路由不允许在这里删。
+- 删除：清路由 + 清凭据。内置原生路由不允许在这里删。确认行单独占一行，并且写明删的是哪条路由、连不连凭据、手写配置不可撤销——原来的确认按钮跟 ✕ 挤在同一格，连点两下第二下正好落在「确认删除」上，等于没确认。
+- 模型清单：展开体「模型（N）」下面是逐行可编辑的清单（勾选 / 改字段 / 整份替换 / 恢复跟随目录），保存写回 `llm-pi-ai.providers.<id>.models`；细节与限制见[已知缺口](#已知缺口)。
 - 「pi-ai 桥接」标签：当前版本与来源、被跳过的候选及原因、磁盘占用与清理按钮、上游版本与检查更新按钮。
 
 ### 额度适配器
@@ -244,7 +245,7 @@ npm run typecheck  # tsc --noEmit
 
 官方那些条目有、本插件没有的：
 
-- **逐模型清单编辑**。`ModelListEditor` / `DeepSeekModelsEditor` / `CustomProviderCard` 没有替代：改逐模型参数只能手改 `settings.yaml` 的 `llm-pi-ai.providers.<id>`。
+- **逐模型清单编辑只有个通用替代**。卡片展开体里「模型（N）」下面有「编辑清单」（`src/client/model-editor.ts`）：勾选要暴露的模型、或整份换成自定义清单，行内可改 `id` / `name` / `contextWindow` / `maxTokens` / `input`（文本、图片、视频）/ `reasoningEfforts` / `compat.thinkingFormat`，保存写回 `llm-pi-ai.providers.<id>.models`。与官方那套的差别：官方按 schema 给每类 provider 定制表单，这里是一张通用表格；`reasoningEfforts` 在配置里是 `{档位: 线上值}` 映射，界面上写成 `low,high=max` 这样的文本（留空 = 沿用 pi-ai 目录那份，`false` = 不推理）。保存前先校验（id 空、重名、非正整数、不认识的档位都不让存），因为宿主对清单是 strict 解析，一条坏的会让整条路由不可用。
 - **「当前模型不可路由」置灰**。官方 `ui-model-selection` 会在当前模型无法路由时把 composer 置灰；该条目被禁用后，当前供应商没配好时输入框照样能用。
 - **官方引导流程**。Models 页带的 DeepSeek 引导没有替代。
 
@@ -306,7 +307,7 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 | `src/pi-ai-names.ts` | 读 pi-ai 注册表里的名字（显示名的来源之一） |
 | `src/credential-check.ts` | 凭据检查 |
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
-| `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
+| `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `model-editor`（模型清单编辑器）· `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
 | `test/*.mjs` | 十一个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |

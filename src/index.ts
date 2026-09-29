@@ -391,10 +391,16 @@ export function apply(ctx: PluginContext, config: unknown): void {
             ? llm.listConfigurableProviders().length
             : -1
         } catch { /* 拿不到就报 -1 */ }
-        let routes: { id: string; apiKeyEnv: string | null; source: string }[] = []
+        let routes: { id: string, apiKeyEnv: string | null, source: string, models?: unknown }[] = []
         try {
           routes = [...providerRoutes(service<SettingsService>('settings'), llm).values()]
-            .map((route) => ({ id: route.id, apiKeyEnv: route.apiKeyEnv ?? null, source: route.source }))
+            .map((route) => ({
+              id: route.id,
+              apiKeyEnv: route.apiKeyEnv ?? null,
+              source: route.source,
+              // 自己声明的模型清单（没声明就没有这个键）：模型清单编辑器据此回显并写回
+              ...(route.models === undefined ? {} : { models: route.models }),
+            }))
         } catch { /* 路由发现失败时留空 */ }
         json(res, 200, {
           bridge: bridge.ok

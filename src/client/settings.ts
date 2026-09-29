@@ -24,6 +24,7 @@ import {
 } from './data.js'
 import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, modelVisible, refreshable, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
 import { caretSvg } from './icons.js'
+import { ModelListEditor } from './model-editor.js'
 import { t } from './i18n.js'
 import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, OauthAttemptClient, OauthEvent, OauthPrompt, PlanAccount, ProviderPreset } from './types.js'
 
@@ -1673,6 +1674,16 @@ export function ProviderSettingsSection() {
   for (var gi = 0; gi < catalogGroups.length; gi += 1) {
     modelsByProvider[catalogGroups[gi].id] = catalogGroups[gi].models
   }
+  // 每条路由自己声明的模型清单（没声明就没有这个键 = 跟随 pi-ai 目录）：模型清单编辑器用它回显
+  var declaredByRoute: Record<string, unknown> = {}
+  var statusRecord = status === null || status === undefined ? undefined : status as AnyRecord
+  var statusRoutes = statusRecord !== undefined && Array.isArray(statusRecord['routes']) ? statusRecord['routes'] as unknown[] : []
+  for (var ri = 0; ri < statusRoutes.length; ri += 1) {
+    var routeEntry = statusRoutes[ri] as AnyRecord
+    if (typeof routeEntry['id'] === 'string' && routeEntry['models'] !== undefined) {
+      declaredByRoute[routeEntry['id'] as string] = routeEntry['models']
+    }
+  }
   var cards = []
   for (var i = 0; i < accounts.length; i += 1) {
     ;(function (account: PlanAccount) {
@@ -1858,9 +1869,12 @@ export function ProviderSettingsSection() {
         var models = allModels === undefined
           ? undefined
           : allModels.filter(function (m) { return modelVisible(available, m.id, false) })
+        // 自己声明的清单：目录里没有这家（自建网关）时，模型区也得在——那份清单是唯一的信息源
+        var declared = declaredByRoute[account.id]
+        var declaredCount = Array.isArray(declared) ? declared.length : 0
         if (models === undefined) {
           bodyRows.push(react.createElement('div', { className: 'pv_line', key: 'm-load' }, '模型目录加载中…'))
-        } else if (models.length === 0) {
+        } else if (models.length === 0 && declaredCount === 0) {
           bodyRows.push(react.createElement('div', { className: 'pv_line', key: 'm-none' }, '目录里没有这个 provider 的模型'))
         } else {
           // 模型区（带外框）独立折叠：卡片展开时默认收起，点「模型（N）」头展开
@@ -1927,6 +1941,13 @@ export function ProviderSettingsSection() {
           mBoxRows.push(react.createElement('div', { className: 'pv_mTop', key: 'm-top' }, mTopChildren))
           if (modelsOpen) {
             var mListRows = []
+            if (models.length === 0) {
+              mListRows.push(react.createElement(
+                'div',
+                { className: 'pv_line', key: 'm-nodefault' },
+                '目录里没有这家 provider：模型清单由下面自己声明（自定义 id 记得填上下文与最大输出）',
+              ))
+            } else {
             // 列标题：与模型行同一套列宽类，保证严格对齐
             mListRows.push(
               react.createElement(
@@ -1945,8 +1966,19 @@ export function ProviderSettingsSection() {
                 mListRows.push(modelRow(filtered[m], account, detailsById))
               }
             }
+            }
             // 列表区：分割线上边缘贯穿模型框
             mBoxRows.push(react.createElement('div', { className: 'pv_mList', key: 'm-list' }, mListRows))
+            // 模型清单编辑器（issue #1）：官方 Models 页被禁用后，逐模型参数只能手改 settings.yaml，
+            // 这里给一条界面上的路：勾选/替换清单、改字段、写回 llm-pi-ai.providers.<id>.models
+            mBoxRows.push(react.createElement(ModelListEditor, {
+              key: 'm-editor',
+              routeId: account.id,
+              declared: declared,
+              catalog: allModels === undefined ? [] : allModels,
+              detailsById: detailsById,
+              onSaved: onProviderAdded,
+            }))
           }
           bodyRows.push(react.createElement('div', { className: 'pv_mBox', key: 'mbox' }, mBoxRows))
         }

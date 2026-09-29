@@ -27,6 +27,29 @@ export interface CatalogModel {
   reasoning?: CatalogReasoning
 }
 
+/**
+ * 模型清单编辑器里的一行（见 client/model-editor.ts）。
+ *
+ * 数字字段存字符串：输入框里允许空着（= 沿用 pi-ai 目录那份），写回时再转数字并校验。
+ */
+export interface ModelRow {
+  /** react key；同一份清单里稳定。 */
+  key: string
+  id: string
+  name: string
+  contextWindow: string
+  maxTokens: string
+  /** 输入模态：text / image / video。 */
+  input: string[]
+  /** `reasoningEfforts` 的文本记法：'' 不声明、'false' 不推理、'low,high=max'。 */
+  reasoning: string
+  /** `compat.thinkingFormat`；'' 表示不声明。 */
+  thinkingFormat: string
+  enabled: boolean
+  /** 这一行是配置里声明的那份，还是 pi-ai 目录里的。 */
+  source: 'declared' | 'catalog'
+}
+
 /** 目录里的一个 provider 分组。 */
 export interface CatalogGroup {
   id: string

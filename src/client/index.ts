@@ -186,3 +186,4 @@ export { normalizeSelection, onPlanChange, mergePlanAccount, dropPlanAccount, pa
 export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort, effortRowDisabled } from './model-seat.js'
 export { piAiBridgeRows, piAiUpstreamText, piAiStorageRows, formatBytes, deleteConfirmText, addRouteOps, presetPickState, refreshFailure, routeProfileOf, routeRepairOf, authEntryOf } from './settings.js'
 export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible, shortWindowLabel, windowTier, quotaTipOf } from './format.js'
+export { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, ModelListEditor } from './model-editor.js'

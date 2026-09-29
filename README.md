@@ -153,7 +153,8 @@ Adds a 「模型服务」 tab to the settings page (the official `ui-settings-mo
 - Cards follow the official PluginCard: status dot, name, website link, one line of quota summary (`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`), and refresh time, per-card refresh and delete on the right. The expanded body shows the route configuration (route ID, masked key, credential name, plus the API base URL and protocol — the protocol appears only when the route declares one, while an empty address shows the catalog default endpoint) and that provider's model list with filtering and a detail card.
 - Adding a provider: pick a preset → enter key and endpoint (presets that ship an OAuth flow offer a sign-in button instead, writing to the same credential store) → a live test must pass before it is written. Writes go to `llm-pi-ai.providers` via `settings/mutate` and to the credential store via `credentials/set`, the same storage the official page uses. When the route **already exists**, only the fields the form owns are written (`baseURL`, `apiKeyEnv`, and `api` for a custom gateway); hand-written `models`, `compat` and `retryPolicy` are left alone, because a whole-object `set` in dsh-settings replaces the entry.
 - Adding a key: when a route exists but has no credential, that row in the card body is an input field (the official Models page is disabled, so this is the only place to enter it). Saving it runs a live quota query immediately. Such providers are labelled 「缺密钥」 in the add-provider list rather than 「已配置」, so they stay selectable.
-- Removing: clears the route and the credential. Built-in native routes cannot be removed here.
+- Removing: clears the route and the credential. Built-in native routes cannot be removed here. The confirmation is its own row and spells out which route goes, whether the credential goes with it, and that hand-written configuration is not recoverable — the button used to share the ✕ slot, so a double click landed the second click on the freshly rendered "confirm".
+- Model list: under 「模型（N）」 in an expanded card, each row can be edited (tick, change fields, replace the whole list, or go back to following the catalog) and saved to `llm-pi-ai.providers.<id>.models`; details and limits are in [Known gaps](#known-gaps).
 - The 「pi-ai 桥接」 sub-tab shows the current version and source, skipped candidates with reasons, the disk footprint with a clean-up button, the upstream version and the update button.
 
 ### Quota adapters
@@ -254,7 +255,7 @@ Honest notes (not verified / not implemented):
 
 Capabilities the official entries have that this plugin does not:
 
-- **Per-model list editing.** `ModelListEditor`, `DeepSeekModelsEditor` and `CustomProviderCard` are not available; per-model parameters have to be edited by hand in `llm-pi-ai.providers.<id>` in `settings.yaml`.
+- **Per-model list editing has a generic replacement only.** Under 「模型（N）」 in an expanded card there is an "edit list" panel (`src/client/model-editor.ts`): tick the models to expose, or replace the whole list with a custom one, editing `id` / `name` / `contextWindow` / `maxTokens` / `input` (text, image, video) / `reasoningEfforts` / `compat.thinkingFormat` per row and saving back to `llm-pi-ai.providers.<id>.models`. Differences from the official editor: the official one builds per-provider forms from a schema, this is one generic table; in configuration `reasoningEfforts` is a `{level: wire value}` map, written here as text such as `low,high=max` (empty = inherit the installed pi-ai catalog, `false` = no reasoning). Rows are validated before saving (empty ids, duplicates, non-positive integers and unknown levels are refused), because the host parses the list strictly and one bad entry makes the whole route unusable.
 - **"Current model not routable" greying.** The official `ui-model-selection` greys out the composer when the current model cannot be routed. With that entry disabled, the input stays active even when the current provider is not configured.
 - **Official onboarding.** The DeepSeek onboarding flow of the Models page has no replacement.
 
@@ -309,7 +310,7 @@ Boundaries:
 | `src/pi-ai-names.ts` | read names from the pi-ai registry (the source of display names) |
 | `src/credential-check.ts` | credential check |
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
-| `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
+| `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `model-editor` (model list editor) · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
 | `test/*.mjs` | 11 offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

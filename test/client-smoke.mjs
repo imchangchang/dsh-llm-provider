@@ -352,6 +352,99 @@ rowsCheck('空路由 id 不产生操作', addRouteOps('  ', { baseURL: 'x' }, fa
 rowsCheck('表单没填的字段不进 ops（原值保持）',
   addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => op.path[2] === 'apiKeyEnv'))
 
+// ---- 模型清单编辑器（issue #1：官方 Models 页禁用后，逐模型参数得有条界面上的路）----
+const { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts } = moduleExports
+const catalogFixture = [
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 1000000 },
+  { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision', contextWindow: 200000 },
+]
+const detailFixture = {
+  'deepseek-v4-flash': { id: 'deepseek-v4-flash', contextWindow: 1000000, maxTokens: 32768, vision: false, video: false, reasoning: true, thinkingLevels: ['low', 'high'] },
+  'deepseek-v4-flash-vision-exp': { id: 'deepseek-v4-flash-vision-exp', contextWindow: 200000, maxTokens: 8192, vision: true, video: false, reasoning: false, thinkingLevels: [] },
+}
+const catalogRows = editorRowsOf(undefined, catalogFixture, detailFixture)
+rowsCheck('没声明清单时铺开目录里的模型', catalogRows.length === 2 && catalogRows.every((r) => r.source === 'catalog' && r.enabled === true))
+rowsCheck('目录行的上下文从目录带出来', catalogRows[0].contextWindow === '1000000')
+rowsCheck('目录行的最大输出从详情带出来', catalogRows[0].maxTokens === '32768')
+rowsCheck('目录行的输入模态按视觉能力填', catalogRows[1].input.join(',') === 'text,image')
+rowsCheck('目录行的推理字段留空（表示沿用目录）', catalogRows[0].reasoning === '')
+
+const declaredFixture = [
+  { id: 'deepseek-flash', name: '自定义 Flash', contextWindow: 128000, maxTokens: 4096, input: ['text', 'image'], reasoningEfforts: { low: 'low', high: 'max' }, compat: { thinkingFormat: 'deepseek' } },
+  'plain-id',
+]
+const declaredRows = editorRowsOf(declaredFixture, catalogFixture, detailFixture)
+rowsCheck('声明了清单就以它为准', declaredRows.length === 2 && declaredRows.every((r) => r.source === 'declared'))
+rowsCheck('声明行的字段原样回显', declaredRows[0].id === 'deepseek-flash' && declaredRows[0].contextWindow === '128000' && declaredRows[0].thinkingFormat === 'deepseek')
+rowsCheck('reasoningEfforts 对象映射成文本记法', declaredRows[0].reasoning === 'low,high=max')
+rowsCheck('字符串条目也认（等价于只有 id）', declaredRows[1].id === 'plain-id')
+rowsCheck('声明行没写 input 时回落到目录那份', declaredRows[1].input.join(',') === 'text')
+rowsCheck('目录里没有的自定义 id 输入模态兜底 text', declaredRows[0].input.join(',') === 'text,image')
+
+const reasoningCases = [
+  ['', undefined, undefined],
+  ['false', false, undefined],
+  ['关闭', false, undefined],
+  ['low', { low: 'low' }, undefined],
+  ['low,high=max', { low: 'low', high: 'max' }, undefined],
+  ['off,low', { off: null, low: 'low' }, undefined],
+  ['bogus', undefined, 'error'],
+  ['off', false, undefined],
+  ['high=', undefined, 'error'],
+]
+for (const [text, value, error] of reasoningCases) {
+  const parsed = parseReasoningEfforts(text)
+  rowsCheck('思考档位解析「' + text + '」',
+    (error === 'error' ? typeof parsed.error === 'string' : JSON.stringify(parsed.value) === JSON.stringify(value)))
+}
+rowsCheck('反向：对象映射 → 文本', formatReasoningEfforts({ low: 'low', high: 'max' }) === 'low,high=max')
+rowsCheck('反向：false → false', formatReasoningEfforts(false) === 'false')
+rowsCheck('反向：缺省 → 空', formatReasoningEfforts(undefined) === '')
+
+const built = editorToModels([
+  { key: 'a', id: 'deepseek-flash', name: 'Flash', contextWindow: '128000', maxTokens: '4096', input: ['text', 'image'], reasoning: 'low,high=max', thinkingFormat: 'deepseek', enabled: true, source: 'declared' },
+  { key: 'b', id: 'unchecked', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: '', thinkingFormat: '', enabled: false, source: 'catalog' },
+])
+rowsCheck('只写勾选的行', built.models.length === 1 && built.models[0].id === 'deepseek-flash')
+rowsCheck('写出的数字是数字', built.models[0].contextWindow === 128000 && built.models[0].maxTokens === 4096)
+rowsCheck('写出的 input 是数组', built.models[0].input.join(',') === 'text,image')
+rowsCheck('写出的 thinkingFormat 在 compat 里', built.models[0].compat.thinkingFormat === 'deepseek')
+rowsCheck('勾选行没有错误', built.errors.length === 0)
+
+const badRows = editorToModels([
+  { key: 'a', id: '', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
+  { key: 'b', id: 'dup', name: '', contextWindow: 'x', maxTokens: '', input: ['text'], reasoning: 'nope', thinkingFormat: '', enabled: true, source: 'declared' },
+  { key: 'c', id: 'dup', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
+])
+rowsCheck('空 id 报错', badRows.errors.some((e) => e.indexOf('模型 ID 是空的') !== -1))
+rowsCheck('非正整数报错', badRows.errors.some((e) => e.indexOf('正整数') !== -1))
+rowsCheck('坏档位报错', badRows.errors.some((e) => e.indexOf('思考档位') !== -1))
+rowsCheck('重名报错', badRows.errors.some((e) => e.indexOf('重复') !== -1))
+
+// 面板本体：直接当函数组件调一次（桩 react 的 createElement 只组装树），把展开分支也跑到
+const { ModelListEditor } = moduleExports
+function collectText(node) {
+  if (node === null || node === undefined || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node) + ' '
+  if (Array.isArray(node)) return node.map(collectText).join('')
+  if (typeof node === 'object') {
+    // 输入框的内容挂在 props.value 上（不是 children），测试要能一起看到
+    const own = typeof node.props?.value === 'string' ? node.props.value + ' ' : ''
+    return own + (node.children === undefined ? '' : collectText(node.children))
+  }
+  return ''
+}
+const closedEditor = collectText(ModelListEditor({ routeId: 'deepseek', catalog: catalogFixture, detailsById: detailFixture }))
+rowsCheck('编辑器收起时只出一行状态 + 按钮', closedEditor.indexOf('跟随目录（2 个）') !== -1 && closedEditor.indexOf('编辑清单') !== -1)
+const openEditor = collectText(ModelListEditor({ routeId: 'deepseek', catalog: catalogFixture, detailsById: detailFixture, defaultOpen: true }))
+rowsCheck('展开后给出保存/还原/添加', openEditor.indexOf('保存') !== -1 && openEditor.indexOf('还原') !== -1 && openEditor.indexOf('添加一行') !== -1)
+rowsCheck('展开后回显目录模型', openEditor.indexOf('deepseek-v4-flash') !== -1)
+rowsCheck('展开后显示勾选计数', openEditor.indexOf('2/2 个模型已勾选') !== -1)
+const declaredEditor = collectText(ModelListEditor({ routeId: 'opencode-go', declared: declaredFixture, catalog: catalogFixture, detailsById: detailFixture, defaultOpen: true }))
+rowsCheck('声明过清单时给「恢复跟随目录」出口', declaredEditor.indexOf('恢复跟随目录') !== -1)
+rowsCheck('声明过清单时状态行说是自己声明的', declaredEditor.indexOf('自己声明的 2 个') !== -1)
+rowsCheck('声明行的字段出现在面板里', declaredEditor.indexOf('deepseek-flash') !== -1 && declaredEditor.indexOf('low,high=max') !== -1)
+
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',
   dotClass({ id: 'github-copilot', authConfigured: true, oauthAuthorized: true, kind: 'unknown-provider' }) === 'plan_dot plan_dot_ok')

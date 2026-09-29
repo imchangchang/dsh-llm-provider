@@ -287,6 +287,35 @@ var css =
   '.pv_mCaretCol:hover{color:var(--dsw-alias-label-secondary)}' +
   '.pv_mList{border-top:.5px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));' +
   'margin-top:0;padding-top:6px;display:flex;flex-direction:column}' +
+  // ---- 模型清单编辑器（issue #1）----
+  '.pv_me{border-top:.5px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));margin-top:8px;padding-top:8px}' +
+  '.pv_meBar{display:flex;align-items:center;gap:8px}' +
+  '.pv_meState{flex:1;min-width:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);' +
+  'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+  '.pv_mePanel{margin-top:8px;padding:10px;border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));' +
+  'border-radius:10px;background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.02));display:flex;flex-direction:column;gap:8px}' +
+  '.pv_meHint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}' +
+  '.pv_meRows{display:flex;flex-direction:column;gap:6px;max-height:340px;overflow:auto}' +
+  '.pv_meRow{display:flex;align-items:center;gap:6px;flex-wrap:wrap}' +
+  '.pv_meRowOff{opacity:.5}' +
+  '.pv_meRow input[type=text],.pv_meRow select{box-sizing:border-box;padding:3px 6px;font:inherit;font-size:12px;' +
+  'border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12));border-radius:6px;outline:0;' +
+  'background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary)}' +
+  '.pv_meId{width:170px;font-family:ui-monospace,Menlo,Consolas,monospace}' +
+  '.pv_meName{flex:1;min-width:120px}' +
+  '.pv_meNum{width:84px;text-align:right}' +
+  '.pv_meReason{width:150px}' +
+  '.pv_meFmt{width:130px}' +
+  '.pv_meMods{display:inline-flex;gap:8px;align-items:center;font-size:12px;' +
+  'color:var(--dsw-alias-label-secondary)}' +
+  '.pv_meMod{display:inline-flex;align-items:center;gap:3px;cursor:pointer}' +
+  '.pv_meSrc{font-size:11px;line-height:16px;padding:0 6px;border-radius:999px;white-space:nowrap;' +
+  'background:var(--dsw-alias-bg-layer-3,rgba(0,0,0,.06));color:var(--dsw-alias-label-tertiary)}' +
+  '.pv_meActs{display:flex;align-items:center;gap:8px;flex-wrap:wrap}' +
+  '.pv_meCount{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}' +
+  '.pv_meErr{font-size:12px;line-height:18px;color:#e03131}' +
+  '.pv_meNote{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}' +
+  '.pv_actionPrimary{border-color:var(--dsw-alias-brand-primary,rgba(0,0,0,.2))!important;font-weight:600}' +
   '.pv_mFilter{flex:none;width:240px;box-sizing:border-box;padding:5px 24px 5px 12px;font:inherit;font-size:13px;' +
   'border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12));border-radius:8px;outline:0;' +
   'background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03));color:var(--dsw-alias-label-primary)}' +

@@ -23,6 +23,13 @@ export interface ProviderRoute {
   api?: string | undefined
   label: string | undefined
   source: 'llm-pi-ai' | 'native'
+  /**
+   * 路由自己声明的模型清单（`llm-pi-ai.providers.<id>.models`），没声明就是 undefined。
+   *
+   * 有它才谈得上「编辑清单」：官方 `resolveRouteModels` 里 `configured.length > 0 ? configured : 目录`，
+   * 空/缺省都表示跟随 pi-ai 目录。界面把它原样下发给模型清单编辑器（issue #1）。
+   */
+  models?: unknown
 }
 
 /**
@@ -116,6 +123,8 @@ export function providerRoutes(
       api: readString(route['api']),
       label: readString(route['displayName']),
       source: 'llm-pi-ai',
+      // 模型清单编辑器要它：原样下发（数组、字符串条目都允许），由界面解析
+      ...(Array.isArray(route['models']) ? { models: route['models'] } : {}),
     })
   }
 
