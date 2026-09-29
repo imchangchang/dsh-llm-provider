@@ -22,9 +22,16 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { activePiAiRoot, loadBridge, vendorDir } from './bridge.js'
-import { loadModelDetails, type ModelDetail } from './model-details.js'
-import { checkAndUpdate, startBackgroundCheck } from './updater.js'
+import { activePiAiRoot, activePiAiVersion, loadBridge, vendorDir } from './bridge.js'
+import {
+  applyAdapterCapabilities,
+  applyDeclaredCapabilities,
+  indexDetails,
+  loadModelDetails,
+  type DeclaredModelEntry,
+  type ModelDetail,
+} from './model-details.js'
+import { checkAndUpdate, pruneVersions, startBackgroundCheck, vendorUsageAsync } from './updater.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
 import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
@@ -370,6 +377,31 @@ export function apply(ctx: PluginContext, config: unknown): void {
     'dsh-llm-provider: /plan/status route',
   )
 
+  // vendor/ 磁盘占用缓存：统计要走完整个 vendor/（主工作区实测 336 MB、两万多个文件；同步递归
+  // 一次 ~113 ms），所以不能同步跑——走 fs/promises 的异步遍历，等待期间事件循环照常。
+  // 60 秒内的缓存直接命中；过期或没有就现算（这个响应会多等一会儿，但不阻塞宿主）。
+  let vendorUsageCache: { at: number, value: Awaited<ReturnType<typeof vendorUsageAsync>> } | undefined
+  let vendorUsagePending: Promise<Awaited<ReturnType<typeof vendorUsageAsync>> | undefined> | undefined
+  /** 拿一份占用：新鲜就直出，过期/没有就现算（await 不阻塞事件循环，只是这一个响应等一会儿）。 */
+  function vendorUsageFresh(): Promise<Awaited<ReturnType<typeof vendorUsageAsync>> | undefined> {
+    if (vendorUsageCache !== undefined && Date.now() - vendorUsageCache.at <= 60_000) {
+      return Promise.resolve(vendorUsageCache.value)
+    }
+    if (vendorUsagePending === undefined) {
+      vendorUsagePending = vendorUsageAsync()
+        .then((value) => {
+          vendorUsageCache = { at: Date.now(), value }
+          return value
+        })
+        .catch((error: unknown) => {
+          logger?.warn?.(`统计 vendor 占用失败：${messageOf(error)}`)
+          return undefined
+        })
+        .finally(() => { vendorUsagePending = undefined })
+    }
+    return vendorUsagePending
+  }
+
   ctx.effect(
     () => webServer.register({
       kind: 'exact',
@@ -384,12 +416,19 @@ export function apply(ctx: PluginContext, config: unknown): void {
             ? llm.listConfigurableProviders().length
             : -1
         } catch { /* 拿不到就报 -1 */ }
-        let routes: { id: string; apiKeyEnv: string | null; source: string }[] = []
+        let routes: { id: string, apiKeyEnv: string | null, source: string, models?: unknown }[] = []
         try {
           routes = [...providerRoutes(service<SettingsService>('settings'), llm).values()]
-            .map((route) => ({ id: route.id, apiKeyEnv: route.apiKeyEnv ?? null, source: route.source }))
+            .map((route) => ({
+              id: route.id,
+              apiKeyEnv: route.apiKeyEnv ?? null,
+              source: route.source,
+              // 自己声明的模型清单（没声明就没有这个键）：模型清单编辑器据此回显并写回
+              ...(route.models === undefined ? {} : { models: route.models }),
+            }))
         } catch { /* 路由发现失败时留空 */ }
-        json(res, 200, {
+        // 磁盘占用是唯一要异步的部分：其余诊断先算好，占用到了再一起发（不阻塞事件循环）
+        const payload = {
           bridge: bridge.ok
             ? {
                 active: true,
@@ -432,9 +471,13 @@ export function apply(ctx: PluginContext, config: unknown): void {
             pending: bridgeState['needsRestart'] === true ? readString(bridgeState['piAiVersion']) : undefined,
             rejected: readRejected(bridgeState['latestRejected']),
           },
-          // 测试环境标识（scripts/test-profile.sh 启动时带 DSH_PROVIDER_TEST=1）：
-          // 浏览器端看到后给标题/favicon 加「测」标，一眼区分测试实例
-          testMode: process.env.DSH_PROVIDER_TEST === '1',
+            // 磁盘占用在下面按需补上（异步统计）：这里只留测试实例标记
+            // 测试环境标识（scripts/test-profile.sh 启动时带 DSH_PROVIDER_TEST=1）：
+            // 浏览器端看到后给标题/favicon 加「测」标，一眼区分测试实例
+            testMode: process.env.DSH_PROVIDER_TEST === '1',
+        }
+        void vendorUsageFresh().then((usage) => {
+          json(res, 200, { ...payload, storage: usage })
         })
       },
     }),
@@ -452,7 +495,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
           return
         }
         void (async () => {
-          const result = await checkAndUpdate((line) => logger?.info?.(`[pi-ai updater] ${line}`))
+          // 正在用的那份也传进去：手动「检查更新」以前不传，点一次就白下一份同版本副本（issue #4）
+          const result = await checkAndUpdate(
+            (line) => logger?.info?.(`[pi-ai updater] ${line}`),
+            bridge.ok ? bridge.piAiVersion : activePiAiVersion(),
+          )
           json(res, 200, result)
         })()
       },
@@ -460,17 +507,92 @@ export function apply(ctx: PluginContext, config: unknown): void {
     'dsh-llm-provider: /provider/update route',
   )
 
-  // 模型详情（悬浮卡）：pi-ai 数据文件的全量元数据，60 秒缓存
-  let modelDetailsCache: { at: number; value: ModelDetail[] } | undefined
+  // 清理 vendor 里不会再被选中的 pi-ai 副本与 npm 缓存（「pi-ai 桥接」标签页的清理按钮）
+  ctx.effect(
+    () => webServer.register({
+      kind: 'exact',
+      path: '/provider/prune',
+      handler: (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { allow: 'POST' })
+          res.end()
+          return
+        }
+        void (async () => {
+          try {
+            const result = pruneVersions(1, (line) => logger?.info?.(`[pi-ai updater] ${line}`))
+            // 清理后的占用立刻回报，别让 60 秒缓存继续展示旧数字
+            const usage = await vendorUsageAsync()
+            vendorUsageCache = { at: Date.now(), value: usage }
+            logger?.info?.(`[pi-ai updater] 清理完成：删 ${String(result.removed.length)} 份，释放 ${String(Math.round(result.freedBytes / 1024 / 1024))} MB`)
+            json(res, 200, { ok: true, ...result, usage })
+          } catch (error) {
+            json(res, 200, { ok: false, error: messageOf(error), usage: vendorUsageCache?.value ?? null })
+          }
+        })()
+      },
+    }),
+    'dsh-llm-provider: /provider/prune route',
+  )
+
+  // 模型详情（悬浮卡 + 能力徽章）：三条链路合并（route 声明 → pi-ai 目录 → 适配器自报），60 秒缓存
+  let modelDetailsCache: { at: number, value: ModelDetail[] } | undefined
+  let modelDetailsPending: Promise<ModelDetail[]> | undefined
+  /**
+   * 合并一次详情：目录 + route 声明 + 适配器自报。
+   * 结果按「provider + id」索引建好再摊平成数组下发（客户端也按同一个键查，裸 id 只作兜底）。
+   */
+  async function buildModelDetails(): Promise<ModelDetail[]> {
+    const details = loadModelDetails(activePiAiRoot())
+    const index = indexDetails(details)
+    try {
+      const routes = [...providerRoutes(service<SettingsService>('settings'), service<LlmService>('llm')).values()]
+      const declared: DeclaredModelEntry[] = []
+      for (const route of routes) {
+        if (!Array.isArray(route.models)) continue
+        for (const entry of route.models) declared.push({ routeId: route.id, entry })
+      }
+      applyDeclaredCapabilities(index, declared)
+    } catch (error) {
+      logger?.warn?.(`route 声明的模型能力合并失败：${messageOf(error)}`)
+    }
+    try {
+      const added = await applyAdapterCapabilities(index, service<LlmService>('llm'))
+      if (added > 0) logger?.info?.(`适配器自报补了 ${String(added)} 条模型能力`)
+    } catch (error) {
+      logger?.warn?.(`适配器自报的模型能力合并失败：${messageOf(error)}`)
+    }
+    return [...index.values()]
+  }
   ctx.effect(
     () => webServer.register({
       kind: 'exact',
       path: '/provider/models',
-      handler: (_req, res) => {
-        if (modelDetailsCache === undefined || Date.now() - modelDetailsCache.at > 60_000) {
-          modelDetailsCache = { at: Date.now(), value: loadModelDetails(activePiAiRoot()) }
+      handler: (req, res) => {
+        // ?fresh=1：绕开 60 秒缓存（刚写完模型清单，能力徽章要立刻跟着变）
+        const cacheFresh = modelDetailsCache !== undefined && Date.now() - modelDetailsCache.at <= 60_000
+          && !String(req.url ?? '').includes('fresh=1')
+        if (!cacheFresh) {
+          // 同一个请求窗口里并发进来只跑一次（自报那段要 await 适配器）
+          if (modelDetailsPending === undefined) {
+            modelDetailsPending = buildModelDetails()
+              .then((value) => {
+                modelDetailsCache = { at: Date.now(), value }
+                return value
+              })
+              .finally(() => { modelDetailsPending = undefined })
+          }
+          void modelDetailsPending.then(
+            (value) => { json(res, 200, { models: value, fetchedAt: new Date().toISOString() }) },
+            () => { json(res, 200, { models: [], fetchedAt: new Date().toISOString() }) },
+          )
+          return
         }
-        json(res, 200, { models: modelDetailsCache.value, fetchedAt: new Date().toISOString() })
+        const cached = modelDetailsCache
+        if (cached !== undefined) {
+          json(res, 200, { models: cached.value, fetchedAt: new Date().toISOString() })
+          return
+        }
       },
     }),
     'dsh-llm-provider: /provider/models route',

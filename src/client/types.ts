@@ -27,6 +27,33 @@ export interface CatalogModel {
   reasoning?: CatalogReasoning
 }
 
+/**
+ * 模型清单编辑器里的一行（见 client/model-editor.ts）。
+ *
+ * 数字字段存字符串：输入框里允许空着（= 沿用 pi-ai 目录那份），写回时再转数字并校验。
+ */
+export interface ModelRow {
+  /** react key；同一份清单里稳定。 */
+  key: string
+  id: string
+  name: string
+  contextWindow: string
+  maxTokens: string
+  /** 输入模态：text / image（宿主 schema 只认这两种）。 */
+  input: string[]
+  /** 这条行的 input 是不是查到的（目录/声明/自报）；没查到就不写回配置（免得拿占位值盖掉真能力）。 */
+  inputKnown: boolean
+  /** 用户在界面上动过这个勾选（动过就按用户的意思写）。 */
+  inputTouched: boolean
+  /** `reasoningEfforts` 的文本记法：'' 不声明、'false' 不推理、'low,high=max'。 */
+  reasoning: string
+  /** `compat.thinkingFormat`；'' 表示不声明。 */
+  thinkingFormat: string
+  enabled: boolean
+  /** 这一行是配置里声明的那份，还是 pi-ai 目录里的。 */
+  source: 'declared' | 'catalog'
+}
+
 /** 目录里的一个 provider 分组。 */
 export interface CatalogGroup {
   id: string
@@ -34,15 +61,21 @@ export interface CatalogGroup {
   models: CatalogModel[]
 }
 
-/** /provider/models 里的一条模型详情（生效 pi-ai 包的元数据），按模型 id 建索引。 */
+/** /provider/models 里的一条模型详情（生效 pi-ai 包的元数据），按 `provider + id` 建索引。 */
 export interface ModelDetail {
   id?: string
+  /** 这条详情属于哪条 route：同名模型跨 provider，索引必须带上它（issue #5）。 */
+  provider?: string
   contextWindow?: number
   maxTokens?: number
   vision?: boolean
   video?: boolean
   reasoning?: boolean
   thinkingLevels?: string[]
+  /** 能力是从哪条链路来的：route 声明 / pi-ai 目录 / 适配器自报。 */
+  source?: 'route' | 'catalog' | 'adapter'
+  /** 能力字段是真查到了，还是「不知道」（false 的 false 只有前者能当结论）。 */
+  capabilitiesKnown?: boolean
 }
 
 /** /plan/status 的 accounts 项：额度快照里的一家 provider（宿主在通用字段外还会带几个）。 */
@@ -217,11 +250,20 @@ export interface AddProviderPanelProps {
   onAdded?: () => void
   /**
    * 这条路由在配置里钉着的地址（用户自己写的企业版端点之类），没钉返回 undefined。
-   *
-   * 二次添加（给已有路由补密钥）走的是整对象 `settings/mutate` set，表单里地址栏是空的，
-   * 不管一下就会把用户写的地址静默抹掉。
    */
   addressOf?: (routeId: string) => string | undefined
+  /**
+   * 这条路由是不是已经在配置里。
+   *
+   * 已存在时「添加」只能逐字段写：dsh-settings 的 `set` 是整对象覆盖，对已有 route 用它会把
+   * 用户手写的 `models` / `compat.thinkingFormat` / `retryPolicy` 一起抹掉（issue #1）。
+   */
+  existsOf?: (routeId: string) => boolean
+  /**
+   * `/provider/status` 的路由表拿到了没有。false 时「这条路由在不在」无从判断，
+   * 一律按「已在配置里」走逐字段写（猜错也只多写几个字段，不会整段覆盖）。
+   */
+  routesKnown?: boolean
 }
 
 /** 座位注册表：inject(name, factory) + register(描述符, 组件)。 */
@@ -258,14 +300,25 @@ export interface CommandOption {
   detail: string
 }
 
+/** 命令回调收到的会话上下文（官方 ClientSessionContext 里我们用到的那一个字段）。 */
+export interface CommandSession {
+  sessionId?: string
+}
+
 export interface CommandContribution {
   name: string
   label: () => string
   description: () => string
+  /**
+   * 官方契约里的**必填**项（`CommandContribution.available(session): boolean`，没有问号）。
+   * 官方的 CommandUiRuntime.candidates() 对注册表里每一条贡献都直接调它，缺了就是 TypeError，
+   * 会把整个 `/` 候选列表打挂——所以这里不给可选。
+   */
+  available: (session: CommandSession | null | undefined) => boolean
   ui: {
     kind: string
-    options: () => Promise<CommandOption[]>
-    onSelect: (option: CommandOption, session: { sessionId?: string } | null | undefined) => unknown
+    options: (session: CommandSession | null | undefined) => Promise<CommandOption[]>
+    onSelect: (option: CommandOption, session: CommandSession | null | undefined) => unknown
   }
 }
 

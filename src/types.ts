@@ -65,6 +65,21 @@ export interface LlmDirectoryEntry {
 
 export interface LlmService {
   listConfigurableProviders?: () => LlmDirectoryEntry[]
+  /** 已注册的路由（provider id + 显示名）。能力自报那条链路从它挑 provider。 */
+  listProviders?: () => { id: string, name?: string }[]
+  /**
+   * 一条路由自己报的模型清单（适配器实现，进程内调用）。
+   * `inputModalities` 缺省 = 未知；显式给了就照它算（「没有 image」是阴性能力，不是未知）。
+   */
+  listModels?: (provider: string) => Promise<{ id: string, name?: string, inputModalities?: readonly string[] }[]>
+  /** 精确一条 route 的模型信息：模态、上下文、输出上限都可能在这（能力自报的兜底）。 */
+  resolveModelInfo?: (provider: string, model: string, signal?: AbortSignal) => Promise<{
+    id?: string
+    inputModalities?: readonly string[]
+    context?: { contextWindow?: number }
+    defaultMaxTokens?: number
+    reasoning?: unknown
+  }>
 }
 
 /** settings 的一次写操作（跟宿主 mutate 的入参形状一致）。 */

@@ -6,7 +6,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { piAiCandidates, piAiRequirements, probePiAi } from '../lib/bridge.js'
+import { orderCandidates, piAiCandidates, piAiRequirements, probePiAi } from '../lib/bridge.js'
 
 let failures = 0
 function check(name, cond) {
@@ -84,10 +84,32 @@ const candidates = piAiCandidates()
 check('候选里必有兜底依赖档', candidates.some((c) => c.key === 'dependency'))
 check('兜底依赖档不挂软链', candidates.find((c) => c.key === 'dependency').link === false)
 // dsh 自带那一档的目录是沿解析链找出来的：dsh 没装/依赖没装时它可以缺席，
-// 但在场时必须排最后，且是挂软链的那一档。
+// 但在场时必须排在**本机来源**的最后（下载档里版本不高于本机那份的会排到本机来源之后，
+// 见 orderCandidates 的 tie-break），且是挂软链的那一档。
 const dshTier = candidates.find((c) => c.key === 'dsh')
-check('dsh 自带档在场时排最后且挂软链', dshTier === undefined || (candidates[candidates.length - 1].key === 'dsh' && dshTier.link === true))
+const localKeys = candidates.filter((c) => c.key === 'dsh' || c.key === 'dependency').map((c) => c.key)
+check('dsh 自带档在场时是本机来源里最后一个且挂软链',
+  dshTier === undefined || (localKeys[localKeys.length - 1] === 'dsh' && dshTier.link === true))
 check('每档都有 key/version/root', candidates.every((c) => c.key && c.version !== undefined && c.root !== undefined))
+
+// ---- 候选排序：同版本优先复用本机那份（issue #4 第 2 条）----
+const dl = (version) => ({ key: version, version, root: '/tmp/pi-ai/' + version, link: true })
+const dep = { key: 'dependency', version: '0.85.1', root: '/tmp/vendor/pi-ai', link: false }
+const dsh = { key: 'dsh', version: '0.85.1', root: '/tmp/dsh/pi-ai', link: true }
+const keysOf = (list) => list.map((c) => c.key).join(',')
+
+check('下载档比本机新 → 排最前', keysOf(orderCandidates([dl('0.86.0')], [dep, dsh])) === '0.86.0,dependency,dsh')
+check('下载档与本机同版本 → 排到本机来源之后（不抢热更新档）',
+  keysOf(orderCandidates([dl('0.85.1')], [dep, dsh])) === 'dependency,dsh,0.85.1')
+check('下载档比本机旧 → 同样排到后面', keysOf(orderCandidates([dl('0.84.0')], [dep, dsh])) === 'dependency,dsh,0.84.0')
+check('新旧混合：新的在前、重复的在后',
+  keysOf(orderCandidates([dl('0.86.0'), dl('0.85.1')], [dep, dsh])) === '0.86.0,dependency,dsh,0.85.1')
+check('门槛取本机两份里最高的那份（不是只看依赖档）',
+  keysOf(orderCandidates([dl('0.86.5'), dl('0.86.0')], [dep, { ...dsh, version: '0.86.0' }])) === '0.86.5,dependency,dsh,0.86.0')
+check('本机版本读不出（占位串）时不参与比较',
+  keysOf(orderCandidates([dl('0.85.1')], [{ ...dep, version: '内置依赖' }])) === '0.85.1,dependency')
+check('没有本机档时下载档照旧在前', keysOf(orderCandidates([dl('0.85.1')], [])) === '0.85.1')
+check('本机两份的相对顺序不变（依赖在前）', keysOf(orderCandidates([], [dep, dsh])) === 'dependency,dsh')
 
 console.log(failures === 0 ? '\npi-ai 体检测试全部通过' : `\n${failures} 个失败`)
 process.exit(failures === 0 ? 0 : 1)

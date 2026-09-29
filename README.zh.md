@@ -66,7 +66,9 @@ dsh web                   # 插件树变了，必须重启
 
 pi-ai 更新有两个触发路径：插件启动时后台查一次（6 小时节流，`DSH_PROVIDER_UPDATE=off` 可关），以及设置页上的「检查更新」按钮（`POST /provider/update`）。
 
-两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载。pi-ai 换了版本要重启 dsh 才生效——桥接在进程启动时装载。
+两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载——手动点「检查更新」也会先拿当前生效的那份比一次版本。pi-ai 换了版本要重启 dsh 才生效——桥接在进程启动时装载。
+
+下载一份 pi-ai 要占 80 MB 上下，所以插件只保留「比 dsh 自带那份新」的版本：同名或更旧的重复副本在装完后清掉，npm 缓存放系统临时目录（`<tmpdir>/dsh-llm-provider-npm-cache`），不落在插件目录里。「pi-ai 桥接」标签页显示当前占用（`vendor/` 总量 + npm 缓存），旁边的「清理」按钮（`POST /provider/prune`）删掉不会再被选中的旧版本与缓存；正在用的那份、以及「已下载、等重启生效」的那份都不动。
 
 ### 测试实例
 
@@ -83,11 +85,11 @@ scripts/test-profile.sh stop   # 停掉
 node lib/adapters/run.js all            # 跑全部额度适配器（key 从环境变量或 ~/.dsh/.credentials.yaml 找）
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # 构建 + 九个离线测试；自测与合入跑的就是这条
+npm test                                # 构建 + 十二个离线测试；自测与合入跑的就是这条
 npm run typecheck                       # tsc --noEmit（npm test 不含它）
 ```
 
-九个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
+十二个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、目录链清理（摘链不碰链目标）、旧版本清理的保留规则、模型能力的多链路合并、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
 
 ## 实现
 
@@ -113,6 +115,8 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 
 没安装的来源直接跳过。只有**存在但检查不通过**时才列进「被跳过」并给出原因。dsh 自带那份的版本随 dsh 发布走，不一定比上游旧。
 
+版本相同的重复副本不占热更新档的位置：下载档里版本不高于「本机已有的最好那份」（dsh 自带、兜底依赖）的，排在两个本机来源之后——同样的代码，优先复用本机那份，省掉一份 80 MB 的副本，也免得白重启一次。只有比本机新才排在最前。
+
 后两个来源的目录都不写死。官方 bundle 按这个顺序沿解析链找：profile 的 `node_modules`、dsh 安装树（含嵌在 dsh 包里的 `node_modules`）、最后是本插件。pi-ai 从找到的那份 bundle 位置继续沿解析链找。所以 dsh 换布局（bundle 放进自己的安装目录、依赖提升到别处）不会让某个来源凭空消失。
 
 `vendor/package.json` 锁住兜底依赖的版本，与下载目录互不覆盖：更新只往 `vendor/pi-ai/<新版本>/` 写。两个都放在 `vendor/` 下，是因为桥接副本在 `vendor/llm-bridge/`，向上解析先撞到 `vendor/node_modules`，选中这一来源时不用挂软链。
@@ -134,7 +138,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 - 当前选择优先取会话里记着的那次，没有就用目录默认。默认等级只认目录声明的 `defaultEffort`，目录没声明就显示官方的 `Default` 文案。
 - 切换模型后**强制选档**：点了新模型不立即关菜单，跳到推理等级面板让你确认一档（面板里有 `Default` 可选；已勾选的那一档也点得动——它就是确认动作）。初始选中的档位按上一档继承——能直接命中新模型的档位表就沿用，命中不了按「区间中心」做比例映射（5 档第 3 档 → 3 档第 2 档），新模型没有 reasoning 元数据时显示空态 +「知道了」，提交一个无档位的选择。
 - 插件接管前记下的会话可能写着官方那条 `deepseek-official` 路由（现在已不存在）。这种选择会折到现路由（`deepseek`）上显示与取余量，座位还会把会话里记的那次改写一次——宿主在记录里的 provider 没有适配器时直接拒绝发送。改写只在目标路由与模型都在目录里时才做。
-- 额外做的：供应商过滤 chips（带余量指示点）、跨供应商搜索（子串/缩写/编辑距离）、能力徽章、上下文标注、模型详情卡。
+- 额外做的：供应商过滤 chips（带余量指示点）、跨供应商搜索（子串/缩写/编辑距离）、能力徽章、上下文标注、模型详情卡。能力按 `provider + id` 查（同名模型跨 provider 很常见，裸 id 会串家）；三条链路都查不到就不打徽章，详情卡里注明「能力未知」并给出这条能力是哪来的。
 - **按账号可用清单过滤模型**：OAuth 登录时 pi-ai 会把「这个账号能用哪些模型」记进凭据（`availableModelIds`），宿主的 `/plan/status` 把它作为 `availableModels` 下发，列表与卡片都据此过滤。pi-ai 的静态目录与账号权益是两回事——Copilot 目录 28 个模型、某个账号实际只有 6 个能用，选到清单外会拿 400 `model_not_supported`。当前选中的模型即使在清单外也照常显示（否则像凭空消失）。
 - 触发器上的余量指示与供应商卡片读同一个快照，显示最紧的那个窗口的百分比；卡片上每个窗口分别列。
 - 空间不够时先隐藏供应商段，最后才截断模型名；推理等级和余量不收缩。composer 行宽 ≤760px 时隐藏供应商段，≤620px 时余量只留指示点。胶囊宽度上限 `min(560px, 60cqw)`，全名始终挂在 `title` 上。
@@ -144,10 +148,11 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 设置页新增「模型服务」标签（官方 `ui-settings-models` 条目已禁用），两个二级标签：「服务商」、「pi-ai 桥接」。
 
 - 卡片照官方 PluginCard：状态点 + 名称 + 官网链接，一行余量摘要（`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`），右侧是刷新时间、单卡刷新、删除。展开体展示路由配置（路由 ID、掩码密钥、凭据名，以及 API 地址 / 协议——协议只在路由真写了时才有，地址没写时摆的是目录默认端点）和该供应商的模型列表（带过滤与详情卡）。
-- 添加供应商：选预设 → 填密钥与端点（带 OAuth 的预设可直接走 OAuth 登录，自动写入同一套凭据存储）→ 通过测试才能写入（目录里有的 provider，这一步读的是 pi-ai 目录、不发请求也不校验密钥，密钥要到发第一条消息时才验；只有自建网关那一步是真·实连探测）。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。
+- 添加供应商：选预设 → 填密钥与端点（带 OAuth 的预设可直接走 OAuth 登录，自动写入同一套凭据存储）→ 通过测试才能写入（目录里有的 provider，这一步读的是 pi-ai 目录、不发请求也不校验密钥，密钥要到发第一条消息时才验；只有自建网关那一步是真·实连探测）。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。路由**已存在**时只逐字段覆盖表单管的键（`baseURL` / `apiKeyEnv` / 自建网关的 `api`），手写的 `models` / `compat` / `retryPolicy` 不动——整对象 `set` 在 dsh-settings 里是覆盖语义，会把它们一起抹掉。
 - 补密钥：路由在、凭据没值时，卡片展开体里那一行就是输入框（官方 Models 页已禁用，这是唯一入口）。存完立刻实查一次额度。这种供应商在添加列表里标「缺密钥」而不是「已配置」，不会被禁选堵住。
-- 删除：清路由 + 清凭据。内置原生路由不允许在这里删。
-- 「pi-ai 桥接」标签：当前版本与来源、被跳过的候选及原因、上游版本与检查更新按钮。
+- 删除：清路由 + 清凭据。内置原生路由不允许在这里删。确认行单独占一行，并且写明删的是哪条路由、连不连凭据、手写配置不可撤销——原来的确认按钮跟 ✕ 挤在同一格，连点两下第二下正好落在「确认删除」上，等于没确认。
+- 模型清单：展开体「模型（N）」下面是逐行可编辑的清单（勾选 / 改字段 / 整份替换 / 恢复跟随目录），保存写回 `llm-pi-ai.providers.<id>.models`；细节与限制见[已知缺口](#已知缺口)。
+- 「pi-ai 桥接」标签：当前版本与来源、被跳过的候选及原因、磁盘占用与清理按钮、上游版本与检查更新按钮。
 
 ### 额度适配器
 
@@ -186,9 +191,10 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | 路由 | 作用 |
 |---|---|
 | `GET /plan/status` | 各供应商额度快照（60 秒缓存，`?refresh=1` 绕过） |
-| `GET /provider/status` | 桥接状态、路由表、更新状态、测试实例标记 |
+| `GET /provider/status` | 桥接状态、路由表、更新状态、磁盘占用、测试实例标记 |
 | `POST /provider/update` | 手动触发一次上游检查与更新 |
-| `GET /provider/models` | pi-ai 模型全量元数据（60 秒缓存；详情卡与能力徽章用） |
+| `POST /provider/prune` | 清理不会再被选中的 pi-ai 旧版本与 npm 缓存（正在用/待生效的不动） |
+| `GET /provider/models` | 模型元数据，三条链路合并：route 声明的 `input` → pi-ai 目录 → 适配器自报（`listModels`/`resolveModelInfo`，只补目录里没有的 provider，带单调用超时与总预算）。60 秒缓存（`?fresh=1` 绕开）；详情卡与能力徽章用 |
 | `GET /provider/presets` | 可添加的供应商预设清单（含已配置标记） |
 | `POST /provider/refresh` | 单卡刷新额度（实查并更新全局快照） |
 | `POST /provider/remove` | 删除供应商（清路由 + 清凭据） |
@@ -224,7 +230,7 @@ npm run typecheck  # tsc --noEmit
 - **不改官方插件文件**。接管一律通过在 `cordis.patch.yml` 里禁用官方条目（`llm-pi-ai`、`llm-deepseek`、`ui-model-selection`、`ui-settings-models`），官方其余行为保持原样。本插件自己的模型座位带 `priority: -10`，那是同一座位上遮蔽占用者的机制。
 - **key 值不出宿主进程**。浏览器端只拿结论与元信息（前 3 + 后 4 的掩码）。
 - **不需要浏览器登录态（cookie / 已登录会话）**。OAuth 走 device-code：插件把验证页链接与串码交给界面，人在任意设备上完成授权，凭据由 dsh 的凭据服务保管（浏览器侧只拿得到链接与串码，拿不到 token）。
-- **webserver 没有鉴权层**（dsh 的设计如此，默认只绑 loopback）。自建路由不做额外校验的前提是「仅本机可达」：把宿主暴露到 `0.0.0.0`，`/plan/status` 会泄露余额与凭据名。
+- **webserver 没有鉴权层**（dsh 的设计如此，默认只绑 loopback）。自建路由不做额外校验的前提是「仅本机可达」：把宿主暴露到 `0.0.0.0`，`/plan/status` 会泄露余额与凭据名。Desktop 正式实例在宿主层还要求 token（无 token 一律 403），而 `dsh web --port <端口> --no-open` 起的隔离实例没有这一层——实测同一个端口上 `/plan/status`、`/provider/status`、`/provider/presets` 不带 token 就返回 200，所以「仅本机可达」这条前提在那种启动方式下更宽。
 
 ## 对模型请求的影响
 
@@ -239,11 +245,13 @@ npm run typecheck  # tsc --noEmit
 
 官方那些条目有、本插件没有的：
 
-- **逐模型清单编辑**。`ModelListEditor` / `DeepSeekModelsEditor` / `CustomProviderCard` 没有替代：改逐模型参数只能手改 `settings.yaml` 的 `llm-pi-ai.providers.<id>`。
+- **逐模型清单编辑只有个通用替代**。卡片展开体里「模型（N）」下面有「编辑清单」（`src/client/model-editor.ts`）：勾选要暴露的模型、或整份换成自定义清单，行内可改 `id` / `name` / `contextWindow` / `maxTokens` / `input`（文本、图片、视频）/ `reasoningEfforts` / `compat.thinkingFormat`，保存写回 `llm-pi-ai.providers.<id>.models`。与官方那套的差别：官方按 schema 给每类 provider 定制表单，这里是一张通用表格；`reasoningEfforts` 在配置里是 `{档位: 线上值}` 映射，界面上写成 `low,high=max` 这样的文本（留空 = 沿用 pi-ai 目录那份，`false` = 不推理）。保存前先校验（id 空、重名、非正整数、不认识的档位都不让存），因为宿主对清单是 strict 解析，一条坏的会让整条路由不可用。编辑器只对 `llm-pi-ai` 路由显示——原生路由（`deepseek-official` 这类）的模型不写在这套设置里；另外只在「能力查到了」或用户亲手动过勾选时才写 `input`：详情还没到就保存，不会拿一个占位的 `text` 把目录里的视觉能力盖掉。
 - **「当前模型不可路由」置灰**。官方 `ui-model-selection` 会在当前模型无法路由时把 composer 置灰；该条目被禁用后，当前供应商没配好时输入框照样能用。
 - **官方引导流程**。Models 页带的 DeepSeek 引导没有替代。
 
 如实说明（没验到的、没做的）：
+
+- **桥接整体不可用时只有局部提示**。候选全灭（目录坏了、权限问题、上游改导出名）时插件会退回「纯计费模式」，官方那四条条目仍被 patch 禁用，于是模型列表空掉——这时只有「pi-ai 桥接」标签页里一行错误行（`bridge.active === false`），composer 那边没有任何提示。要一眼看懂得再加一条全局告警，目前没做。
 
 - **多端点 / 多协议的 provider 没有实连验证过**。判定按官方回落链推的、离线断言也覆盖了，但 OpenRouter / Fireworks / opencode / opencode-go / Cloudflare / Bedrock 这几家没有可用的 key，没跑过真实发送（Copilot / DeepSeek 这类单端点是实连过的）。
 - **可用模型是登录时的快照**。OAuth 登录时 pi-ai 记下 `availableModelIds`，模型列表按它过滤；账号权益变了（放开新模型、升级订阅）要重新登录一次才刷新。
@@ -293,15 +301,15 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 |---|---|
 | `src/index.ts` | 宿主入口：挂桥接、注册 HTTP 路由 |
 | `src/bridge.ts` | 桥接装载：拷 bundle、按检查挑 pi-ai、管理软链；`hostPackageEntry()` 供按宿主锚点解析官方包 |
-| `src/updater.ts` | 上游更新器：查 registry、校验 tarball、装依赖、标待重启 |
+| `src/updater.ts` | 上游更新器：查 registry、校验 tarball、装依赖、标待重启、清理旧版本与缓存、统计占用 |
 | `src/routes.ts` | 路由发现、官网链接、显示名兜底 |
 | `src/provider-presets.ts` | 添加供应商的预设清单（pi-ai 目录动态生成 + Custom Gateway） |
 | `src/oauth.ts` | OAuth 登录桥：补齐官方没挂的 `authorization` 服务，并把 flow 暴露给浏览器端（5 条 HTTP 路由 + SSE） |
-| `src/model-details.ts` | 模型详情：读生效 pi-ai 包的 providers 数据文件 |
+| `src/model-details.ts` | 模型详情与能力：读生效 pi-ai 包的 providers 数据文件，再合并 route 声明的 `input` 与适配器自报的模态（按 `provider + id` 索引） |
 | `src/pi-ai-names.ts` | 读 pi-ai 注册表里的名字（显示名的来源之一） |
 | `src/credential-check.ts` | 凭据检查 |
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
-| `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
+| `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `model-editor`（模型清单编辑器）· `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
-| `test/*.mjs` | 九个离线测试（不进 dsh、不起服务） |
+| `test/*.mjs` | 十二个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |

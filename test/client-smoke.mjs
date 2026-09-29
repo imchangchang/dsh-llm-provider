@@ -48,11 +48,18 @@ function runApply(commandDuplicate) {
   const registrations = []
   const slotInjects = []
   const injectedServices = []
+  const contributions = []
   let commandRegistered = false
 
   const effect = (fn) => {
     const disposer = fn()
     return typeof disposer === 'function' ? disposer : () => {}
+  }
+  // 桩：sessions 服务。只有一个会话是「寻址到子代理」的，用来验 /model 的 available 过滤。
+  const sessions = {
+    subagentAddress(id) {
+      return id === 'subagent-1' ? { parentId: 'root-1' } : undefined
+    },
   }
   const scope = {
     effect,
@@ -71,9 +78,10 @@ function runApply(commandDuplicate) {
       if (names.includes('commandUi')) {
         callback({
           commandUi: {
-            register() {
+            register(contribution) {
               if (commandDuplicate) throw new Error('ui-commands: duplicate contribution for /model')
               commandRegistered = true
+              contributions.push(contribution)
               return () => {}
             },
           },
@@ -99,14 +107,14 @@ function runApply(commandDuplicate) {
   // 真机上的 ctx 是 cordis 代理：取没 inject 的服务属性直接抛
   // （"cannot get property \"styles\" without inject"）。桩必须照这个行为来，否则
   // 「把 ctx.styles 的读取挪到 try 外面」这种改动测不出来——那一抛会让整个插件加载失败。
-  const ctx = { effect, slots: scope.slots, inject: scope.inject }
+  const ctx = { effect, slots: scope.slots, inject: scope.inject, sessions }
   Object.defineProperty(ctx, 'styles', {
     get() {
       throw new Error('cannot get property "styles" without inject')
     },
   })
   moduleExports.apply(ctx)
-  return { registrations, slotInjects, injectedServices, commandRegistered }
+  return { registrations, slotInjects, injectedServices, commandRegistered, contributions }
 }
 
 // 场景 1：官方 /model 还在（同名注册会抛）——插件必须静默让位，其余座位照常
@@ -146,6 +154,20 @@ if (!(typeof seat.options.priority === 'number' && seat.options.priority < 0)) {
 // 命令注册的两条路径
 if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该抢注册')
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
+
+// 命令贡献必须带官方契约必填的 available（issue #7）：CommandUiRuntime.candidates() 对注册表里
+// 每一条贡献都直接调它，漏了就是 TypeError，整个 `/` 候选列表（含 composer 的「＋」按钮）一起挂。
+const contribution = free.contributions[0]
+if (contribution === undefined) throw new Error('没有捕获到 /model 命令贡献')
+console.log('命令贡献:', JSON.stringify({
+  name: contribution.name,
+  hasAvailable: typeof contribution.available === 'function',
+  uiKind: contribution.ui && contribution.ui.kind,
+}))
+if (typeof contribution.available !== 'function') throw new Error('命令贡献缺 available（官方契约必填，漏了整个 / 菜单会挂）')
+if (contribution.available({ sessionId: 'session-1' }) !== true) throw new Error('普通会话里 /model 应当可用')
+if (contribution.available({ sessionId: 'subagent-1' }) !== false) throw new Error('寻址到子代理的会话里 /model 应当不可用')
+if (contribution.available(undefined) !== true) throw new Error('没有会话上下文时不该把 /model 藏掉（照可用处理）')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
 const { routeProfileOf, routeRepairOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
@@ -211,6 +233,283 @@ const unlimitedChips = headlineChips({
 rowsCheck('不限量窗口出 chip', unlimitedChips.some((c) => c.label === '对话' && c.text === '不限量'))
 rowsCheck('不限量 chip 不带百分比（不参与配色）', unlimitedChips.find((c) => c.label === '对话').percent === undefined)
 rowsCheck('真额度窗口照旧带百分比', unlimitedChips.some((c) => c.label === '高级请求' && c.text === '100%'))
+
+// ---- 三档窗口：短名与分割线（issue #2 把月窗显示成第二个 7d，#8 三档只画一条线）----
+const { shortWindowLabel, windowTier, quotaTipOf } = moduleExports
+rowsCheck('5 小时窗口 → 5h', shortWindowLabel('5 小时滚动窗口') === '5h')
+rowsCheck('每周窗口 → 7d', shortWindowLabel('每周窗口') === '7d')
+rowsCheck('每月窗口 → 30d（不再被裸「每」吞进 7d）', shortWindowLabel('每月窗口') === '30d')
+rowsCheck('月度限额 → 30d', shortWindowLabel('月度限额') === '30d')
+rowsCheck('30 天窗口 → 30d（kimi 的按天口径）', shortWindowLabel('30 天窗口') === '30d')
+rowsCheck('每天窗口不算 30d', shortWindowLabel('每天窗口') !== '30d')
+// 适配器的窗口名是拼出来的（kimi `${n} 天窗口`、GLM `${n} 小时窗口`）：时长要读进去，
+// 否则这些全落进「认不出」那一档，7 天窗口会被排到 30 天窗口后面（复查抓到的回归）
+rowsCheck('7 天窗口 → 7d 档、短名 7d', windowTier('7 天窗口') === '7d' && shortWindowLabel('7 天窗口') === '7d')
+rowsCheck('7 小时窗口归短窗档，但短名照抄时长（7h）', windowTier('7 小时窗口') === '5h' && shortWindowLabel('7 小时窗口') === '7h')
+rowsCheck('24 小时窗口不塞进周档，短名 24h', windowTier('24 小时窗口') === 'other' && shortWindowLabel('24 小时窗口') === '24h')
+rowsCheck('3 天窗口 → 7d 档', windowTier('3 天窗口') === '7d')
+rowsCheck('认不出的窗口名（unit= 那种）不误判', windowTier('窗口 unit=3 n=7') === 'other')
+const kimiChips = headlineChips({
+  id: 'kimi-coding', kind: 'quota', windows: [
+    { window: '5 小时窗口', percentLeft: 50 },
+    { window: '7 天窗口', percentLeft: 49 },
+    { window: '30 天窗口', percentLeft: 48 },
+  ],
+})
+rowsCheck('kimi 的 5h/7天/30天 按档排序、两条线',
+  kimiChips.map((c) => (c.sep === true ? '|' : c.label)).join(' ') === '5h | 7d | 30d')
+rowsCheck('Monthly → 30d', shortWindowLabel('Monthly window') === '30d')
+rowsCheck('Weekly → 7d', shortWindowLabel('Weekly window') === '7d')
+rowsCheck('认不出的窗口名保持原样（截 4 字）', shortWindowLabel('高级请求') === '高级请求')
+rowsCheck('空名字给「窗口」', shortWindowLabel('') === '窗口')
+rowsCheck('档位函数与短名一致', windowTier('每月窗口') === '30d' && windowTier('每周窗口') === '7d')
+
+const threeTier = headlineChips({
+  id: 'opencode-go', displayName: 'OpenCode Go', kind: 'quota', authConfigured: true,
+  balances: [], windows: [
+    { window: '5 小时滚动窗口', percentLeft: 100, resetAt: '2026-10-01T00:00:00Z' },
+    { window: '每周窗口', percentLeft: 65, resetAt: '2026-10-04T00:00:00Z' },
+    { window: '每月窗口', percentLeft: 8, resetAt: '2026-10-07T00:00:00Z' },
+  ],
+})
+rowsCheck('三档窗口出三枚 chip + 两条分割线',
+  threeTier.filter((c) => c.sep !== true).length === 3 && threeTier.filter((c) => c.sep === true).length === 2)
+rowsCheck('chips 顺序固定为 5h → 7d → 30d',
+  threeTier.filter((c) => c.sep !== true).map((c) => c.label).join(',') === '5h,7d,30d')
+rowsCheck('分割线插在档与档之间（不是末尾）',
+  threeTier.map((c) => (c.sep === true ? '|' : c.label)).join(' ') === '5h | 7d | 30d')
+rowsCheck('月窗的 tooltip 也是 30d', String(quotaTipOf({
+  id: 'opencode-go', kind: 'quota', windows: [{ window: '每月窗口', percentLeft: 8, resetAt: '2026-10-07T00:00:00Z' }],
+})).indexOf('30d余量 8%') === 0)
+
+// 上游把月窗排在前面时，显示顺序要按档位规整，分割线位置不跟着跳
+const shuffled = headlineChips({
+  id: 'opencode-go', kind: 'quota', windows: [
+    { window: '每月窗口', percentLeft: 8 },
+    { window: '5 小时滚动窗口', percentLeft: 100 },
+    { window: '每周窗口', percentLeft: 65 },
+  ],
+})
+rowsCheck('乱序返回也规整成 5h → 7d → 30d',
+  shuffled.map((c) => (c.sep === true ? '|' : c.label)).join(' ') === '5h | 7d | 30d')
+
+// 只有两档时仍是一条线（保持视觉不变）
+const twoTier = headlineChips({
+  id: 'deepseek', kind: 'quota', windows: [
+    { window: '5 小时滚动窗口', percentLeft: 90 },
+    { window: '每周窗口', percentLeft: 40 },
+  ],
+})
+rowsCheck('两档窗口仍是一条分割线', twoTier.filter((c) => c.sep === true).length === 1)
+rowsCheck('只有一档时不画线', headlineChips({
+  id: 'deepseek', kind: 'quota', windows: [{ window: '每周窗口', percentLeft: 40 }],
+}).filter((c) => c.sep === true).length === 0)
+
+// ---- 磁盘占用行（issue #4：代码 220 KB、运行副本 260 MB，界面得看得见、清得掉）----
+const { piAiStorageRows, formatBytes } = moduleExports
+rowsCheck('字节人性化：MB', formatBytes(82 * 1024 * 1024) === '82 MB')
+rowsCheck('字节人性化：GB', formatBytes(1.5 * 1024 * 1024 * 1024) === '1.5 GB')
+rowsCheck('0 字节不显示成 0 B', formatBytes(0) === '0 MB')
+const storageRows = piAiStorageRows({
+  vendorBytes: 260 * 1024 * 1024,
+  downloads: [{ version: '0.85.1', bytes: 82 * 1024 * 1024 }],
+  cacheBytes: 178 * 1024 * 1024,
+  legacyCacheBytes: 0,
+})
+rowsCheck('占用行给总量', storageRows[0].key === 'disk' && storageRows[0].value === '260 MB')
+rowsCheck('占用行的 title 列出已下载版本', String(storageRows[0].title).indexOf('0.85.1 82 MB') !== -1)
+rowsCheck('缓存行单列', storageRows.some((r) => r.key === 'disk-cache' && r.value === '178 MB'))
+rowsCheck('没有缓存就不出缓存行',
+  piAiStorageRows({ vendorBytes: 1024, downloads: [], cacheBytes: 0, legacyCacheBytes: 0 }).length === 1)
+rowsCheck('老缓存（插件目录里那份）也算进缓存行',
+  piAiStorageRows({ vendorBytes: 1024, downloads: [], cacheBytes: 0, legacyCacheBytes: 5 * 1024 * 1024 })[1].value === '5 MB')
+rowsCheck('拿不到 storage 段就不出占用行', piAiStorageRows(undefined).length === 0)
+rowsCheck('上游行文字', piAiUpstreamText({ latest: '0.86.0' }).indexOf('上游 0.86.0') === 0)
+
+// ---- 删除确认的代价说明（issue #3：整段 route + 凭据一起没，且不可撤销）----
+const { deleteConfirmText } = moduleExports
+const delText = deleteConfirmText({ id: 'opencode-go', apiKeyEnv: 'OPENCODE_GO_API_KEY' })
+rowsCheck('确认文案点名路由', delText.indexOf('路由 opencode-go') !== -1)
+rowsCheck('确认文案点名凭据', delText.indexOf('OPENCODE_GO_API_KEY') !== -1)
+rowsCheck('确认文案说明不可撤销', delText.indexOf('不可撤销') !== -1)
+rowsCheck('确认文案提到手写配置会消失', delText.indexOf('retryPolicy') !== -1)
+rowsCheck('没有凭据名时不硬凑', deleteConfirmText({ id: 'deepseek' }).indexOf('凭据') === -1)
+
+// ---- 添加供应商别整段覆盖已有 route（issue #1 的「顺带一个提醒」）----
+const { addRouteOps } = moduleExports
+// 桩：照 dsh-settings 的 applyPathOp 实现 set（逐层浅合并），用来验「写完之后原来的字还在不在」
+function applySet(section, op) {
+  const [head, ...rest] = op.path
+  if (rest.length === 0) return { ...section, [head]: op.value }
+  return { ...section, [head]: applySet(section[head] === undefined ? {} : section[head], { ...op, path: rest }) }
+}
+const existingSection = {
+  providers: {
+    'opencode-go': {
+      baseURL: 'https://opencode.ai/zen/go/v1',
+      models: [{ id: 'deepseek-flash', input: ['text', 'image'] }],
+      compat: { thinkingFormat: 'deepseek' },
+      retryPolicy: { maxRetries: 3 },
+    },
+  },
+}
+const freshOps = addRouteOps('opencode-go', { baseURL: 'https://x', apiKeyEnv: 'K' }, false)
+rowsCheck('新路由：一次 set 写整条', freshOps.length === 1 && freshOps[0].path.join('.') === 'providers.opencode-go')
+const mergedOps = addRouteOps('opencode-go', { baseURL: 'https://x', apiKeyEnv: 'K' }, true)
+rowsCheck('已有路由：逐字段写，不再整条覆盖', mergedOps.every((op) => op.path.length === 3))
+let after = existingSection
+for (const op of mergedOps) after = applySet(after, op)
+rowsCheck('手写的 models 活下来', JSON.stringify(after.providers['opencode-go'].models) === JSON.stringify(existingSection.providers['opencode-go'].models))
+rowsCheck('手写的 compat 活下来', after.providers['opencode-go'].compat.thinkingFormat === 'deepseek')
+rowsCheck('手写的 retryPolicy 活下来', after.providers['opencode-go'].retryPolicy.maxRetries === 3)
+rowsCheck('表单里的字段真的写进去了', after.providers['opencode-go'].baseURL === 'https://x' && after.providers['opencode-go'].apiKeyEnv === 'K')
+// 反向对照：老写法（整对象 set）确实会抹掉手写配置——这条要是过了，说明上面几条不是白测
+let clobbered = applySet(existingSection, { op: 'set', path: ['providers', 'opencode-go'], value: { baseURL: 'https://x', apiKeyEnv: 'K' } })
+rowsCheck('对照：整对象 set 会抹掉 models（老写法的毛病）', clobbered.providers['opencode-go'].models === undefined)
+rowsCheck('空路由 id 不产生操作', addRouteOps('  ', { baseURL: 'x' }, false).length === 0)
+// OAuth 路径：已有路由上那条旧的 apiKeyEnv 必须删掉（官方适配器只认它，留着就把 OAuth 堵死）
+const oauthOps = addRouteOps('anthropic', {}, true).filter((op) => op.path[2] === 'apiKeyEnv')
+rowsCheck('OAuth 重建已有路由时 unset apiKeyEnv', oauthOps.length === 1 && oauthOps[0].op === 'unset')
+rowsCheck('走密钥路径时不 unset apiKeyEnv',
+  addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => !(op.op === 'unset' && op.path[2] === 'apiKeyEnv')))
+rowsCheck('新路由不带 unset（整对象 set 本来就不写这个字段）',
+  addRouteOps('deepseek', { apiKeyEnv: 'K' }, false).length === 1)
+rowsCheck('undefined 值的键不发 set', addRouteOps('deepseek', { apiKeyEnv: undefined, baseURL: 'https://x' }, true).length === 2)
+rowsCheck('表单没填的字段不进 ops（原值保持）',
+  addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => op.path[2] === 'apiKeyEnv'))
+
+// ---- 模型清单编辑器（issue #1：官方 Models 页禁用后，逐模型参数得有条界面上的路）----
+const { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, buildDetailMap } = moduleExports
+const catalogFixture = [
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 1000000 },
+  { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision', contextWindow: 200000 },
+]
+// 详情表按 `provider + id` 建（真实的客户端就是这么拿的）：用裸 id 当 fixture 会把
+// 「同名模型跨 provider」这类问题掩盖掉（复查抓到过这一点）
+const detailFixture = buildDetailMap([
+  { id: 'deepseek-v4-flash', provider: 'deepseek', contextWindow: 1000000, maxTokens: 32768, vision: false, reasoning: true, thinkingLevels: ['low', 'high'], capabilitiesKnown: true },
+  { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', contextWindow: 200000, maxTokens: 8192, vision: true, reasoning: false, thinkingLevels: [], capabilitiesKnown: true },
+])
+const catalogRows = editorRowsOf(undefined, catalogFixture, detailFixture, 'deepseek')
+rowsCheck('没声明清单时铺开目录里的模型', catalogRows.length === 2 && catalogRows.every((r) => r.source === 'catalog' && r.enabled === true))
+rowsCheck('目录行的上下文从目录带出来', catalogRows[0].contextWindow === '1000000')
+rowsCheck('目录行的最大输出从详情带出来', catalogRows[0].maxTokens === '32768')
+rowsCheck('目录行的输入模态按视觉能力填', catalogRows[1].input.join(',') === 'text,image')
+rowsCheck('目录行的推理字段留空（表示沿用目录）', catalogRows[0].reasoning === '')
+rowsCheck('目录行标成「能力查到了」', catalogRows.every((r) => r.inputKnown === true))
+// 详情晚到/查不到时不能把占位的 ['text'] 当结论写进配置
+const unknownRows = editorRowsOf(undefined, catalogFixture, undefined, 'deepseek')
+rowsCheck('没有详情时目录行标成「能力未知」', unknownRows.every((r) => r.inputKnown === false))
+const unknownBuilt = editorToModels(unknownRows)
+rowsCheck('能力未知的目录行不写 input（免得盖掉目录里的视觉能力）',
+  unknownBuilt.models.every((m) => m.input === undefined))
+const knownBuilt = editorToModels(catalogRows)
+rowsCheck('能力查到的目录行照常写 input', knownBuilt.models[1].input.join(',') === 'text,image')
+
+const declaredFixture = [
+  { id: 'deepseek-flash', name: '自定义 Flash', contextWindow: 128000, maxTokens: 4096, input: ['text', 'image'], reasoningEfforts: { low: 'low', high: 'max' }, compat: { thinkingFormat: 'deepseek' } },
+  'plain-id',
+]
+const declaredRows = editorRowsOf(declaredFixture, catalogFixture, detailFixture, 'opencode-go')
+rowsCheck('声明了清单就以它为准', declaredRows.length === 2 && declaredRows.every((r) => r.source === 'declared'))
+rowsCheck('声明行的字段原样回显', declaredRows[0].id === 'deepseek-flash' && declaredRows[0].contextWindow === '128000' && declaredRows[0].thinkingFormat === 'deepseek')
+rowsCheck('reasoningEfforts 对象映射成文本记法', declaredRows[0].reasoning === 'low,high=max')
+rowsCheck('字符串条目也认（等价于只有 id）', declaredRows[1].id === 'plain-id')
+rowsCheck('声明行没写 input 时回落到目录那份', declaredRows[1].input.join(',') === 'text')
+rowsCheck('目录里没有的自定义 id 输入模态兜底 text', declaredRows[0].input.join(',') === 'text,image')
+rowsCheck('声明行不许出现 video（宿主 schema 只认 text/image）',
+  editorRowsOf([{ id: 'x', input: ['text', 'video'] }], [], undefined, 'r')[0].input.join(',') === 'text')
+
+const reasoningCases = [
+  ['', undefined, undefined],
+  ['false', false, undefined],
+  ['关闭', false, undefined],
+  ['low', { low: 'low' }, undefined],
+  ['low,high=max', { low: 'low', high: 'max' }, undefined],
+  ['off,low', { off: null, low: 'low' }, undefined],
+  ['bogus', undefined, 'error'],
+  ['off', false, undefined],
+  ['high=', undefined, 'error'],
+]
+for (const [text, value, error] of reasoningCases) {
+  const parsed = parseReasoningEfforts(text)
+  rowsCheck('思考档位解析「' + text + '」',
+    (error === 'error' ? typeof parsed.error === 'string' : JSON.stringify(parsed.value) === JSON.stringify(value)))
+}
+rowsCheck('反向：对象映射 → 文本', formatReasoningEfforts({ low: 'low', high: 'max' }) === 'low,high=max')
+rowsCheck('反向：false → false', formatReasoningEfforts(false) === 'false')
+rowsCheck('反向：缺省 → 空', formatReasoningEfforts(undefined) === '')
+
+const built = editorToModels([
+  { key: 'a', id: 'deepseek-flash', name: 'Flash', contextWindow: '128000', maxTokens: '4096', input: ['text', 'image'], inputKnown: true, inputTouched: false, reasoning: 'low,high=max', thinkingFormat: 'deepseek', enabled: true, source: 'declared' },
+  { key: 'b', id: 'unchecked', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: '', thinkingFormat: '', enabled: false, source: 'catalog' },
+])
+rowsCheck('只写勾选的行', built.models.length === 1 && built.models[0].id === 'deepseek-flash')
+rowsCheck('写出的数字是数字', built.models[0].contextWindow === 128000 && built.models[0].maxTokens === 4096)
+rowsCheck('写出的 input 是数组', built.models[0].input.join(',') === 'text,image')
+rowsCheck('写出的 thinkingFormat 在 compat 里', built.models[0].compat.thinkingFormat === 'deepseek')
+rowsCheck('勾选行没有错误', built.errors.length === 0)
+rowsCheck('用户动过勾选就按用户的写（即使能力没查到）',
+  editorToModels([{ key: 'a', id: 'x', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: false, inputTouched: true, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' }]).models[0].input.join(',') === 'text')
+// 两种模态都取消：宿主把空数组当「沿用目录」，不能静默写一个 ['text'] 把视觉能力钉死
+const noneInput = editorToModels([{ key: 'a', id: 'x', name: '', contextWindow: '', maxTokens: '', input: [], inputKnown: true, inputTouched: true, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' }])
+rowsCheck('模态一个都不选时报错而不是写 text', noneInput.errors.some((e) => e.indexOf('输入模态') !== -1))
+rowsCheck('报错时不产出 input 字段', noneInput.models[0].input === undefined)
+
+const badRows = editorToModels([
+  { key: 'a', id: '', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
+  { key: 'b', id: 'dup', name: '', contextWindow: 'x', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: 'nope', thinkingFormat: '', enabled: true, source: 'declared' },
+  { key: 'c', id: 'dup', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
+])
+rowsCheck('空 id 报错', badRows.errors.some((e) => e.indexOf('模型 ID 是空的') !== -1))
+rowsCheck('非正整数报错', badRows.errors.some((e) => e.indexOf('正整数') !== -1))
+rowsCheck('坏档位报错', badRows.errors.some((e) => e.indexOf('思考档位') !== -1))
+rowsCheck('重名报错', badRows.errors.some((e) => e.indexOf('重复') !== -1))
+
+// 面板本体：直接当函数组件调一次（桩 react 的 createElement 只组装树），把展开分支也跑到
+const { ModelListEditor } = moduleExports
+function collectText(node) {
+  if (node === null || node === undefined || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node) + ' '
+  if (Array.isArray(node)) return node.map(collectText).join('')
+  if (typeof node === 'object') {
+    // 输入框的内容挂在 props.value 上（不是 children），测试要能一起看到
+    const own = typeof node.props?.value === 'string' ? node.props.value + ' ' : ''
+    return own + (node.children === undefined ? '' : collectText(node.children))
+  }
+  return ''
+}
+const closedEditor = collectText(ModelListEditor({ routeId: 'deepseek', catalog: catalogFixture, detailsById: detailFixture }))
+rowsCheck('编辑器收起时只出一行状态 + 按钮', closedEditor.indexOf('跟随目录（2 个）') !== -1 && closedEditor.indexOf('编辑清单') !== -1)
+const openEditor = collectText(ModelListEditor({ routeId: 'deepseek', catalog: catalogFixture, detailsById: detailFixture, defaultOpen: true }))
+rowsCheck('展开后给出保存/还原/添加', openEditor.indexOf('保存') !== -1 && openEditor.indexOf('还原') !== -1 && openEditor.indexOf('添加一行') !== -1)
+rowsCheck('展开后回显目录模型', openEditor.indexOf('deepseek-v4-flash') !== -1)
+rowsCheck('展开后显示勾选计数', openEditor.indexOf('2/2 个模型已勾选') !== -1)
+const declaredEditor = collectText(ModelListEditor({ routeId: 'opencode-go', declared: declaredFixture, catalog: catalogFixture, detailsById: detailFixture, defaultOpen: true }))
+rowsCheck('声明过清单时给「恢复跟随目录」出口', declaredEditor.indexOf('恢复跟随目录') !== -1)
+rowsCheck('声明过清单时状态行说是自己声明的', declaredEditor.indexOf('自己声明的 2 个') !== -1)
+rowsCheck('声明行的字段出现在面板里', declaredEditor.indexOf('deepseek-flash') !== -1 && declaredEditor.indexOf('low,high=max') !== -1)
+
+// ---- 能力详情按 provider + id 建索引（issue #5：裸 id 会让同名模型串家）----
+const { detailOf, detailSourceLabel } = moduleExports
+const detailPayload = [
+  { id: 'claude-opus-5', provider: 'anthropic', vision: true, source: 'catalog' },
+  { id: 'claude-opus-5', provider: 'cloudflare-ai-gateway', vision: false, source: 'catalog' },
+  { id: 'deepseek-flash', provider: 'opencode-go', vision: true, source: 'route' },
+  { id: 'only-here', provider: 'solo', vision: true, source: 'adapter' },
+]
+const detailMap = buildDetailMap(detailPayload)
+rowsCheck('同名模型按 provider 各查各的',
+  detailOf(detailMap, 'anthropic', 'claude-opus-5').vision === true
+  && detailOf(detailMap, 'cloudflare-ai-gateway', 'claude-opus-5').vision === false)
+rowsCheck('自定义 id 在 route 那一份上查得到', detailOf(detailMap, 'opencode-go', 'deepseek-flash').vision === true)
+rowsCheck('跨 provider 的同名 id 不互相兜底', detailOf(detailMap, 'opencode-go', 'claude-opus-5') === undefined)
+rowsCheck('全局唯一的 id 允许裸兜底', detailOf(detailMap, 'unknown-route', 'only-here').vision === true)
+rowsCheck('空表返回 undefined', detailOf(undefined, 'x', 'y') === undefined)
+rowsCheck('来源文案三档', detailSourceLabel('route').indexOf('路由声明') === 0
+  && detailSourceLabel('catalog') === 'pi-ai 目录'
+  && detailSourceLabel('adapter') === '适配器自报')
+rowsCheck('认不出的来源不硬编', detailSourceLabel('whatever') === undefined)
 
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',

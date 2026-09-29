@@ -21,9 +21,11 @@ import {
   startOauthAttempt,
   withKey,
   withKeys,
+  detailOf,
 } from './data.js'
 import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, modelVisible, refreshable, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
 import { caretSvg } from './icons.js'
+import { ModelListEditor } from './model-editor.js'
 import { t } from './i18n.js'
 import type { AddProviderPanelProps, BridgeRow, CatalogModel, FieldEvent, HeadlineChip, ModelDetail, OauthAttemptClient, OauthEvent, OauthPrompt, PlanAccount, ProviderPreset } from './types.js'
 
@@ -121,6 +123,41 @@ export function routeProfileOf(
   if (custom === true) profile.api = form.api
   if (oauthAuthorized !== true) profile.apiKeyEnv = form.apiKeyEnv.trim()
   return profile
+}
+
+/**
+ * 「添加供应商」要写的设置操作（纯函数，离线可测）。
+ *
+ * 为什么已存在的路由不能再用整对象 `set`：dsh-settings 的 `applyPathOp` 对 `set` 是
+ * `{...section, [head]: op.value}`——对一条已经在配置里的 route 点「确认添加」，会把它手写的
+ * `models`、`compat.thinkingFormat`、`retryPolicy`、`reasoningEfforts` 一起抹掉，只剩表单里的
+ * 那几个字段（issue #1 的「顺带一个提醒」）。所以：
+ *   - 路由不存在 → 一次 `set` 写整条（新建语义，本来就是这套字段）；
+ *   - 路由已存在 → 逐字段 `set`，只覆盖表单管的键，`models` 这些一个字不动。
+ * 表单没填的键不进 `profile`，因此不产生操作，原值保持。
+ *
+ * @param routeId - 表单里的路由 id。
+ * @param profile - 表单产出的字段（见 routeProfileOf）。
+ * @param exists - 这条路由当前是否已在配置里。
+ */
+export function addRouteOps(routeId: string, profile: AnyRecord, exists: boolean): AnyRecord[] {
+  var id = routeId.trim()
+  if (id === '') return []
+  if (exists !== true) return [{ op: 'set', path: ['providers', id], value: profile }]
+  var ops: AnyRecord[] = []
+  var keys = Object.keys(profile)
+  for (var i = 0; i < keys.length; i += 1) {
+    // undefined 值的键不发（JSON 会把它丢掉，发出去等于一次没写进去的 set）
+    if (profile[keys[i]] === undefined) continue
+    ops.push({ op: 'set', path: ['providers', id, keys[i]], value: profile[keys[i]] })
+  }
+  // 这次走 OAuth（表单没产出 apiKeyEnv）：已有路由上那条旧的要删掉——官方适配器的
+  // resolveApiKey 只要看到 apiKeyEnv 就只认那个 ref，留着等于把 OAuth 堵死
+  // （0.2.0-alpha.3 修的正是这一类）。新路由走整对象 set，本来就不会写这个字段。
+  if (profile['apiKeyEnv'] === undefined) {
+    ops.push({ op: 'unset', path: ['providers', id, 'apiKeyEnv'] })
+  }
+  return ops
 }
 
 /** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
@@ -234,6 +271,66 @@ export function piAiUpstreamText(update: unknown): string {
   return '上游 ' + String(updateRecord.latest) + when
 }
 
+/**
+ * 删除确认行的代价说明（issue #3）：说清删的是哪条路由、连不连凭据、什么不可恢复。
+ * 宿主侧 `/provider/remove` 做的是 `unset providers.<id>` 加 `credentials.unset(apiKeyEnv)`，
+ * 也就是整段 route 一起没——手写的 `models` / `compat.thinkingFormat` / `retryPolicy` 都在里面。
+ * @param account - 额度账户（也用同一套 route id）。
+ */
+export function deleteConfirmText(account: unknown): string {
+  var record = account === null || account === undefined ? {} : account as AnyRecord
+  var id = String(record['id'] === undefined ? '' : record['id'])
+  var keyEnv = typeof record['apiKeyEnv'] === 'string' ? record['apiKeyEnv'] : ''
+  return '将删除路由 ' + id
+    + (keyEnv === '' ? '' : ' 与其凭据 ' + keyEnv)
+    + '：整段配置（手写的模型清单 / compat / retryPolicy）一并消失，不可撤销。'
+}
+
+/** 字节数人性化：1.2 GB / 82 MB / 512 KB。 */
+export function formatBytes(value: unknown): string {
+  var n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n) || n <= 0) return '0 MB'
+  if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB'
+  if (n >= 1024 * 1024) return Math.round(n / 1024 / 1024) + ' MB'
+  return Math.max(1, Math.round(n / 1024)) + ' KB'
+}
+
+/**
+ * 「pi-ai 桥接」标签页里的磁盘占用行（issue #4：代码 220 KB，运行副本 260 MB，界面上得看得见、
+ * 清得掉）。
+ * @param storage - /provider/status 的 storage 段（见宿主 updater 的 vendorUsage）。
+ */
+export function piAiStorageRows(storage: unknown): BridgeRow[] {
+  if (storage === undefined || storage === null) return []
+  var record = storage as AnyRecord
+  var downloads = Array.isArray(record.downloads) ? record.downloads : []
+  var parts = []
+  for (var i = 0; i < downloads.length; i += 1) {
+    var entry = downloads[i] as AnyRecord
+    parts.push(String(entry.version) + ' ' + formatBytes(entry.bytes))
+  }
+  var rows: BridgeRow[] = [
+    {
+      key: 'disk',
+      text: '插件目录占用',
+      value: formatBytes(record.vendorBytes),
+      title: (parts.length > 0 ? '已下载的 pi-ai：' + parts.join('、') : '没有已下载的 pi-ai 版本，跑的是 dsh 自带或用兜底依赖那份')
+        + '。清理只删「不会再被选中」的重复副本与旧版本，正在用的那份一个字节不动。',
+    },
+  ]
+  var cacheBytes = (typeof record.cacheBytes === 'number' ? record.cacheBytes : 0)
+    + (typeof record.legacyCacheBytes === 'number' ? record.legacyCacheBytes : 0)
+  if (cacheBytes > 0) {
+    rows.push({
+      key: 'disk-cache',
+      text: 'npm 缓存',
+      value: formatBytes(cacheBytes),
+      title: '更新依赖时用的 npm 缓存（系统临时目录）。清理掉只影响下次装依赖的速度，不影响已装好的版本。',
+    })
+  }
+  return rows
+}
+
 /** 单个摘要 chip：「5h余量:90% 34min后重置」；余额类无标签只显示金额；sep 为组间分割线。 */
 function headlineChip(chip: HeadlineChip, key: number) {
   if (chip.sep === true) {
@@ -259,7 +356,7 @@ function headlineChip(chip: HeadlineChip, key: number) {
 
 /** 模型行：名称 + 能力徽章（视觉/推理/视频）+ 上下文标签，悬浮出 Cherry 式详情卡。 */
 function modelRow(model: CatalogModel, account: PlanAccount, detailsById: Record<string, ModelDetail> | undefined | null) {
-  var detail = detailsById === undefined || detailsById === null ? undefined : detailsById[model.id]
+  var detail = detailOf(detailsById, account.id, model.id)
   var cw = detail !== undefined && detail.contextWindow !== undefined ? detail.contextWindow : model.contextWindow
   var ctx = formatContext(cw)
   var caps = []
@@ -279,6 +376,17 @@ function modelRow(model: CatalogModel, account: PlanAccount, detailsById: Record
   )
 }
 
+/**
+ * 能力来源的显示名（issue #5 的四条链路）。
+ * @param source - 详情里的 source 字段。
+ */
+export function detailSourceLabel(source: unknown): string | undefined {
+  if (source === 'route') return '路由声明（settings.yaml）'
+  if (source === 'catalog') return 'pi-ai 目录'
+  if (source === 'adapter') return '适配器自报'
+  return undefined
+}
+
 /** Cherry 式模型详情卡：服务商 / 模型 ID / 能力标记 / 上下文 / 最大输出 / 思维链。 */
 function modelTip(model: CatalogModel, account: PlanAccount, detail: ModelDetail | undefined) {
   var rows = [react.createElement('div', { className: 'pv_tipTitle', key: 't' }, model.name)]
@@ -290,13 +398,19 @@ function modelTip(model: CatalogModel, account: PlanAccount, detail: ModelDetail
     if (detail.video === true) caps.push(tipCap('视频', 'pv_capVideo'))
     if (detail.reasoning === true) caps.push(tipCap('推理', 'pv_capReason'))
     if (caps.length > 0) rows.push(react.createElement('div', { className: 'pv_tipCaps', key: 'c' }, caps))
+    else if (detail.capabilitiesKnown === false) {
+      // 能力字段一个都没查到：说清「不知道」，别让人以为这是「都没有」
+      rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'nocap' }, '能力未知：三条链路（路由声明 / pi-ai 目录 / 适配器）都没报，所以不打徽章'))
+    }
     if (detail.contextWindow !== undefined) rows.push(tipLine('上下文窗口', detail.contextWindow.toLocaleString('en-US'), 'cw'))
     if (detail.maxTokens !== undefined) rows.push(tipLine('最大输出', detail.maxTokens.toLocaleString('en-US'), 'mt'))
     rows.push(tipLine('思维链', detail.reasoning === true
       ? (Array.isArray(detail.thinkingLevels) && detail.thinkingLevels.length > 0 ? detail.thinkingLevels.join('、') : '自动')
       : '关闭', 'tk'))
+    var sourceLabel = detailSourceLabel(detail.source)
+    if (sourceLabel !== undefined) rows.push(tipLine('能力来源', sourceLabel, 'src'))
   } else {
-    rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'dim' }, '该模型没有本地元数据'))
+    rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'dim' }, '该模型没有本地元数据：能力未知，不打徽章（不猜）'))
   }
   return react.createElement('div', { className: 'pv_tip' }, rows)
 }
@@ -502,9 +616,17 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       profile.baseURL = existingAddress
     }
     var typedKey = form.key.trim()
+    var routeId = form.routeId.trim()
+    // 路由表没拿到时按「已在配置里」处理：逐字段写对两种情形都成立（不存在时逐字段写同样能
+    // 建出这条路由），而整对象 set 一旦猜错就把用户手写的 models / compat / retryPolicy 抹掉
+    var exists = props.routesKnown === false
+      ? true
+      : (props.existsOf === undefined ? false : props.existsOf(routeId) === true)
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
-      ops: [{ op: 'set', path: ['providers', form.routeId.trim()], value: profile }],
+      // 已存在的路由逐字段写（见 addRouteOps）：整对象 set 会把它手写的 models / compat /
+      // retryPolicy 一起抹掉
+      ops: addRouteOps(routeId, profile, exists),
     })
       .then(function () {
         // 只有手填了密钥才写凭据：OAuth 登录已经把凭据提交到凭据记录里（key 是
@@ -1168,6 +1290,10 @@ export function ProviderSettingsSection() {
   var setPresets = presetsState[1]
   var catTickState = react.useState(0)
   var setCatTick = catTickState[1]
+  // 模型清单保存后 +1：详情表要重新拉（而且要绕开宿主那 60 秒缓存），徽章/详情卡立刻跟着变
+  var detailsTickState = react.useState(0)
+  var detailsTick = detailsTickState[0]
+  var setDetailsTick = detailsTickState[1]
   var delState = react.useState({})
   var delConfirm = delState[0]
   var setDelConfirm = delState[1]
@@ -1289,7 +1415,7 @@ export function ProviderSettingsSection() {
   react.useEffect(
     function () {
       var cancelled = false
-      loadModelDetailMap()
+      loadModelDetailMap(detailsTick > 0)
         .then(function (map) {
           if (!cancelled) setDetailsById(map)
         })
@@ -1298,7 +1424,7 @@ export function ProviderSettingsSection() {
         cancelled = true
       }
     },
-    [],
+    [detailsTick],
   )
 
   // 刷新单个 provider 的余量（卡片上的 ↻ 按钮）：宿主实查并回传新账户，本地替换。
@@ -1455,6 +1581,34 @@ export function ProviderSettingsSection() {
       })
   }
 
+  /** 清理旧 pi-ai 副本与 npm 缓存（宿主侧按保留规则判断，正在用的那份不动）。 */
+  function prune() {
+    setBusy(true)
+    setNote('正在清理 ...')
+    postJson('/provider/prune')
+      .then(function (result) {
+        if (result.ok !== true) {
+          setNote('清理失败：' + String((result && result.error) || '未知错误'))
+        } else {
+          var count = Array.isArray(result.removed) ? result.removed.length : 0
+          // 没清掉的（缓存权限这类）也要说出来：只进宿主日志等于用户点了没反应
+          var warnings = Array.isArray(result.warnings) && result.warnings.length > 0
+            ? '；' + result.warnings.join('；')
+            : ''
+          setNote((count > 0
+            ? '已删除 ' + String(count) + ' 份旧版本，释放 ' + formatBytes(result.freedBytes)
+            : '没有可清理的版本（释放 ' + formatBytes(result.freedBytes) + '）') + warnings)
+        }
+        refresh(true)
+      })
+      .catch(function (cause) {
+        setNote('清理失败：' + String(cause && cause.message ? cause.message : cause))
+      })
+      .then(function () {
+        setBusy(false)
+      })
+  }
+
   /** 折叠态记忆：undefined 时回落到默认值（报警/错误的卡片默认展开）。 */
   function isOpen(key: string, dflt: boolean) {
     return openMap[key] === undefined ? dflt : openMap[key]
@@ -1474,11 +1628,14 @@ export function ProviderSettingsSection() {
   var bridge = status === null || status.bridge === undefined ? undefined : status.bridge
   var update = status === null || status.update === undefined ? undefined : status.update
   var oauthStatus = status === null || status.oauth === undefined ? undefined : status.oauth
+  var storage = status === null || status.storage === undefined ? undefined : status.storage
   // 桥接明细：放在「pi-ai 桥接」二级标签页里展示。行的内容由 piAiBridgeRows 给（纯函数，离线可测）
   var bridgeRows = piAiBridgeRows(bridge, update, oauthStatus)
+  // 磁盘占用行（issue #4）：不是「桥接状态」而是「它占了多少盘」，排在明细之后、动作按钮之前
+  var storageRows = piAiStorageRows(storage)
   var bridgeLines = []
-  for (var bi = 0; bi < bridgeRows.length; bi += 1) {
-    var row = bridgeRows[bi]
+  /** 一行明细：文本 + 右侧次要文字（title 挂在次要文字上）。 */
+  function detailLine(row: BridgeRow) {
     var children = [row.text]
     if (row.value !== undefined) {
       children.push(react.createElement(
@@ -1487,10 +1644,24 @@ export function ProviderSettingsSection() {
         row.value,
       ))
     }
-    bridgeLines.push(react.createElement(
+    return react.createElement(
       'div',
       { className: 'pv_line' + (row.bad === true ? ' plan_badText' : row.warn === true ? ' plan_warnText' : ''), key: row.key },
       children,
+    )
+  }
+  for (var bi = 0; bi < bridgeRows.length; bi += 1) bridgeLines.push(detailLine(bridgeRows[bi]))
+  for (var si = 0; si < storageRows.length; si += 1) bridgeLines.push(detailLine(storageRows[si]))
+  if (storageRows.length > 0) {
+    bridgeLines.push(react.createElement(
+      'div',
+      { className: 'pv_line', key: 'prune' },
+      '清理只删不会再被选中的旧版本与 npm 缓存，正在用的那份不动',
+      react.createElement(
+        'button',
+        { type: 'button', className: 'pv_action pv_push', disabled: busy, onClick: prune },
+        busy ? '处理中 ...' : '清理',
+      ),
     ))
   }
   // 上游那一行右侧跟按钮：检查更新（宿主先校验下载内容、再做兼容性体检，都过了才等重启生效）
@@ -1542,6 +1713,21 @@ export function ProviderSettingsSection() {
   var modelsByProvider: Record<string, CatalogModel[]> = {}
   for (var gi = 0; gi < catalogGroups.length; gi += 1) {
     modelsByProvider[catalogGroups[gi].id] = catalogGroups[gi].models
+  }
+  // 每条路由自己声明的模型清单（没声明就没有这个键 = 跟随 pi-ai 目录）：模型清单编辑器用它回显。
+  // 同时记下哪些是 llm-pi-ai 路由：清单只能写进 settings 的 llm-pi-ai 段，原生路由（llm-deepseek
+  // 这类）渲染编辑器只会让用户白编辑一场（保存必然被宿主拒掉）。
+  var declaredByRoute: Record<string, unknown> = {}
+  var piAiRoutes: Record<string, boolean> = {}
+  var statusRecord = status === null || status === undefined ? undefined : status as AnyRecord
+  // 路由表拿到了吗（没拿到就不对「这条是什么路由」「这条路由在不在」下结论）
+  var statusLoaded = statusRecord !== undefined && Array.isArray(statusRecord['routes'])
+  var statusRoutes = statusRecord !== undefined && Array.isArray(statusRecord['routes']) ? statusRecord['routes'] as unknown[] : []
+  for (var ri = 0; ri < statusRoutes.length; ri += 1) {
+    var routeEntry = statusRoutes[ri] as AnyRecord
+    if (typeof routeEntry['id'] !== 'string') continue
+    if (routeEntry['source'] === 'llm-pi-ai') piAiRoutes[routeEntry['id']] = true
+    if (routeEntry['models'] !== undefined) declaredByRoute[routeEntry['id']] = routeEntry['models']
   }
   var cards = []
   for (var i = 0; i < accounts.length; i += 1) {
@@ -1728,9 +1914,12 @@ export function ProviderSettingsSection() {
         var models = allModels === undefined
           ? undefined
           : allModels.filter(function (m) { return modelVisible(available, m.id, false) })
+        // 自己声明的清单：目录里没有这家（自建网关）时，模型区也得在——那份清单是唯一的信息源
+        var declared = declaredByRoute[account.id]
+        var declaredCount = Array.isArray(declared) ? declared.length : 0
         if (models === undefined) {
           bodyRows.push(react.createElement('div', { className: 'pv_line', key: 'm-load' }, '模型目录加载中…'))
-        } else if (models.length === 0) {
+        } else if (models.length === 0 && declaredCount === 0) {
           bodyRows.push(react.createElement('div', { className: 'pv_line', key: 'm-none' }, '目录里没有这个 provider 的模型'))
         } else {
           // 模型区（带外框）独立折叠：卡片展开时默认收起，点「模型（N）」头展开
@@ -1797,6 +1986,13 @@ export function ProviderSettingsSection() {
           mBoxRows.push(react.createElement('div', { className: 'pv_mTop', key: 'm-top' }, mTopChildren))
           if (modelsOpen) {
             var mListRows = []
+            if (models.length === 0) {
+              mListRows.push(react.createElement(
+                'div',
+                { className: 'pv_line', key: 'm-nodefault' },
+                '目录里没有这家 provider：模型清单由下面自己声明（自定义 id 记得填上下文与最大输出）',
+              ))
+            } else {
             // 列标题：与模型行同一套列宽类，保证严格对齐
             mListRows.push(
               react.createElement(
@@ -1815,8 +2011,34 @@ export function ProviderSettingsSection() {
                 mListRows.push(modelRow(filtered[m], account, detailsById))
               }
             }
+            }
             // 列表区：分割线上边缘贯穿模型框
             mBoxRows.push(react.createElement('div', { className: 'pv_mList', key: 'm-list' }, mListRows))
+            // 模型清单编辑器（issue #1）：官方 Models 页被禁用后，逐模型参数只能手改 settings.yaml，
+            // 这里给一条界面上的路：勾选/替换清单、改字段、写回 llm-pi-ai.providers.<id>.models。
+            // 只给 llm-pi-ai 路由：原生路由（deepseek-official 这类）不在这个设置段里，写了也不生效。
+            mBoxRows.push(piAiRoutes[account.id] === true
+              ? react.createElement(ModelListEditor, {
+                  key: 'm-editor',
+                  routeId: account.id,
+                  declared: declared,
+                  catalog: allModels === undefined ? [] : allModels,
+                  detailsById: detailsById,
+                  onSaved: function () {
+                    onProviderAdded()
+                    // 清单改了，能力详情也跟着变：重拉一次并绕开宿主缓存
+                    setDetailsTick(function (prev: number) { return prev + 1 })
+                  },
+                })
+              : statusLoaded !== true
+                // 路由表还没回来（/provider/status 失败或首次加载中）：不猜是哪种路由，
+                // 免得给一条 llm-pi-ai 路由挂上「这是内置原生路由」的错话
+                ? null
+                : react.createElement(
+                    'div',
+                    { className: 'pv_line pv_meNative', key: 'm-editor' },
+                    '这条是内置原生路由：模型清单不写在这套设置里，编辑清单只对 llm-pi-ai 路由有效',
+                  ))
           }
           bodyRows.push(react.createElement('div', { className: 'pv_mBox', key: 'mbox' }, mBoxRows))
         }
@@ -1914,46 +2136,55 @@ export function ProviderSettingsSection() {
                       '↻',
                     ),
                 account.deletable === true
-                  ? (delConfirm[account.id] === true
-                      ? react.createElement(
-                          'span',
-                          { className: 'pv_delBox' },
-                          react.createElement(
-                            'button',
-                            { type: 'button', className: 'pv_delYes', onClick: function () { removeProvider(account) } },
-                            '确认删除',
-                          ),
-                          react.createElement(
-                            'button',
-                            {
-                              type: 'button',
-                              className: 'pv_delNo',
-                              onClick: function () {
-                                setDelConfirm(function (prev: AnyRecord) {
-                                  return withKey(prev, account.id, false)
-                                })
-                              },
-                            },
-                            '取消',
-                          ),
-                        )
-                      : react.createElement(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'pv_iconBtn',
-                            title: '删除这个 provider',
-                            onClick: function () {
-                              setDelConfirm(function (prev: AnyRecord) {
-                                return withKey(prev, account.id, true)
-                              })
-                            },
-                          },
-                          '✕',
-                        ))
+                  ? react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'pv_iconBtn',
+                        title: '删除这个 provider（清掉路由与凭据，需要再确认一次）',
+                        onClick: function () {
+                          setDelConfirm(function (prev: AnyRecord) {
+                            return withKey(prev, account.id, true)
+                          })
+                        },
+                      },
+                      '✕',
+                    )
                   : null,
               ),
             ),
+            // 删除确认：**不与 ✕ 同位置**（连点两下第二下正好落在刚变成「确认删除」的那一格，
+            // 等于没有确认），改成卡片里单独一行，并把代价写清楚——整段 route 连带手写的
+            // models / compat / retryPolicy 一起没，凭据也一起清（issue #3）。
+            account.deletable === true && delConfirm[account.id] === true
+              ? react.createElement(
+                  'div',
+                  { className: 'pv_delConfirm', role: 'alert' },
+                  react.createElement(
+                    'span',
+                    { className: 'pv_delWarn' },
+                    deleteConfirmText(account),
+                  ),
+                  react.createElement(
+                    'button',
+                    { type: 'button', className: 'pv_delYes', onClick: function () { removeProvider(account) } },
+                    '确认删除',
+                  ),
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'pv_delNo',
+                      onClick: function () {
+                        setDelConfirm(function (prev: AnyRecord) {
+                          return withKey(prev, account.id, false)
+                        })
+                      },
+                    },
+                    '取消',
+                  ),
+                )
+              : null,
             ),
             // 箭头列：只在「标题+余量」区域垂直居中（分割线上方），点击展开/收起
             react.createElement(
@@ -2018,6 +2249,21 @@ export function ProviderSettingsSection() {
                 return addressFromCatalog(routeId, address) ? undefined : address
               }
               return undefined
+            },
+            // 这条 route 是不是已经在配置里：已存在时只逐字段写（保住手写的 models / compat /
+            // retryPolicy），不存在才整条新建。
+            // 三个来源都要查——只认额度快照时，/plan/status 拉不到（或自建路由不在预设列表里）
+            // 就会退回整条 set，把用户手写的配置一次抹掉（issue #1 那条提醒的原始形态）。
+            routesKnown: statusLoaded,
+            existsOf: function (routeId: string) {
+              if (piAiRoutes[routeId] === true) return true
+              for (var ei = 0; ei < accounts.length; ei += 1) {
+                if (accounts[ei].id === routeId) return true
+              }
+              for (var pi2 = 0; pi2 < presets.length; pi2 += 1) {
+                if (presets[pi2].id === routeId && presets[pi2].configured === true) return true
+              }
+              return false
             },
           }),
           cards,

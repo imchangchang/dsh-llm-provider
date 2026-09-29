@@ -14,11 +14,24 @@
  */
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { readdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
-import { bridgeRequirements, compareVersions, installedVersions, probePiAi, updateStatus, vendorDir } from './bridge.js'
+import {
+  activePiAiRoot,
+  activePiAiVersion,
+  bridgeRequirements,
+  compareVersions,
+  installedVersions,
+  piAiCandidates,
+  probePiAi,
+  readBridgeStatus,
+  removeLinkOrDir,
+  updateStatus,
+  vendorDir,
+} from './bridge.js'
 import { asRecord, readString, type AnyRecord, type Logger } from './types.js'
 
 const execFileAsync = promisify(execFile)
@@ -28,6 +41,16 @@ const REGISTRY = `https://registry.npmjs.org/${encodeURIComponent(PACKAGE).repla
 const VERSIONS_DIR = join(vendorDir, 'pi-ai')
 const STATE_FILE = join(vendorDir, 'updater-state.json')
 const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6 小时
+
+/**
+ * npm 缓存目录：放系统临时目录，**不放插件目录**。
+ *
+ * 早先放在 `vendor/.npm-cache`，实测一口气留 178 MB（issue #4）；用户默认的全局缓存又可能
+ * 因为 root 属主残留不可写，所以不能直接用全局那份。系统临时目录一定可写，插件目录不留垃圾。
+ */
+const NPM_CACHE_DIR = join(tmpdir(), 'dsh-llm-provider-npm-cache')
+/** 老版本留在插件目录里的 npm 缓存（装完/手动清理时删掉）。 */
+const LEGACY_NPM_CACHE_DIR = join(vendorDir, '.npm-cache')
 
 /** 一次检查 + 更新的结果（/provider/update 的响应体）。 */
 export interface UpdateResult {
@@ -111,7 +134,9 @@ export async function installVersion(release: RegistryRelease, log: (line: strin
     log(`${version} 已就位，跳过下载`)
     return target
   }
-  rmSync(target, { force: true, recursive: true })
+  // 用 removeLinkOrDir 而不是裸 rmSync：这个目录万一被手工做成了软链/junction（拿本地
+  // checkout 试版本这类用法），Node 24.15+ 的递归删会把链目标的内容一起删掉（见 bridge.ts）
+  removeLinkOrDir(target, VERSIONS_DIR)
   mkdirSync(target, { recursive: true })
 
   const tgzPath = join(tmpdir(), `pi-ai-${version}-${Date.now()}.tgz`)
@@ -137,18 +162,24 @@ export async function installVersion(release: RegistryRelease, log: (line: strin
   rmSync(tgzPath, { force: true })
 
   log('安装依赖（--omit=dev --ignore-scripts）...')
-  // 用插件本地缓存：用户默认缓存可能因权限问题（root 属主残留）不可写，不该让它挡住更新
-  const npmCache = join(vendorDir, '.npm-cache')
-  mkdirSync(npmCache, { recursive: true })
+  // 缓存放系统临时目录（见 NPM_CACHE_DIR）：插件目录里那份 178 MB 的缓存就是这么来的
+  mkdirSync(NPM_CACHE_DIR, { recursive: true })
   const npm = npmCommand([
     'install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error',
-    `--cache=${npmCache}`,
+    `--cache=${NPM_CACHE_DIR}`,
   ])
   await execFileAsync(npm.file, npm.args, {
     cwd: target,
     timeout: 300_000,
     ...(npm.shell ? { shell: true } : {}),
   })
+  // 只清**老版本留在插件目录里**的那份缓存（issue #4 的 178 MB）：系统临时目录那份是这次
+  // 安装刚写进去的，删了下次就全冷下载——它由「清理」按钮与保留策略负责，不在这里动
+  try {
+    removeLinkOrDir(LEGACY_NPM_CACHE_DIR, dirname(LEGACY_NPM_CACHE_DIR))
+  } catch (error) {
+    log(`清理老 npm 缓存失败：${error instanceof Error ? error.message : String(error)}`)
+  }
   return target
 }
 
@@ -157,6 +188,8 @@ export async function installVersion(release: RegistryRelease, log: (line: strin
  * @param log - 进度输出。
  * @param activeVersion - 当前正在用的 pi-ai 版本（可能来自 dsh 自带那份）。已经不比上游旧时
  *   不再下载——否则像 dsh 自带 0.85.1、上游也是 0.85.1 的情况下会白下一份一模一样的。
+ *   缺省时自己从生效目录读一次（{@link activePiAiVersion}）：手动「检查更新」以前不传这个参数，
+ *   于是点一次就白下 80 MB 的同版本副本（issue #4）。
  */
 export async function checkAndUpdate(
   log: (line: string) => void = () => {},
@@ -173,8 +206,9 @@ export async function checkAndUpdate(
   try {
     const release = await latestRelease()
     result.latest = release.version
-    if (activeVersion !== undefined && compareVersions(release.version, activeVersion) <= 0) {
-      log(`当前已在 ${activeVersion}（上游 ${release.version}），无需下载`)
+    const active = activeVersion ?? activePiAiVersion()
+    if (active !== undefined && compareVersions(release.version, active) <= 0) {
+      log(`当前已在 ${active}（上游 ${release.version}），无需下载`)
       return result
     }
     const have = installedVersions()
@@ -202,6 +236,11 @@ export async function checkAndUpdate(
       updateStatus({ latestVersion: release.version, latestRejected: { version: release.version, error: reason } })
       log(`${release.version} 未通过验证，已跳过（不会切过去）：${String(reason)}`)
     }
+    // 装完顺手清理：不会再被选中的重复副本 + 旧版本（保留规则见 pruneVersions）
+    const pruned = pruneVersions(1, log)
+    if (pruned.removed.length > 0) {
+      log(`清理旧版本：${pruned.removed.map((entry) => `${entry.version}（${entry.reason}）`).join('、')}`)
+    }
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error)
     log(`更新失败：${result.error}`)
@@ -209,6 +248,269 @@ export async function checkAndUpdate(
     writeState({ lastCheck: result.checkedAt })
   }
   return result
+}
+
+/** 目录占用的递归统计（不用 fs.stat 的 size 直接加：目录本身不算，也不跟软链）。 */
+function dirSize(path: string): number {
+  let entries
+  try {
+    entries = readdirSync(path, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let total = 0
+  for (const entry of entries) {
+    const child = join(path, entry.name)
+    if (entry.isDirectory()) total += dirSize(child)
+    else if (entry.isFile()) {
+      try {
+        total += statSync(child).size
+      } catch { /* 文件刚没了：跳过 */ }
+    }
+  }
+  return total
+}
+
+/** 插件在磁盘上的开销（「pi-ai 桥接」标签页显示，清理按钮据此报省了多少）。 */
+export interface VendorUsage {
+  /** vendor/ 整个目录的占用（下载的版本、桥接副本、兜底依赖树、老 npm 缓存）。 */
+  vendorBytes: number
+  /** vendor/ 下已下载的 pi-ai 版本，逐个列出来。 */
+  downloads: { version: string, bytes: number }[]
+  /** 系统临时目录里的 npm 缓存（更新依赖用，删了只影响下次装依赖的速度）。 */
+  cacheBytes: number
+  /** 老版本留在插件目录里的 npm 缓存；清理按钮会删掉它。 */
+  legacyCacheBytes: number
+}
+
+export function vendorUsage(): VendorUsage {
+  return {
+    vendorBytes: dirSize(vendorDir),
+    downloads: installedVersions().map((version) => ({ version, bytes: dirSize(join(VERSIONS_DIR, version)) })),
+    cacheBytes: dirSize(NPM_CACHE_DIR),
+    legacyCacheBytes: dirSize(LEGACY_NPM_CACHE_DIR),
+  }
+}
+
+/** {@link dirSize} 的异步版：`/provider/status` 走这条，别让递归 statSync 卡住宿主事件循环。 */
+async function dirSizeAsync(path: string): Promise<number> {
+  let entries
+  try {
+    entries = await readdir(path, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let total = 0
+  for (const entry of entries) {
+    const child = join(path, entry.name)
+    if (entry.isDirectory()) total += await dirSizeAsync(child)
+    else if (entry.isFile()) {
+      try {
+        total += (await stat(child)).size
+      } catch { /* 文件刚没了：跳过 */ }
+    }
+  }
+  return total
+}
+
+/**
+ * {@link vendorUsage} 的非阻塞版（宿主里用这个）。
+ *
+ * 同一批目录，`vendor/` 实测两万多个文件，同步递归一次要 300 ms 上下——放在 HTTP handler 里
+ * 就是整个宿主停 300 ms。这里逐个 await，等待期间事件循环照常跑。
+ */
+export async function vendorUsageAsync(): Promise<VendorUsage> {
+  const downloads: { version: string, bytes: number }[] = []
+  for (const version of installedVersions()) {
+    downloads.push({ version, bytes: await dirSizeAsync(join(VERSIONS_DIR, version)) })
+  }
+  return {
+    vendorBytes: await dirSizeAsync(vendorDir),
+    downloads,
+    cacheBytes: await dirSizeAsync(NPM_CACHE_DIR),
+    legacyCacheBytes: await dirSizeAsync(LEGACY_NPM_CACHE_DIR),
+  }
+}
+
+/** 清理结果：删了哪些、留了哪些、释放了多少字节、有没有没清掉的。 */
+export interface PruneResult {
+  removed: { version: string, reason: string }[]
+  kept: string[]
+  freedBytes: number
+  /** 没删掉的（版本或缓存）：失败原因写在这里，界面要看得见，不能只进日志。 */
+  warnings?: string[]
+}
+
+/**
+ * 保留规则（纯函数，离线可测——删目录这件事得能先算清楚再动手）。
+ *
+ * 从强到弱：
+ *   1. **正在用的那份**与「已下载、等重启生效」的那版（protectedVersions）绝不删；
+ *   2. 版本**不高于**本机已有的最好那份（dsh 自带 / 兜底依赖，含同名版本）的删掉——
+ *      候选排序已经不会再选中它（见 piAiCandidates 的 tie-break），留着只是 80 MB 级重复副本；
+ *   3. 其余（比本机新的）只留最新 `keep` 份（默认 1）——多留的那份是回滚余地：新版本万一在运行期
+ *      出问题，旧的那份还在，删掉软链就能退回去。
+ *
+ * @param versions - vendor/pi-ai/ 下已就位的版本（任意顺序）。
+ * @param bestLocal - 本机非下载档里最高的版本号；都没有则 undefined（跳过规则 2）。
+ * @param protectedVersions - 正在用 / 等重启生效的版本号。
+ * @param keep - 比本机新的那些保留几份。
+ */
+export function planPrune(
+  versions: readonly string[],
+  bestLocal: string | undefined,
+  protectedVersions: readonly string[],
+  keep = 1,
+): { remove: { version: string, reason: string }[], keep: string[] } {
+  const protectedSet = new Set(protectedVersions)
+  const remove: { version: string, reason: string }[] = []
+  const protectedSurvivors: string[] = []
+  const trimmable: string[] = []
+  for (const version of versions) {
+    if (protectedSet.has(version)) {
+      protectedSurvivors.push(version)
+      continue
+    }
+    if (bestLocal !== undefined && compareVersions(version, bestLocal) <= 0) {
+      remove.push({ version, reason: `不高于本机已有的 ${bestLocal}，重复副本` })
+      continue
+    }
+    trimmable.push(version)
+  }
+  // 「留最新 keep 份」只在非保护的版本之间收敛：正在用/待生效的那版永远不因为条数被挤掉
+  const sorted = [...trimmable].sort(compareVersions)
+  const extra = sorted.slice(0, Math.max(0, sorted.length - keep))
+  for (const version of extra) remove.push({ version, reason: `只保留最新 ${keep} 份` })
+  const kept = [...protectedSurvivors, ...sorted.slice(extra.length)].sort(compareVersions)
+  return { remove, keep: kept }
+}
+
+/**
+ * 清理 vendor/pi-ai/ 里的旧版本与 npm 缓存（issue #4 的保留策略，规则见 {@link planPrune}）。
+ *
+ * @param keep - 比本机新的那些保留几份。
+ */
+export function pruneVersions(keep = 1, log?: (line: string) => void): PruneResult {
+  const status = readBridgeStatus()
+  const protectedVersions: string[] = []
+  const active = activePiAiRoot()
+  if (active !== undefined) {
+    // 生效目录落在 vendor/pi-ai/<版本>/ 里时，把那个版本号标成「正在用」
+    const versionsDir = resolve(VERSIONS_DIR)
+    const resolved = resolve(active)
+    if (resolved.startsWith(versionsDir + sep)) {
+      const version = resolved.slice(versionsDir.length + sep.length).split(/[\\/]/)[0]
+      if (version !== undefined && version !== '') protectedVersions.push(version)
+    }
+  }
+  if (status['needsRestart'] === true) {
+    const pending = readString(status['piAiVersion'])
+    if (pending !== undefined && pending !== '') protectedVersions.push(pending)
+  }
+  return applyPrune({
+    versionsDir: VERSIONS_DIR,
+    cacheDirs: [LEGACY_NPM_CACHE_DIR, NPM_CACHE_DIR],
+    installed: installedVersions(),
+    bestLocal: bestLocalVersion(),
+    protectedVersions,
+    keep,
+    ...(log === undefined ? {} : { log }),
+  })
+}
+
+/** 本机已有的那份最好版本（dsh 自带 / 兜底依赖）——「重复副本」就是这么判的。 */
+function bestLocalVersion(): string | undefined {
+  let best: string | undefined
+  for (const candidate of localCandidates()) {
+    if (best === undefined || compareVersions(candidate, best) > 0) best = candidate
+  }
+  return best
+}
+
+/**
+ * 本机两份非下载档（dsh 自带 / 兜底依赖）里**真正能用**的版本号。
+ *
+ * 为什么必须体检过才算：这条版本号是「重复副本」的判定门槛。兜底依赖装了一半（依赖被删、
+ * 目录在但加载不了）却版本号很高时，用它当门槛会把一份**能用的**下载档判成重复副本删掉，
+ * 运行时反而退到更旧的 dsh 自带那份。体检只跑本机这两档（候选顺序仍由 loadBridge 逐个
+ * 体检决定，不需要在这里为所有下载档付体检开销），结果靠 ESM 缓存，重复调用几乎不花时间。
+ *
+ * @returns 版本号列表；读不出、目录不在、体检不过的都不算。
+ */
+function localCandidates(): string[] {
+  const versions: string[] = []
+  const requirements = bridgeRequirements()
+  for (const candidate of piAiCandidates()) {
+    if (candidate.key !== 'dsh' && candidate.key !== 'dependency') continue
+    if (!existsSync(join(candidate.root, 'package.json'))) continue
+    if (!/^\d+(\.\d+)*$/.test(candidate.version)) continue
+    const probe = probePiAi(requirements, candidate.root, `prune-${candidate.key}`)
+    // 体检没跑成（unverified）不算数：门槛宁可低一点，也别拿一份没验证过的本机档去删下载档
+    if (!probe.ok || probe.unverified === true) continue
+    versions.push(candidate.version)
+  }
+  return versions
+}
+
+/** 一次清理的输入（路径都显式传进来，离线测试才能拿临时目录跑真删）。 */
+export interface PruneRequest {
+  /** 下载档所在目录。 */
+  versionsDir: string
+  /** 要一并清掉的 npm 缓存目录（纯缓存，删了只影响下次装依赖的速度）。 */
+  cacheDirs?: readonly string[]
+  /** 已就位的下载版本。 */
+  installed: readonly string[]
+  /** 本机非下载档里最高的版本号；没有（读不出/体检不过）则跳过「重复副本」这条规则（偏保守：不误删）。 */
+  bestLocal: string | undefined
+  /** 正在用 / 等重启生效的版本号（绝不删）。 */
+  protectedVersions: readonly string[]
+  /** 比本机新的那些保留几份。 */
+  keep?: number
+  /** 失败留痕（默认丢弃）。 */
+  log?: (line: string) => void
+}
+
+/**
+ * 执行一次清理：算（{@link planPrune}）→ 删 → 报释放了多少。
+ *
+ * 删目录是不可逆动作，所以规则与执行分开：这里只管照着计划删，路径全部由 {@link PruneRequest}
+ * 给，离线测试可以拿临时目录完整跑一遍（缓存删不掉这种 bug 就是靠这条路径测出来的——
+ * 缓存目录在系统临时目录里，不在 vendor/ 底下，用 vendor/ 当归档根会被拒绝）。
+ */
+export function applyPrune(request: PruneRequest): PruneResult {
+  const log = request.log ?? (() => {})
+  const versionsDir = request.versionsDir
+  const cacheDirs = request.cacheDirs ?? []
+  const plan = planPrune(request.installed, request.bestLocal, request.protectedVersions, request.keep ?? 1)
+  const sizeOf = (): number =>
+    dirSize(versionsDir) + cacheDirs.reduce((total, dir) => total + dirSize(dir), 0)
+  const before = sizeOf()
+  for (const entry of plan.remove) {
+    try {
+      removeLinkOrDir(join(versionsDir, entry.version), versionsDir)
+    } catch (error) {
+      entry.reason += `（删除失败：${error instanceof Error ? error.message : String(error)}）`
+      log(`删除 ${entry.version} 失败：${entry.reason}`)
+    }
+  }
+  const warnings: string[] = []
+  for (const cacheDir of cacheDirs) {
+    // 缓存的允许根是它自己的父目录：缓存可能整个在插件目录外（系统临时目录那份），
+    // 拿 vendor/ 当根会把「拒绝越界」抛出来、被静默吞掉，缓存永远清不掉
+    try {
+      removeLinkOrDir(cacheDir, dirname(cacheDir))
+    } catch (error) {
+      const message = `清理缓存 ${cacheDir} 失败：${error instanceof Error ? error.message : String(error)}`
+      warnings.push(message)
+      log(message)
+    }
+  }
+  return {
+    removed: plan.remove,
+    kept: plan.keep,
+    freedBytes: Math.max(0, before - sizeOf()),
+    ...(warnings.length === 0 ? {} : { warnings }),
+  }
 }
 
 /**

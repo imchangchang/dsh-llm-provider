@@ -9,7 +9,7 @@
  * 新模型没有 reasoning 元数据时面板显示空态 +「知道了」按钮提交无档位后关闭。
  */
 import react from 'react'
-import { accountsById, findModel, loadModelCatalog, loadModelDetailMap, loadPlanStatus, normalizeGroups, onPlanChange, selectionCell, submitSelection, unwrap, usePolledSnapshot } from './data.js'
+import { accountsById, detailOf, findModel, loadModelCatalog, loadModelDetailMap, loadPlanStatus, normalizeGroups, onPlanChange, selectionCell, submitSelection, unwrap, usePolledSnapshot } from './data.js'
 import { recordDiagnostic } from './diag.js'
 import { defaultEffortOf, dotClass, effortLabel, formatContext, fuzzyMatch, modelVisible, quotaShortOf, quotaTipOf, reasoningTextOf, toneColor, worstPercent } from './format.js'
 import { caretSvg, checkSvg, chevronRightSvg } from './icons.js'
@@ -653,7 +653,7 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
             var isCurrent = selection !== undefined && selection !== null
               && selection.provider === g.id && selection.model === model.id
             if (modelVisible(avail, model.id, isCurrent) !== true) return
-            var detail = detailsById[model.id]
+            var detail = detailOf(detailsById, g.id, model.id)
             var caps = []
             if (detail !== undefined) {
               if (detail.vision === true) caps.push(react.createElement('span', { key: 'v', className: 'pv_capMini pv_capVision' }, '视觉'))

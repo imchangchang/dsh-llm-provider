@@ -69,7 +69,9 @@ Providers come from `llm-pi-ai.providers` in `settings.yaml`. With no route ther
 
 pi-ai updates are triggered two ways: once in the background at plugin startup (throttled to 6 hours, `DSH_PROVIDER_UPDATE=off` disables it) and by the 「检查更新」 button on the provider page (`POST /provider/update`).
 
-Either way, **nothing is replaced before it passes both checks**: the tarball integrity from the registry (`dist.integrity`) and the compatibility check. Only then is the new version marked as pending a restart, and a version you already run is not downloaded again. pi-ai versions take effect only after a dsh restart, because the bridge is loaded at process start.
+Either way, **nothing is replaced before it passes both checks**: the tarball integrity from the registry (`dist.integrity`) and the compatibility check. Only then is the new version marked as pending a restart, and a version you already run is not downloaded again — the manual "check for updates" button compares against the version in use first. pi-ai versions take effect only after a dsh restart, because the bridge is loaded at process start.
+
+A downloaded pi-ai costs around 80 MB, so only versions **newer than the one dsh ships with** are kept: a duplicate at the same version or older is removed after an install, and the npm cache lives in the system temp directory (`<tmpdir>/dsh-llm-provider-npm-cache`) instead of the plugin directory. The "pi-ai bridge" tab shows the current footprint (`vendor/` total plus npm cache) next to a "clean up" button (`POST /provider/prune`) that removes versions that can no longer be selected and the cache; the version in use and any version already downloaded and waiting for a restart are left alone.
 
 ### Test instance
 
@@ -86,11 +88,11 @@ The test instance uses a separate profile, so instances can run side by side: `P
 node lib/adapters/run.js all            # run every quota adapter (keys from env or ~/.dsh/.credentials.yaml)
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # build + 7 offline tests; this is what finishing and merging run
+npm test                                # build + 12 offline tests; this is what finishing and merging run
 npm run typecheck                       # tsc --noEmit (npm test does not include it)
 ```
 
-The seven tests cover route discovery, the credential check, the patch layer, the pi-ai check, the provider preset list, the vendor state merge, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
+The 12 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the multi-source merge of model capabilities, the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
 
 ## Implementation
 
@@ -116,6 +118,8 @@ Which pi-ai gets used is decided by the [compatibility check](#compatibility-che
 
 Sources that are not installed are skipped silently. A source is only listed as skipped, with a reason, when it exists but fails the compatibility check. The pi-ai that ships with dsh follows dsh's own release cycle and is not necessarily older than upstream.
 
+A duplicate at the same version never takes the hot-update slot: a downloaded version that is not newer than the best local source (dsh's own copy, the pinned dependency) is ordered after both local sources — it is the same code, so the local copy is reused and the 80 MB duplicate plus a needless restart are avoided. Only a strictly newer version sorts first.
+
 Neither of the last two directories is hardcoded. The official bundle is resolved along the module resolution chain in this order: the profile's `node_modules`, the dsh installation tree (including the `node_modules` nested inside the dsh package), then this plugin. pi-ai is resolved the same way, starting from the bundle that was found. A different dsh layout (bundle inside its own install directory, dependencies hoisted elsewhere) therefore does not make a source disappear.
 
 `vendor/package.json` pins the version of the optional dependency, and the two do not overwrite each other: updates only ever write to `vendor/pi-ai/<new version>/`. Both live under `vendor/` because the bridge copy at `vendor/llm-bridge/` resolves upwards into `vendor/node_modules` first, so choosing that source needs no link.
@@ -137,7 +141,7 @@ Takes over the composer's `conversation.input.model` slot and the `/model` comma
 - The current selection is the session's own record when there is one, and the catalog default otherwise. The default effort is the `defaultEffort` the catalog declares; when it declares none, the official `Default` label is shown.
 - Switching models **forces a level pick**: choosing a new model no longer closes the menu — it jumps to the effort panel so you confirm a level (with `Default` among the choices; the already-checked level is clickable too — that click *is* the confirmation). The initially selected level is inherited from the previous one: a direct hit on the new model's level table reuses it, otherwise the index is mapped proportionally through interval centres (5-level #3 → 3-level #2). A new model without reasoning metadata shows an empty state with an "OK" button that submits a level-less selection.
 - A session recorded before this plugin may name the official `deepseek-official` route, which no longer exists. That selection is mapped to its current route (`deepseek`) for display and quota, and the seat rewrites the session's record once — the host refuses to send a prompt while the recorded provider has no adapter. The rewrite only happens when the target route and model are both in the catalog.
-- Extras: provider filter chips with quota dots, cross-provider search (substring, acronym, edit distance), capability badges, context labels, and a model detail card.
+- Extras: provider filter chips with quota dots, cross-provider search (substring, acronym, edit distance), capability badges, context labels, and a model detail card. Details are looked up by `provider + id` (the same model id belongs to several providers and a bare-id index mixes them up); when none of the three sources has an answer no badge is shown, the detail card says the capability is unknown and names the source it did use.
 - **Models are filtered by the account's entitlement list.** Pi-ai records which models an account may use in the credential at sign-in (`availableModelIds`); the host exposes it as `availableModels` on `/plan/status` and both the picker and the card filter by it. The static catalog and the entitlement are different things — the Copilot catalog lists 28 models while one account may only use 6, and picking outside the list earns a 400 `model_not_supported`. The currently selected model stays listed even when it falls outside, so it never looks like it vanished.
 - The quota indicator on the trigger reads the same snapshot as the provider cards and shows the tightest window's percentage; the card lists every window separately.
 - When space runs out, the provider segment is hidden first and the model name is truncated last; effort and quota never shrink. Below a composer width of 760px the provider segment is hidden, below 620px the quota drops to a dot. The pill is capped at `min(560px, 60cqw)`, and the full name is always in its `title`.
@@ -147,10 +151,11 @@ Takes over the composer's `conversation.input.model` slot and the `/model` comma
 Adds a 「模型服务」 tab to the settings page (the official `ui-settings-models` entry is disabled), with two sub-tabs: 「服务商」 and 「pi-ai 桥接」.
 
 - Cards follow the official PluginCard: status dot, name, website link, one line of quota summary (`5h: 84% ◷ 3h7m ｜ 7d: 30% ◷ 3d20h`), and refresh time, per-card refresh and delete on the right. The expanded body shows the route configuration (route ID, masked key, credential name, plus the API base URL and protocol — the protocol appears only when the route declares one, while an empty address shows the catalog default endpoint) and that provider's model list with filtering and a detail card.
-- Adding a provider: pick a preset → enter key and endpoint (presets that ship an OAuth flow offer a sign-in button instead, writing to the same credential store) → a live test must pass before it is written. Writes go to `llm-pi-ai.providers` via `settings/mutate` and to the credential store via `credentials/set`, the same storage the official page uses.
+- Adding a provider: pick a preset → enter key and endpoint (presets that ship an OAuth flow offer a sign-in button instead, writing to the same credential store) → a live test must pass before it is written. Writes go to `llm-pi-ai.providers` via `settings/mutate` and to the credential store via `credentials/set`, the same storage the official page uses. When the route **already exists**, only the fields the form owns are written (`baseURL`, `apiKeyEnv`, and `api` for a custom gateway); hand-written `models`, `compat` and `retryPolicy` are left alone, because a whole-object `set` in dsh-settings replaces the entry.
 - Adding a key: when a route exists but has no credential, that row in the card body is an input field (the official Models page is disabled, so this is the only place to enter it). Saving it runs a live quota query immediately. Such providers are labelled 「缺密钥」 in the add-provider list rather than 「已配置」, so they stay selectable.
-- Removing: clears the route and the credential. Built-in native routes cannot be removed here.
-- The 「pi-ai 桥接」 sub-tab shows the current version and source, skipped candidates with reasons, the upstream version and the update button.
+- Removing: clears the route and the credential. Built-in native routes cannot be removed here. The confirmation is its own row and spells out which route goes, whether the credential goes with it, and that hand-written configuration is not recoverable — the button used to share the ✕ slot, so a double click landed the second click on the freshly rendered "confirm".
+- Model list: under 「模型（N）」 in an expanded card, each row can be edited (tick, change fields, replace the whole list, or go back to following the catalog) and saved to `llm-pi-ai.providers.<id>.models`; details and limits are in [Known gaps](#known-gaps).
+- The 「pi-ai 桥接」 sub-tab shows the current version and source, skipped candidates with reasons, the disk footprint with a clean-up button, the upstream version and the update button.
 
 ### Quota adapters
 
@@ -189,9 +194,10 @@ The host compares keys while resolving them for each provider and warns in the U
 | Route | Purpose |
 |---|---|
 | `GET /plan/status` | quota snapshot for every provider (60s cache, `?refresh=1` bypasses it) |
-| `GET /provider/status` | bridge status, route table, update status, test-instance flag |
+| `GET /provider/status` | bridge status, route table, update status, disk footprint, test-instance flag |
 | `POST /provider/update` | trigger one upstream check and update |
-| `GET /provider/models` | full pi-ai model metadata (60s cache; used by detail cards and capability badges) |
+| `POST /provider/prune` | remove pi-ai versions that can no longer be selected and the npm cache (the one in use or pending a restart is untouched) |
+| `GET /provider/models` | model metadata merged from three sources: `input` declared by the route → the pi-ai catalog → adapter self-report (`listModels`/`resolveModelInfo`, only for providers the catalog does not cover, with per-call and total timeouts). 60s cache (`?fresh=1` bypasses it); used by detail cards and capability badges |
 | `GET /provider/presets` | provider presets available for adding (with configured flags) |
 | `POST /provider/refresh` | refresh one card's quota (live query, updates the global snapshot) |
 | `POST /provider/remove` | remove a provider (route and credential) |
@@ -227,7 +233,7 @@ Dependencies are installed with `scripts/install-deps.sh`, not `npm install` dir
 - **Never modifies official plugins.** Takeover happens by disabling official entries in `cordis.patch.yml` (`llm-pi-ai`, `llm-deepseek`, `ui-model-selection`, `ui-settings-models`); everything else official is untouched. The plugin's own model seat registers with `priority: -10`, which is what would shadow an official occupant at the same slot.
 - **Key values never leave the host process.** The browser half receives conclusions and metadata only (a mask of the first 3 and last 4 characters).
 - **No browser session (cookies) is required.** OAuth runs a device-code flow: the plugin hands the verification URL and code to the UI, the human authorises on any device, and the credential stays in dsh's credential store — the browser half never sees a token.
-- **The web server has no authentication** (dsh's design; it binds to loopback by default). These routes assume loopback-only reachability: exposing the host on `0.0.0.0` exposes balances and credential names through `/plan/status`.
+- **The web server has no authentication** (dsh's design; it binds to loopback by default). These routes assume loopback-only reachability: exposing the host on `0.0.0.0` exposes balances and credential names through `/plan/status`. A production Desktop instance additionally requires a token at the host layer (403 without one), while an isolated instance started with `dsh web --port <port> --no-open` has no such layer — measured on the same port, `/plan/status`, `/provider/status` and `/provider/presets` answer 200 without a token, so "loopback only" is a weaker assumption under that startup mode.
 
 ## Effect on model requests
 
@@ -249,11 +255,13 @@ Honest notes (not verified / not implemented):
 
 Capabilities the official entries have that this plugin does not:
 
-- **Per-model list editing.** `ModelListEditor`, `DeepSeekModelsEditor` and `CustomProviderCard` are not available; per-model parameters have to be edited by hand in `llm-pi-ai.providers.<id>` in `settings.yaml`.
+- **Per-model list editing has a generic replacement only.** Under 「模型（N）」 in an expanded card there is an "edit list" panel (`src/client/model-editor.ts`): tick the models to expose, or replace the whole list with a custom one, editing `id` / `name` / `contextWindow` / `maxTokens` / `input` (text, image, video) / `reasoningEfforts` / `compat.thinkingFormat` per row and saving back to `llm-pi-ai.providers.<id>.models`. Differences from the official editor: the official one builds per-provider forms from a schema, this is one generic table; in configuration `reasoningEfforts` is a `{level: wire value}` map, written here as text such as `low,high=max` (empty = inherit the installed pi-ai catalog, `false` = no reasoning). Rows are validated before saving (empty ids, duplicates, non-positive integers and unknown levels are refused), because the host parses the list strictly and one bad entry makes the whole route unusable. The panel shows up for `llm-pi-ai` routes only — a native route's models do not live in that settings section — and `input` is written only when the capability was actually resolved or the user touched the checkbox, so saving before the details arrive cannot pin a placeholder `text` over the catalog's vision capability.
 - **"Current model not routable" greying.** The official `ui-model-selection` greys out the composer when the current model cannot be routed. With that entry disabled, the input stays active even when the current provider is not configured.
 - **Official onboarding.** The DeepSeek onboarding flow of the Models page has no replacement.
 
 Not implemented yet:
+
+- **A dead bridge is only reported locally.** When every candidate fails (corrupt directory, permissions, an upstream export rename) the plugin falls back to "billing only", the four official entries stay disabled by the patch and the model list goes empty; the only signal is one error row in the "pi-ai bridge" tab (`bridge.active === false`), with nothing near the composer. A global banner would make this obvious at a glance; it is not implemented.
 
 - A sidebar entry and a global quota badge via `shell.overlay`.
 - Live usage and failure attribution inside a session (reading usage from `llm/stream` and `session/event`, and quota/rate-limit failure codes from `llm/retry`). Quota data is polled from endpoints, which answers "how much is left on the account", not "what did this request cost and why did it fail".
@@ -296,15 +304,15 @@ Boundaries:
 |---|---|
 | `src/index.ts` | host entry: mounts the bridge, registers the HTTP routes |
 | `src/bridge.ts` | bridge loading: copy the bundle, pick pi-ai through the check, manage links; `hostPackageEntry()` resolves official packages through the host anchors |
-| `src/updater.ts` | upstream updater: check the registry, verify the tarball, install, mark pending |
+| `src/updater.ts` | upstream updater: check the registry, verify the tarball, install, mark pending, prune old versions and caches, report disk usage |
 | `src/routes.ts` | route discovery, website links, display name fallback |
 | `src/provider-presets.ts` | preset list for adding a provider (generated from the pi-ai catalog plus Custom Gateway); marks OAuth-only providers |
 | `src/oauth.ts` | OAuth sign-in bridge: mounts the `authorization` service the official bundles never mount, and exposes its flows to the browser (5 HTTP routes + SSE) |
-| `src/model-details.ts` | model details: read the providers data files of the active pi-ai package |
+| `src/model-details.ts` | model details and capabilities: read the providers data files of the active pi-ai package, then merge the route's declared `input` and the adapter's self-reported modalities (indexed by `provider + id`) |
 | `src/pi-ai-names.ts` | read names from the pi-ai registry (the source of display names) |
 | `src/credential-check.ts` | credential check |
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
-| `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
+| `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `model-editor` (model list editor) · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | nine offline tests (no dsh, no services) |
+| `test/*.mjs` | 12 offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

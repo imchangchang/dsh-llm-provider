@@ -90,14 +90,65 @@ export function loadProviderStatus() {
 /** 桥接状态拿不到时的占位：设置页据此渲染错误行，界面不至于空着。 */
 export var STATUS_UNAVAILABLE = { bridge: { active: false, error: '宿主端状态不可用' } }
 
-/** 模型详情（生效 pi-ai 包的全量元数据），按模型 id 建索引：悬浮详情卡与能力徽章共用。 */
-export function loadModelDetailMap(): Promise<Record<string, ModelDetail>> {
-  return getJson('/provider/models').then(function (payload) {
-    var map: Record<string, ModelDetail> = {}
-    if (payload === null || payload === undefined || !Array.isArray(payload.models)) return map
-    for (var i = 0; i < payload.models.length; i += 1) map[payload.models[i].id] = payload.models[i]
-    return map
+/**
+ * 模型详情（生效 pi-ai 包 + route 声明 + 适配器自报），按 `provider + id` 建索引：
+ * 悬浮详情卡与能力徽章共用。
+ * @param fresh - true 时绕开宿主那 60 秒缓存（刚改完模型清单，徽章要立刻跟着变）。
+ */
+export function loadModelDetailMap(fresh?: boolean): Promise<Record<string, ModelDetail>> {
+  return getJson('/provider/models' + (fresh === true ? '?fresh=1' : '')).then(function (payload) {
+    return buildDetailMap(payload === null || payload === undefined ? undefined : (payload as AnyRecord).models)
   })
+}
+
+/** 详情索引的主键：provider + 模型 id。 */
+export function detailKeyOf(provider: unknown, id: unknown): string {
+  return String(provider === undefined || provider === null ? '' : provider) + '\u0000' + String(id === undefined || id === null ? '' : id)
+}
+
+/**
+ * /provider/models 的下发 → 索引表（纯函数，离线可测）。
+ *
+ * 主键是 `provider + id`：同名模型跨 provider 很常见（实测 `claude-opus-5` 同时属 anthropic 与
+ * cloudflare-ai-gateway），裸 id 建索引会被后读到的那份顶掉，徽章就串家了（issue #5）。
+ * 裸 id 只在**全局唯一**时留一条兜底，给那些不带 provider 的旧调用点用。
+ * @param models - 下发里那个 models 数组。
+ */
+export function buildDetailMap(models: unknown): Record<string, ModelDetail> {
+  var map: Record<string, ModelDetail> = {}
+  if (!Array.isArray(models)) return map
+  var list: ModelDetail[] = []
+  var counts: Record<string, number> = {}
+  for (var i = 0; i < models.length; i += 1) {
+    var detail = models[i] as ModelDetail
+    if (detail === null || detail === undefined || typeof detail !== 'object') continue
+    var id = detail.id === undefined || detail.id === null ? '' : String(detail.id)
+    if (id === '') continue
+    list.push(detail)
+    map[detailKeyOf(detail.provider, id)] = detail
+    counts[id] = (counts[id] === undefined ? 0 : counts[id]) + 1
+  }
+  for (var j = 0; j < list.length; j += 1) {
+    var item = list[j]
+    var bare = String(item.id)
+    if (counts[bare] === 1) map[bare] = item
+  }
+  return map
+}
+
+/**
+ * 取一条模型详情：先按 `provider + id` 查，查不到再退回唯一的裸 id。
+ * @param map - {@link buildDetailMap} 的产物。
+ * @param provider - 这条 route 的 id。
+ * @param id - 模型 id。
+ */
+export function detailOf(
+  map: Record<string, ModelDetail> | undefined | null,
+  provider: unknown,
+  id: unknown,
+): ModelDetail | undefined {
+  if (map === undefined || map === null) return undefined
+  return map[detailKeyOf(provider, id)] ?? map[String(id === undefined || id === null ? '' : id)]
 }
 
 /** 不可变地合并一组 key（几个 setState 都这么写，集中一处）。 */

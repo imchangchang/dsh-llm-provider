@@ -17,7 +17,7 @@
  * 边界：本模块只写插件自己的 vendor/ 目录，pi-ai 本身的文件一个字节都不改——改第三方包的
  * 文件不可复现，也没法保证跟 lockfile 对得上。
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -252,6 +252,17 @@ function piAiVersionOf(root: string): string | undefined {
 }
 
 /**
+ * 当前生效那份 pi-ai 的版本号（loadBridge 挑定的那份）。
+ *
+ * 给更新器当「已有什么」用：桥接加载失败时调用方拿不到 loadBridge 的结论，
+ * 再退回这里按 {@link activePiAiRoot} 的静态推断读一次版本，免得白下一份同版本的。
+ */
+export function activePiAiVersion(): string | undefined {
+  const root = activePiAiRoot()
+  return root === undefined ? undefined : piAiVersionOf(root)
+}
+
+/**
  * 从 bundle 源码里抠出它对 pi-ai 的 import 需求。
  *
  * 拷来的那份代码写的是 bare specifier；上游改了导出名或子路径，加载就会炸。
@@ -350,7 +361,7 @@ export function probePiAi(requirements: readonly PiAiRequirement[], root: string
     const linkDir = join(dir, 'node_modules', '@earendil-works')
     mkdirSync(linkDir, { recursive: true })
     const link = join(linkDir, 'pi-ai')
-    rmSync(link, { force: true, recursive: true })
+    removeLinkOrDir(link)
     const spec = linkSpec(linkDir, root)
     symlinkSync(spec.target, link, spec.type)
     // 具名需求验证导出存在；bare 需求（namespace/默认/副作用导入、export *）只要子路径能加载
@@ -375,20 +386,48 @@ export function probePiAi(requirements: readonly PiAiRequirement[], root: string
  *   3. dsh 自己装的那份——从官方 bundle 的位置解析出来，包放哪一层都能找到
  */
 export function piAiCandidates(): PiAiCandidate[] {
-  const list: PiAiCandidate[] = []
   const versions = installedVersions()
+  const downloads: PiAiCandidate[] = []
   for (let i = versions.length - 1; i >= 0; i -= 1) {
     const version = versions[i]
     if (version === undefined) continue
-    list.push({ key: version, version, root: join(piAiVersionsDir, version), link: true })
+    downloads.push({ key: version, version, root: join(piAiVersionsDir, version), link: true })
   }
   const dependency = pluginDependencyRoot()
-  list.push({ key: 'dependency', version: piAiVersionOf(dependency) ?? '内置依赖', root: dependency, link: false })
-  const dshRoot = dshPiAiRoot(findSourceBundle())
-  if (dshRoot !== undefined) {
-    list.push({ key: 'dsh', version: piAiVersionOf(dshRoot) ?? 'dsh 自带', root: dshRoot, link: true })
+  const dependencyCandidate: PiAiCandidate = {
+    key: 'dependency',
+    version: piAiVersionOf(dependency) ?? '内置依赖',
+    root: dependency,
+    link: false,
   }
-  return list
+  const dshRoot = dshPiAiRoot(findSourceBundle())
+  const dshCandidate: PiAiCandidate | undefined = dshRoot === undefined
+    ? undefined
+    : { key: 'dsh', version: piAiVersionOf(dshRoot) ?? 'dsh 自带', root: dshRoot, link: true }
+  const locals = [dependencyCandidate, ...(dshCandidate === undefined ? [] : [dshCandidate])]
+  return orderCandidates(downloads, locals)
+}
+
+/**
+ * 候选排序（纯函数，离线可测）：下载档里**不高于**本机最好那份的排到本机档之后。
+ *
+ * 同一版本优先复用宿主/兜底那份：省下一份 80 MB 级的重复副本，也免掉一次「换版本要重启」。
+ * 比本机新的照旧排最前——热更新的意义就是跑得比宿主新。本机两份之间的相对顺序不变
+ * （兜底依赖在前、dsh 自带在后，与文档里的来源表一致）。
+ *
+ * @param downloads - 下载档，调用方按新 → 旧给（本函数不做版本内排序）。
+ * @param locals - 本机档（兜底依赖 / dsh 自带），保持调用方给的顺序。
+ */
+export function orderCandidates(downloads: readonly PiAiCandidate[], locals: readonly PiAiCandidate[]): PiAiCandidate[] {
+  // 版本号解析不出（'dsh 自带' 这种占位串）的不参与「本机最好那份」的比较
+  const bestLocal = locals
+    .map((candidate) => candidate.version)
+    .filter((version) => /^\d+(\.\d+)*$/.test(version))
+    .reduce<string | undefined>((best, version) => (best === undefined || compareVersions(version, best) > 0 ? version : best), undefined)
+  if (bestLocal === undefined) return [...downloads, ...locals]
+  const redundant = downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) <= 0)
+  const fresh = downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) > 0)
+  return [...fresh, ...locals, ...redundant]
 }
 
 function readStatus(): AnyRecord {
@@ -397,6 +436,11 @@ function readStatus(): AnyRecord {
   } catch {
     return {}
   }
+}
+
+/** 读 vendor/status.json（启动时写下的那次桥接结论）。清理旧版本时要看 needsRestart。 */
+export function readBridgeStatus(): AnyRecord {
+  return readStatus()
 }
 
 /**
@@ -492,6 +536,45 @@ export function loadBridge(): BridgeLoadResult {
   }
 }
 
+/**
+ * 清掉一个路径：链就摘链，真目录才递归删。
+ *
+ * **为什么不能直接 `rmSync(path, { recursive: true })`**：Windows 上这里的链是 junction，
+ * 从 Node 24.15 起（dsh 自带运行时就是这一档：electron 43 / node 24.18）递归删会**连目标目录的
+ * 内容一起删掉**，只留一个空壳；同一句在 node ≤24.14 上只是摘链。链指向 dsh 自带那份 pi-ai 时，
+ * 等于每启动一次就把宿主那份清空——之后「桥接不可用 → 卸载插件 → 官方 llm-pi-ai 去加载已被清空的
+ * 那份 → dsh 起不来」。issue #4 / #6 的事故链就是这三行。
+ *
+ * 所以先 lstat（junction 在 lstat 下就是 symbolicLink），是链只 unlink，一个字节都不碰目标；
+ * 真目录（探针目录这类自己 mkdir 出来的）才递归删，且必须在 allowedRoot 内——拦住拼错路径
+ * 把用户目录删掉的写法。
+ *
+ * @param path - 要清掉的路径。
+ * @param allowedRoot - 允许递归删的根（默认 vendor/）；链不受此限制（摘链不改目标）。
+ */
+export function removeLinkOrDir(path: string, allowedRoot: string = vendorDir): void {
+  let info
+  try {
+    info = lstatSync(path)
+  } catch (error) {
+    // 只有「本来就不存在」才算幂等成功；EACCES/EPERM/EBUSY 要照抛——静默吞掉的话，
+    // 调用方接着 symlinkSync 会抛 EEXIST，被记成「兼容性检查没通过」，把一份本来可用的
+    // pi-ai 判死，原因还指错方向。
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return
+    throw error
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    unlinkSync(path)
+    return
+  }
+  const resolved = resolve(path)
+  const root = resolve(allowedRoot)
+  if (resolved !== root && !resolved.startsWith(root + sep)) {
+    throw new Error(`拒绝递归删除 ${root} 之外的目录：${resolved}`)
+  }
+  rmSync(resolved, { force: true, recursive: true })
+}
+
 /** 把桥接副本的 pi-ai 链指向指定包目录（指向没变就不动，避免无谓的 mtime 抖动）。 */
 function setPiAiLink(target: string): void {
   const linkDir = join(bridgeDir, 'node_modules', '@earendil-works')
@@ -505,7 +588,7 @@ function setPiAiLink(target: string): void {
     current = readlinkSync(linkPath)
   } catch { /* 还没有链 */ }
   if (current === spec.target) return
-  rmSync(linkPath, { force: true, recursive: true })
+  removeLinkOrDir(linkPath)
   symlinkSync(spec.target, linkPath, spec.type)
 }
 
@@ -515,7 +598,7 @@ function setPiAiLink(target: string): void {
  * 这就是"回退到内置依赖"的动作——不用另外指一条链过去，Node 会自己往上找。
  */
 function clearPiAiLink(): void {
-  rmSync(join(bridgeDir, 'node_modules', '@earendil-works', 'pi-ai'), { force: true, recursive: true })
+  removeLinkOrDir(join(bridgeDir, 'node_modules', '@earendil-works', 'pi-ai'))
 }
 
 /**

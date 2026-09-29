@@ -176,13 +176,14 @@ export function apply(ctx: ClientContext) {
   // ui-model-selection 行被禁用时这里才注册得进去；官方在时静默让位（模型座位
   // 靠 priority 遮蔽已经接管，不受影响）。
   ctx.inject(['commandUi'], function (scope) {
-    registerModelCommand(scope)
+    registerModelCommand(scope, sessionsFace)
   })
 }
 
 // 纯函数，离线测试直接调；组件里用的是同一份实现
 
-export { normalizeSelection, onPlanChange, mergePlanAccount, dropPlanAccount, parseOauthFrame, isSafeBlankPrompt } from './data.js'
+export { normalizeSelection, onPlanChange, mergePlanAccount, dropPlanAccount, parseOauthFrame, isSafeBlankPrompt, buildDetailMap, detailOf, detailKeyOf } from './data.js'
 export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort, effortRowDisabled } from './model-seat.js'
-export { piAiBridgeRows, piAiUpstreamText, presetPickState, refreshFailure, routeProfileOf, routeRepairOf, authEntryOf } from './settings.js'
-export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } from './format.js'
+export { piAiBridgeRows, piAiUpstreamText, piAiStorageRows, formatBytes, deleteConfirmText, addRouteOps, detailSourceLabel, presetPickState, refreshFailure, routeProfileOf, routeRepairOf, authEntryOf } from './settings.js'
+export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible, shortWindowLabel, windowTier, quotaTipOf } from './format.js'
+export { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, ModelListEditor } from './model-editor.js'
