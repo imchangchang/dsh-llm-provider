@@ -82,6 +82,48 @@ const brokenRead = readProviderConfig({
   loader: { entries: () => { throw new Error('boom3') } },
 })
 check('读失败降级到内置默认并留 warning', brokenRead.mode === 'builtin' && brokenRead.warnings.length >= 1 && brokenRead.providers.deepseek !== undefined)
+check('读失败要记下「有来源但没读成」', brokenRead.legacySource === 'none' && typeof brokenRead.legacyError === 'string')
+// 「读成功但为空」不是失败：新装的机器本来就没有老段，不能因此不让写
+const emptyButRead = readProviderConfig({ loader: { entries: () => [includeEntry] } })
+check('老段为空但读得到时不算失败', emptyButRead.legacySource === 'loader' && emptyButRead.legacyError === undefined)
+check('没有老段来源时也不报失败（0.1.x 的 settings 就是没这两个方法）',
+  readProviderConfig({ settings: { mutate: async () => {} } }).legacyError === undefined)
+
+// 条目接管之后，老段里后来手加的路由不会被读：要出 warning（别静默失效）
+const orphaned = readProviderConfig({
+  settings: { get: () => ({ providers: { a: {}, b: {}, c: {} } }) },
+  ownConfig: { providers: { a: {} } },
+})
+check('老段里的孤儿路由出 warning', orphaned.warnings.some((w) => w.indexOf('2 条路由不在本插件条目里') !== -1))
+check('孤儿路由不进生效集合（条目为准）', orphaned.providers.b === undefined && orphaned.providers.a !== undefined)
+
+// 护栏：老段读失败 + 条目为空 → 拒绝整份写（否则会把用户已有路由删光）
+const guardedState = {}
+let guardError = ''
+try {
+  await writeProviderRoutes({
+    settings: { get: () => { throw new Error('boom') } },
+    loader: { entries: () => { throw new Error('boom') } },
+    configEditor: { entries: () => [{ options: { id: OWN_ENTRY_ID } }], edit: async () => { throw new Error('不该走到这儿') } },
+    ownConfig: {},
+  }, { op: 'merge', routeId: 'new-route', value: { api: 'x' } }, guardedState)
+} catch (error) {
+  guardError = error.message
+}
+check('读不到老段且条目为空时拒绝整份覆盖', guardError.indexOf('拒绝整份覆盖') !== -1)
+check('护栏触发的错误也带上了原因', guardError.indexOf('读失败') !== -1)
+// 同一种情况下，条目里已经有内容（之前迁过）就可以写：权威来源已经是我们自己
+const migratedState = {}
+let migratedOk = false
+try {
+  await writeProviderRoutes({
+    settings: { get: () => { throw new Error('boom') } },
+    configEditor: { entries: () => [{ options: { id: OWN_ENTRY_ID } }], edit: async () => {} },
+    ownConfig: { providers: { existing: {} } },
+  }, { op: 'merge', routeId: 'new-route', value: { api: 'x' } }, migratedState)
+  migratedOk = true
+} catch { /* 不该抛 */ }
+check('条目已有内容时照常写（权威来源是自己，不碰老段）', migratedOk === true && migratedState.via === 'config-editor')
 
 // ---- 改：op 语义（不覆盖手写字段） ----
 const existing = { 'opencode-go': { baseURL: 'https://x', models: [{ id: 'm' }], compat: { thinkingFormat: 'deepseek' }, retryPolicy: { maxRetries: 3 } } }

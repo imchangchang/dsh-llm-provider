@@ -63,6 +63,15 @@ export interface ProviderConfigView {
   builtinCount: number
   /** 哪个来源在说话：own（自己条目，0.2.x 写过的）/ legacy（老段）/ builtin（只有默认）。 */
   mode: 'own' | 'legacy' | 'builtin'
+  /**
+   * 老段是从哪儿读的：settings（0.1.x）/ loader（0.2.x 的 profile patch 行）/ none（两处都没读成）。
+   *
+   * `none` 且带 {@link ProviderConfigView.legacyError} 时说明「有这个来源但读失败了」——
+   * 这种情况下不能拿一份「只有内置默认」的集合去整份覆盖用户配置，见 writeProviderRoutes 的护栏。
+   */
+  legacySource: 'settings' | 'loader' | 'none'
+  /** 老段读取失败的原因（读成功但为空不算失败）。 */
+  legacyError?: string
   /** 读的过程中遇到的非致命问题（界面上要能看见，不能只进日志）。 */
   warnings: string[]
 }
@@ -98,21 +107,25 @@ export function providersOf(config: unknown): ProviderRecord {
 }
 
 /** 老 `llm-pi-ai` 段：0.1.x 从 settings 服务读，取不到再退回 section()。 */
-function legacyFromSettings(settings: SettingsService | undefined, warnings: string[]): ProviderRecord {
-  if (settings === undefined) return {}
+function legacyFromSettings(settings: SettingsService | undefined, warnings: string[]): { providers: ProviderRecord, read: boolean, error?: string } {
+  if (settings === undefined) return { providers: {}, read: false }
   const readers: { name: string, read: () => unknown }[] = []
   if (typeof settings.get === 'function') readers.push({ name: 'settings.get', read: () => settings.get?.(LEGACY_NS) })
   if (typeof settings.section === 'function') readers.push({ name: 'settings.section', read: () => settings.section?.(LEGACY_NS) })
+  let lastError: string | undefined
   for (const reader of readers) {
     try {
       const providers = providersOf(reader.read())
-      if (Object.keys(providers).length > 0) return providers
+      // 「读成功但为空」也算读到了：宿主这个版本就是没有这一节，没什么可丢的
+      if (Object.keys(providers).length > 0) return { providers, read: true }
+      lastError = undefined
     } catch (error) {
       // 这一条读法不可用：留痕（宿主版本差异就靠这条线索），再试下一条
-      warnings.push(`${reader.name}('${LEGACY_NS}') 读失败：${messageOf(error)}`)
+      lastError = `${reader.name}('${LEGACY_NS}') 读失败：${messageOf(error)}`
+      warnings.push(lastError)
     }
   }
-  return {}
+  return { providers: {}, read: readers.length > 0 && lastError === undefined, ...(lastError === undefined ? {} : { error: lastError }) }
 }
 
 /**
@@ -121,20 +134,22 @@ function legacyFromSettings(settings: SettingsService | undefined, warnings: str
  * 从 loader 的根 include 条目拿补丁行（宿主自己的 config-editor 也是这么找条目的），
  * 递归展开 `insert`，找 `id === 'llm-pi-ai'` 且带 `config.providers` 的那一行。
  */
-function legacyFromLoader(loader: LoaderService | undefined, warnings: string[]): ProviderRecord {
-  if (loader === undefined || typeof loader.entries !== 'function') return {}
+function legacyFromLoader(loader: LoaderService | undefined, warnings: string[]): { providers: ProviderRecord, read: boolean, error?: string } {
+  if (loader === undefined || typeof loader.entries !== 'function') return { providers: {}, read: false }
   let rows: unknown
   try {
     const entries = loader.entries()
-    if (!Array.isArray(entries)) return {}
+    if (!Array.isArray(entries)) return { providers: {}, read: false }
     const include = entries.find((entry) => readString(asRecord(entry)['id']) === 'include')
     rows = include === undefined ? undefined : asRecord(include)['config']
   } catch (error) {
-    warnings.push(`loader.entries() 读失败：${messageOf(error)}`)
-    return {}
+    const message = `loader.entries() 读失败：${messageOf(error)}`
+    warnings.push(message)
+    return { providers: {}, read: false, error: message }
   }
-  const found = findPatchRow(rows, LEGACY_NS)
-  return providersOf(found)
+  // 能列出补丁行就算「读到了」：里面没有 llm-pi-ai 那行说明本来就没有老段，没什么可丢的
+  if (!Array.isArray(rows)) return { providers: {}, read: false }
+  return { providers: providersOf(findPatchRow(rows, LEGACY_NS)), read: true }
 }
 
 /** 在补丁行数组（可能嵌套 insert）里找一条 id 匹配的行，返回它的 config。 */
@@ -158,8 +173,16 @@ function findPatchRow(rows: unknown, id: string): unknown {
  */
 export function readProviderConfig(deps: ProviderConfigDeps): ProviderConfigView {
   const warnings: string[] = []
-  let legacy = legacyFromSettings(deps.settings, warnings)
-  if (Object.keys(legacy).length === 0) legacy = legacyFromLoader(deps.loader, warnings)
+  const fromSettings = legacyFromSettings(deps.settings, warnings)
+  let legacy = fromSettings.providers
+  let legacySource: ProviderConfigView['legacySource'] = fromSettings.read ? 'settings' : 'none'
+  let legacyError = fromSettings.error
+  if (!fromSettings.read) {
+    const fromLoader = legacyFromLoader(deps.loader, warnings)
+    legacy = fromLoader.providers
+    if (fromLoader.read) legacySource = 'loader'
+    legacyError = fromLoader.error ?? legacyError
+  }
   let own: ProviderRecord = {}
   try {
     own = providersOf(deps.ownConfig)
@@ -168,14 +191,24 @@ export function readProviderConfig(deps: ProviderConfigDeps): ProviderConfigView
   }
   const builtins = deps.builtins ?? BUILTIN_PROVIDERS
   const ownCount = Object.keys(own).length
+  const legacyCount = Object.keys(legacy).length
   const base = ownCount > 0 ? own : legacy
   const providers: ProviderRecord = { ...builtins, ...base }
+  // 条目接管之后，老段里新加/手改的路由不会再被读（生效的是条目那份）：说出来，别静默失效
+  if (ownCount > 0 && legacyCount > 0) {
+    const orphans = Object.keys(legacy).filter((id) => own[id] === undefined)
+    if (orphans.length > 0) {
+      warnings.push(`老 ${LEGACY_NS} 段里还有 ${String(orphans.length)} 条路由不在本插件条目里（${orphans.slice(0, 5).join('、')}${orphans.length > 5 ? '…' : ''}）：界面写入以条目为准，这些不会生效`)
+    }
+  }
   return {
     providers,
     ownCount,
-    legacyCount: Object.keys(legacy).length,
+    legacyCount,
     builtinCount: Object.keys(builtins).length,
-    mode: ownCount > 0 ? 'own' : (Object.keys(legacy).length > 0 ? 'legacy' : 'builtin'),
+    mode: ownCount > 0 ? 'own' : (legacyCount > 0 ? 'legacy' : 'builtin'),
+    legacySource,
+    ...(legacyError === undefined ? {} : { legacyError }),
     warnings,
   }
 }
@@ -272,8 +305,15 @@ export async function writeProviderRoutes(
   let lastError: unknown
   for (const strategy of strategies) {
     try {
-      if (strategy === 'config-editor') await writeViaConfigEditor(deps, providers)
-      else await writeViaSettings(deps, op)
+      if (strategy === 'config-editor') {
+        // 护栏：整份写入会把条目变成「权威来源」。当我们既没读到老段、条目里又是空的
+        // （说明有这个来源但读失败了），这份 providers 只含内置默认——写下去等于把用户
+        // 现有的路由全删了。宁可失败并说清原因，也不能静默覆盖。
+        if (view.legacySource === 'none' && view.ownCount === 0 && view.legacyError !== undefined) {
+          throw new Error(`读不到现有的 provider 配置（${view.legacyError}），拒绝整份覆盖以免丢掉已有路由`)
+        }
+        await writeViaConfigEditor(deps, providers)
+      } else await writeViaSettings(deps, op)
       state.via = strategy
       state.lastError = undefined
       return { via: strategy, providers, warnings }
