@@ -286,6 +286,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // 余额适配器的端点参数：路由没写就用目录默认（查额度得打到这家真正的主机）
     const adapterBaseUrl = configuredBaseUrl ?? catalogBaseUrl
     const adapter = findAdapter(providerId, adapterBaseUrl)
+    // 0.1.x 上在 composition base 里的路由删不掉（配置层表达不了删除），界面就别给删除入口
+    const deletable = route.source === 'llm-pi-ai' && !providerView().immutableIds.has(providerId)
     // OAuth 授权过的：适配器要的 key 从凭据记录里取（Copilot 的配额接口要 GitHub token）。
     const oauthCredential = oauthAuthorized ? await oauthCredentialFor(providerId) : {}
     const queryKey = credential.configured ? credential.key : oauthCredential.token
@@ -315,7 +317,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       return {
         ...routeMeta,
         id: providerId, displayName, kind: 'unknown-provider', authConfigured,
-        balances: [], windows: [], fetchedAt, websiteUrl, keyHint, deletable: route.source === 'llm-pi-ai',
+        balances: [], windows: [], fetchedAt, websiteUrl, keyHint, deletable,
         // OAuth 登录过、但没有额度适配器的（Codex / Claude / xAI 这类）：给用户看得懂的一句，
         // 别把「去 src/adapters/ 加适配器」这种给贡献者的话摆到界面上。
         note: oauthAuthorized
@@ -327,7 +329,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       const result = await adapter.query({ id: providerId, displayName, key: undefined, baseUrl: adapterBaseUrl, extras: {} })
       if (result.websiteUrl === undefined) result.websiteUrl = websiteUrl
       if (result.keyHint === undefined) result.keyHint = keyHint
-      if (result.deletable === undefined) result.deletable = route.source === 'llm-pi-ai'
+      if (result.deletable === undefined) result.deletable = deletable
       result.membership = undefined // 等级不展示，适配器原始数据保留在适配器内
       return { ...routeMeta, ...result }
     }
@@ -336,14 +338,14 @@ export function apply(ctx: PluginContext, config: unknown): void {
         ...routeMeta,
         id: providerId, displayName, kind: 'quota', authConfigured,
         balances: [], windows: [], error: credential.reason, fetchedAt, websiteUrl, keyHint,
-        deletable: route.source === 'llm-pi-ai',
+        deletable,
       }
     }
     try {
       const result = await adapter.query({ id: providerId, displayName, key: queryKey, baseUrl: adapterBaseUrl, extras: {} })
       if (result.websiteUrl === undefined) result.websiteUrl = websiteUrl
       if (result.keyHint === undefined) result.keyHint = keyHint
-      if (result.deletable === undefined) result.deletable = route.source === 'llm-pi-ai'
+      if (result.deletable === undefined) result.deletable = deletable
       result.membership = undefined // 等级不展示，适配器原始数据保留在适配器内
       return { ...routeMeta, ...result }
     } catch (error) {
@@ -351,7 +353,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         ...routeMeta,
         id: providerId, displayName, kind: 'quota', authConfigured: true,
         balances: [], windows: [], error: messageOf(error), fetchedAt, websiteUrl, keyHint,
-        deletable: route.source === 'llm-pi-ai',
+        deletable,
       }
     }
   }
@@ -847,8 +849,27 @@ export function apply(ctx: PluginContext, config: unknown): void {
           json(res, 400, { ok: false, error: '内置原生路由不支持在这里删除' })
           return
         }
+        // 写不动的那条（0.1.x：在内置默认/composition base 里）先说清楚，别写一半：
+        // 路由删不掉、凭据却被清了，卡片就变成 MISSING_CREDENTIAL
+        if (providerView().immutableIds.has(route.id)) {
+          json(res, 400, {
+            ok: false,
+            error: `${route.id} 是内置默认路由，删不掉（它在交给宿主的内置默认里，0.1.x 的配置层无法表达删除）；要停用它请清掉凭据${typeof route.apiKeyEnv === 'string' && route.apiKeyEnv !== '' ? `（${route.apiKeyEnv}）` : ''}`,
+          })
+          return
+        }
         const result = await writeProviderRoutes(providerDeps(), { op: 'unset', routeId: route.id }, writeState)
         deletedIds.add(route.id)
+        // 再确认一次路由真的没了才动凭据：别的宿主形状下写入策略可能没删掉它
+        if (result.providers[route.id] !== undefined) {
+          json(res, 500, {
+            ok: false,
+            error: `${route.id} 没能从配置里删掉（当前写入路径：${result.via}），没有清凭据`,
+            via: result.via,
+            warnings: result.warnings,
+          })
+          return
+        }
         let keyCleared = true
         try {
           const credentials = service<CredentialsService>('credentials')

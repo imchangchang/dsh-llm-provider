@@ -103,6 +103,44 @@ check('删掉内置 deepseek 后不会再出现（0.2.x 条目接管）', (() =>
   return view.providers.deepseek === undefined && view.providers['kimi-coding'] !== undefined && view.builtinCount === 0
 })())
 
+// 删到一条不剩：条目 config 变成 `providers: {}`，条数又回 0。这时**不能**当成「没写过」
+// 把内置默认和老段残留加回来——用户眼里就是「删不掉」；更糟的是 /provider/remove 已经清掉
+// 凭据，卡片会变成 MISSING_CREDENTIAL。判据是原始 patch 行里有没有 providers 这个键。
+const ownRow = (config) => ({ options: { id: OWN_ENTRY_ID, config } })
+const deletedAll = readProviderConfig({
+  loader: { entries: () => [legacyRowEntry, ownRow({ providers: {} })] },
+  ownConfig: { providers: {} },
+})
+check('0.2.x：删光（providers: {}）也算接管过，内置默认与老段都不再回来',
+  Object.keys(deletedAll.providers).length === 0 && deletedAll.mode === 'own' && deletedAll.builtinCount === 0)
+// 老段残留照报；这次会话里刚删掉的那两个不算（deletedIds 就是为这个存在的）
+check('0.2.x：删光后老段残留照报（不静默）',
+  deletedAll.warnings.some((w) => w.indexOf('已被插件条目覆盖') !== -1))
+check('0.2.x：刚删掉的那些不算残留', (() => {
+  const view = readProviderConfig({
+    loader: { entries: () => [legacyRowEntry, ownRow({ providers: {} })] },
+    ownConfig: { providers: {} },
+    deletedIds: new Set(['kimi-coding', 'deepseek']),
+  })
+  return view.warnings.every((w) => w.indexOf('已被插件条目覆盖') === -1)
+})())
+check('0.2.x：没写过（行里没有 providers 键）时内置默认与老段照旧算进来', (() => {
+  const view = readProviderConfig({ loader: { entries: () => [legacyRowEntry, ownRow({})] }, ownConfig: {} })
+  return view.providers.deepseek !== undefined && view.providers['kimi-coding'] !== undefined && view.mode === 'legacy'
+})())
+check('0.2.x：enumerable 键在但解析值为空（读写不同步）也按接管处理', (() => {
+  const view = readProviderConfig({ loader: { entries: () => [ownRow({ providers: {} })] }, ownConfig: {} })
+  return Object.keys(view.providers).length === 0
+})())
+
+// 写不动的 route id（0.1.x 的 composition base）：界面不给删除入口，/provider/remove 也拦住
+check('0.1.x：内置默认那条列进 immutableIds', (() => {
+  const view = readProviderConfig({ settings: { section: () => ({ providers: { 'kimi-coding': { apiKeyEnv: 'K' } } }) } })
+  return view.immutableIds.has('deepseek') && !view.immutableIds.has('kimi-coding')
+})())
+check('0.2.x：没有 immutableIds（界面写下去的就是整份，谁都删得掉）',
+  readProviderConfig({ loader: { entries: () => [includeEntry] } }).immutableIds.size === 0)
+
 // 0.2.x 的 schemastery 代理：providers 是带 .get() 的访问器
 const proxied = readProviderConfig({
   ownConfig: { providers: { get: () => ({ 'zai-coding-cn': { apiKeyEnv: 'ZAI' } }) } },
