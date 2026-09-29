@@ -335,48 +335,8 @@ rowsCheck('确认文案说明不可撤销', delText.indexOf('不可撤销') !== 
 rowsCheck('确认文案提到手写配置会消失', delText.indexOf('retryPolicy') !== -1)
 rowsCheck('没有凭据名时不硬凑', deleteConfirmText({ id: 'deepseek' }).indexOf('凭据') === -1)
 
-// ---- 添加供应商别整段覆盖已有 route（issue #1 的「顺带一个提醒」）----
-const { addRouteOps } = moduleExports
-// 桩：照 dsh-settings 的 applyPathOp 实现 set（逐层浅合并），用来验「写完之后原来的字还在不在」
-function applySet(section, op) {
-  const [head, ...rest] = op.path
-  if (rest.length === 0) return { ...section, [head]: op.value }
-  return { ...section, [head]: applySet(section[head] === undefined ? {} : section[head], { ...op, path: rest }) }
-}
-const existingSection = {
-  providers: {
-    'opencode-go': {
-      baseURL: 'https://opencode.ai/zen/go/v1',
-      models: [{ id: 'deepseek-flash', input: ['text', 'image'] }],
-      compat: { thinkingFormat: 'deepseek' },
-      retryPolicy: { maxRetries: 3 },
-    },
-  },
-}
-const freshOps = addRouteOps('opencode-go', { baseURL: 'https://x', apiKeyEnv: 'K' }, false)
-rowsCheck('新路由：一次 set 写整条', freshOps.length === 1 && freshOps[0].path.join('.') === 'providers.opencode-go')
-const mergedOps = addRouteOps('opencode-go', { baseURL: 'https://x', apiKeyEnv: 'K' }, true)
-rowsCheck('已有路由：逐字段写，不再整条覆盖', mergedOps.every((op) => op.path.length === 3))
-let after = existingSection
-for (const op of mergedOps) after = applySet(after, op)
-rowsCheck('手写的 models 活下来', JSON.stringify(after.providers['opencode-go'].models) === JSON.stringify(existingSection.providers['opencode-go'].models))
-rowsCheck('手写的 compat 活下来', after.providers['opencode-go'].compat.thinkingFormat === 'deepseek')
-rowsCheck('手写的 retryPolicy 活下来', after.providers['opencode-go'].retryPolicy.maxRetries === 3)
-rowsCheck('表单里的字段真的写进去了', after.providers['opencode-go'].baseURL === 'https://x' && after.providers['opencode-go'].apiKeyEnv === 'K')
-// 反向对照：老写法（整对象 set）确实会抹掉手写配置——这条要是过了，说明上面几条不是白测
-let clobbered = applySet(existingSection, { op: 'set', path: ['providers', 'opencode-go'], value: { baseURL: 'https://x', apiKeyEnv: 'K' } })
-rowsCheck('对照：整对象 set 会抹掉 models（老写法的毛病）', clobbered.providers['opencode-go'].models === undefined)
-rowsCheck('空路由 id 不产生操作', addRouteOps('  ', { baseURL: 'x' }, false).length === 0)
-// OAuth 路径：已有路由上那条旧的 apiKeyEnv 必须删掉（官方适配器只认它，留着就把 OAuth 堵死）
-const oauthOps = addRouteOps('anthropic', {}, true).filter((op) => op.path[2] === 'apiKeyEnv')
-rowsCheck('OAuth 重建已有路由时 unset apiKeyEnv', oauthOps.length === 1 && oauthOps[0].op === 'unset')
-rowsCheck('走密钥路径时不 unset apiKeyEnv',
-  addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => !(op.op === 'unset' && op.path[2] === 'apiKeyEnv')))
-rowsCheck('新路由不带 unset（整对象 set 本来就不写这个字段）',
-  addRouteOps('deepseek', { apiKeyEnv: 'K' }, false).length === 1)
-rowsCheck('undefined 值的键不发 set', addRouteOps('deepseek', { apiKeyEnv: undefined, baseURL: 'https://x' }, true).length === 2)
-rowsCheck('表单没填的字段不进 ops（原值保持）',
-  addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => op.path[2] === 'apiKeyEnv'))
+// ---- 添加供应商的「别整段覆盖」保证已搬到宿主（src/provider-config.ts 的 applyProviderOp）----
+// 客户端现在只发 { routeId, op: 'merge', value }，逐字段合并由宿主做；测试见 test/provider-config.mjs
 
 // ---- 模型清单编辑器（issue #1：官方 Models 页禁用后，逐模型参数得有条界面上的路）----
 const { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, buildDetailMap } = moduleExports

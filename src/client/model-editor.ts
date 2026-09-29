@@ -13,7 +13,7 @@
  * contextWindow 不是正整数）会让整条路由解析失败——那家 provider 会直接不可用，所以宁可不让保存。
  */
 import react from 'react'
-import { apiCall, detailOf } from './data.js'
+import { detailOf, postJson } from './data.js'
 import { formatContext } from './format.js'
 import type { AnyRecord } from '../types.js'
 import type { CatalogModel, ModelDetail, ModelRow } from './types.js'
@@ -347,16 +347,23 @@ export function ModelListEditor(props: ModelListEditorProps) {
     setNote('')
     // 全部取消勾选 = 回到「跟随目录」：宿主对空清单的语义就是整份目录，不能写一个空数组
     // 假装「没有模型」（那会被 resolveRouteModels 当成没声明）。
-    var ops = planned.models.length === 0
-      ? [{ op: 'unset', path: ['providers', props.routeId, 'models'] }]
-      : [{ op: 'set', path: ['providers', props.routeId, 'models'], value: planned.models }]
-    apiCall('settings/mutate', { ns: 'llm-pi-ai', ops }, '保存模型清单失败')
+    // 写哪由宿主决定（0.1.x settings 段 / 0.2.x profile patch 里本插件的 config），
+    // 见宿主 /provider/mutate。
+    var request = planned.models.length === 0
+      ? { routeId: props.routeId, op: 'unsetFields', fields: ['models'] }
+      : { routeId: props.routeId, op: 'merge', value: { models: planned.models } }
+    postJson('/provider/mutate', request)
+      .then(function (result: AnyRecord) {
+        if (result === null || result === undefined || result.ok !== true) {
+          throw new Error(String((result && result.error) || '写配置失败'))
+        }
+      })
       .then(function () {
         // 存完就不是草稿了：宿主那份清单回来时照常重置（也能接住宿主做的规范化）
         dirtyRef.current = false
         setNote(planned.models.length === 0
           ? '已恢复「跟随目录」：这条路由不再声明清单，模型目录说了算'
-          : '已保存 ' + String(planned.models.length) + ' 个模型到 settings.yaml')
+          : '已保存 ' + String(planned.models.length) + ' 个模型')
         if (typeof props.onSaved === 'function') props.onSaved()
       })
       .catch(function (cause: unknown) {

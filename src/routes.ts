@@ -2,17 +2,17 @@
  * provider 路由发现：决定额度面板上显示哪些 provider、各自用哪个凭据名。
  *
  * 两条来源合并：
- *   1. settings 的 `llm-pi-ai.providers`——用户实际配置的 pi-ai 路由。catalog 里那些
- *      没配置的 provider 也躺在 llm 目录里，但不该出现在额度面板上。
+ *   1. `providers` 记录——由 src/provider-config.ts 从两代宿主各自的落点读出来再合并
+ *      （0.1.x：`settings.yaml` 的 `llm-pi-ai` 段；0.2.x：profile patch 里插件条目的 config，
+ *      老段也一起读）。这里只做映射、不碰 settings 服务：0.2.x 起 settings 没有 get/section。
  *   2. `ctx.llm.listConfigurableProviders()` 里的原生适配器路由（llm-deepseek 这类）：
  *      它们不写 settings 段也带默认 apiKeyEnv，seam 上查不到这个默认值，只能用
  *      NATIVE_ROUTE_DEFAULTS 对上。必须含进来，否则「deepseek 的 key 被填到 kimi 那一栏」
  *      这类错配检测不到（实测就是靠这条才发现的）。
- *
- * 命名空间没注册时退回 settings.section()：直接读 dsh 解析好的文档，不用自己解析 YAML。
  */
 import { piAiName } from './pi-ai-names.js'
-import { asRecord, readString, type AnyRecord, type LlmService, type SettingsService } from './types.js'
+import { asRecord, readString, type AnyRecord, type LlmService } from './types.js'
+import type { ProviderRecord } from './provider-config.js'
 
 /** 一条要查额度的路由。 */
 export interface ProviderRoute {
@@ -93,33 +93,21 @@ function piAiRouteCovers(nativeProvider: string, routes: ReadonlyMap<string, Pro
 
 /**
  * 合并出要查额度的路由表。
- * @param settings - settings 服务（可为 undefined）。
+ * @param providers - 已合并的 providers 记录（见 src/provider-config.ts；undefined 视作空）。
  * @param llm - llm 服务（可为 undefined）；用它的 listConfigurableProviders 找原生路由。
  */
 export function providerRoutes(
-  settings: SettingsService | undefined,
+  providers: ProviderRecord | undefined,
   llm: LlmService | undefined,
 ): Map<string, ProviderRoute> {
   const routes = new Map<string, ProviderRoute>()
-
-  // 两条读法，按序兜底：
-  //   get()     —— 命名空间「解析后」的值：schema 默认 + 插件 config（base 层）+ 用户配置。
-  //                要的就是这个合并结果（DeepSeek 那条来自插件的 base 层，用户没写过）。
-  //                但它要求命名空间已注册，而 llm-pi-ai 的注册是在它自己 apply 里做的，
-  //                那一步之前（或它 apply 抛错时）就取不到。
-  //   section() —— 直接读 settings 文档里那一节的原始内容，不要求注册，正好补上面那个空档：
-  //                那份文档本来就是 dsh 解析好放在那儿的。
-  const resolved = safeObject(() => asRecord(asRecord(settings?.get?.('llm-pi-ai'))['providers']))
-  const piAiProviders = Object.keys(resolved).length > 0
-    ? resolved
-    : safeObject(() => asRecord(asRecord(settings?.section?.('llm-pi-ai'))['providers']))
-  for (const [id, rawRoute] of Object.entries(piAiProviders)) {
+  for (const [id, rawRoute] of Object.entries(providers ?? {})) {
     const route = asRecord(rawRoute)
     routes.set(id, {
       id,
       apiKeyEnv: readString(route['apiKeyEnv']),
       baseURL: readString(route['baseURL']),
-      // wire 协议：卡片展开体要和「添加供应商」表单展示同一组信息，settings 段里存的就是这个值
+      // wire 协议：卡片展开体要和「添加供应商」表单展示同一组信息，配置里存的就是这个值
       api: readString(route['api']),
       label: readString(route['displayName']),
       source: 'llm-pi-ai',
@@ -154,12 +142,4 @@ export function providerRoutes(
   }
 
   return routes
-}
-
-function safeObject(read: () => AnyRecord): AnyRecord {
-  try {
-    return asRecord(read())
-  } catch {
-    return {}
-  }
 }

@@ -32,6 +32,18 @@ import {
   type ModelDetail,
 } from './model-details.js'
 import { checkAndUpdate, pruneVersions, startBackgroundCheck, vendorUsageAsync } from './updater.js'
+import {
+  LEGACY_NS,
+  OWN_ENTRY_ID,
+  configWithProviders,
+  parseProviderOp,
+  readProviderConfig,
+  writeProviderRoutes,
+  type ProviderConfigDeps,
+  type ProviderOp,
+  type ProviderRecord,
+  type ProviderWriteState,
+} from './provider-config.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
 import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
@@ -49,7 +61,9 @@ import {
   type AuthorizationResponse,
   type AuthorizationService,
   type CredentialsService,
+  type ConfigEditorService,
   type LlmService,
+  type LoaderService,
   type Logger,
   type PluginContext,
   type ServerRequest,
@@ -107,10 +121,47 @@ export function apply(ctx: PluginContext, config: unknown): void {
   const logger: Logger | undefined = typeof ctx.logger === 'function' ? ctx.logger('provider') : undefined
   const webServer = ctx['webServer'] as WebServerService
 
+  // 本插件自己的条目 id：0.2.x 上它同时是配置的命名空间（settings/configEditor 都按条目 id 寻址）
+  const ownEntryId = ((): string => {
+    try {
+      const fiber = (ctx as unknown as AnyRecord)['fiber'] as AnyRecord | undefined
+      const entry = fiber === undefined ? undefined : (fiber['entry'] as AnyRecord | undefined)
+      const options = entry === undefined ? undefined : (entry['options'] as AnyRecord | undefined)
+      const id = options === undefined ? undefined : readString(options['id'])
+      return id ?? OWN_ENTRY_ID
+    } catch {
+      return OWN_ENTRY_ID
+    }
+  })()
+
+  /** 写策略记忆：这次进程里哪条路走得通（自愈用）。 */
+  const writeState: ProviderWriteState = {}
+  /**
+   * provider 配置的读写依赖。每次调用现取服务：0.2.x 上插件会随配置写入被重载，
+   * 服务实例可能已经换了一轮，缓存住会指向旧 fiber。
+   */
+  function providerDeps(): ProviderConfigDeps {
+    return {
+      settings: service<SettingsService>('settings'),
+      configEditor: service<ConfigEditorService>('configEditor'),
+      loader: service<LoaderService>('loader'),
+      ownConfig: config,
+      entryId: ownEntryId,
+    }
+  }
+  /** 当前合并后的 providers（两代宿主各自的落点 + 内置默认）。 */
+  function providerView() {
+    return readProviderConfig(providerDeps())
+  }
+
   if (bridge.ok) {
-    // 完全接管官方 llm-pi-ai 的行为：路由注册、settings 段、模型发现全在这一个调用里
-    bridge.plugin.apply(ctx, config)
-    logger?.info?.(`llm bridge active on pi-ai ${bridge.piAiVersion}`)
+    // 完全接管官方 llm-pi-ai 的行为：路由注册、模型发现全在这一个调用里。
+    // providers 必须由我们合并后传进去：0.2.x 的官方 bundle 只认传入的 config
+    // （`config.providers.get()`），不再去读 `llm-pi-ai` 段——不传就等于用户那批路由全丢。
+    const view = providerView()
+    bridge.plugin.apply(ctx, configWithProviders(config, view.providers))
+    logger?.info?.(`llm bridge active on pi-ai ${bridge.piAiVersion}；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
+    for (const warning of view.warnings) logger?.warn?.(warning)
   } else {
     logger?.warn?.(`llm bridge 不可用，退化为纯计费模式：${bridge.error}`)
   }
@@ -289,17 +340,21 @@ export function apply(ctx: PluginContext, config: unknown): void {
   /** 额度接口不该被菜单开关打成串流请求，60 秒内复用同一份结果。 */
   const CACHE_MS = 60_000
   let cached: { at: number; value: PlanSnapshot } | undefined
+  /** 写完 provider 配置后让额度快照失效：下一轮 /plan/status 按新配置重查。 */
+  function invalidatePlanSnapshot(): void {
+    cached = undefined
+  }
 
   async function snapshot(force: boolean): Promise<PlanSnapshot> {
     if (!force && cached !== undefined && Date.now() - cached.at < CACHE_MS) return cached.value
     const settings = service<SettingsService>('settings')
     const llm = service<LlmService>('llm')
-    const routes = providerRoutes(settings, llm)
+    const routes = providerRoutes(providerView().providers, llm)
     const providers = [...routes.values()]
     if (providers.length === 0) {
       return {
         accounts: [],
-        error: '没有发现可查额度的 provider：请在 $DSH_HOME/settings.yaml 的 llm-pi-ai.providers 里配置路由',
+        error: `没有发现可查额度的 provider：请在「添加供应商」里加一条（0.1.x 写 settings.yaml 的 ${LEGACY_NS}.providers，0.2.x 写 profile patch 里本插件的 config）`,
         fetchedAt: new Date().toISOString(),
       }
     }
@@ -343,7 +398,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
           try {
             const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
             const providerId = parsed['providerId']
-            const routes = providerRoutes(service<SettingsService>('settings'), service<LlmService>('llm'))
+            const routes = providerRoutes(providerView().providers, service<LlmService>('llm'))
             const route = typeof providerId === 'string' ? routes.get(providerId) : undefined
             if (route === undefined) {
               json(res, 404, { ok: false, error: `没有发现这个 provider：${String(providerId)}` })
@@ -418,7 +473,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         } catch { /* 拿不到就报 -1 */ }
         let routes: { id: string, apiKeyEnv: string | null, source: string, models?: unknown }[] = []
         try {
-          routes = [...providerRoutes(service<SettingsService>('settings'), llm).values()]
+          routes = [...providerRoutes(providerView().providers, llm).values()]
             .map((route) => ({
               id: route.id,
               apiKeyEnv: route.apiKeyEnv ?? null,
@@ -546,7 +601,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const details = loadModelDetails(activePiAiRoot())
     const index = indexDetails(details)
     try {
-      const routes = [...providerRoutes(service<SettingsService>('settings'), service<LlmService>('llm')).values()]
+      const routes = [...providerRoutes(providerView().providers, service<LlmService>('llm')).values()]
       const declared: DeclaredModelEntry[] = []
       for (const route of routes) {
         if (!Array.isArray(route.models)) continue
@@ -608,7 +663,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
           const configured = new Set<string>()
           const keyless = new Set<string>()
           try {
-            const routes = providerRoutes(service<SettingsService>('settings'), service<LlmService>('llm'))
+            const routes = providerRoutes(providerView().providers, service<LlmService>('llm'))
             for (const route of routes.values()) {
               configured.add(route.id)
               // 路由在、钥匙没值：插件自己的 config 就声明了 deepseek（没有 key 也能配上路由），
@@ -674,7 +729,50 @@ export function apply(ctx: PluginContext, config: unknown): void {
     'dsh-llm-provider: /provider/refresh route',
   )
 
-  // 删除 provider：unset llm-pi-ai.providers.<id> + 清掉对应凭据；内置原生路由拒绝
+  /**
+   * 写 provider 配置：客户端所有写操作都走这里。
+   *
+   * 为什么不直连 `settings/mutate`：0.2.x 起 settings 的命名空间 = 已加载插件条目的 id，
+   * `llm-pi-ai` 条目被本插件的 patch 禁用着，直写会被 "No configurable plugin entry" 拒掉。
+   * 这一层按能力选路（configEditor / settings.mutate）并自愈，见 src/provider-config.ts。
+   */
+  ctx.effect(
+    () => webServer.register({
+      kind: 'exact',
+      path: '/provider/mutate',
+      handler: (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { allow: 'POST' })
+          res.end()
+          return
+        }
+        let body = ''
+        req.on('data', (chunk) => { body += String(chunk) })
+        req.on('end', () => {
+          void (async () => {
+            try {
+              const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
+              const op = parseProviderOp(parsed)
+              if (op === undefined) {
+                json(res, 400, { ok: false, error: '不认识的写操作（要 op=merge|unset|unsetFields + routeId）' })
+                return
+              }
+              const result = await writeProviderRoutes(providerDeps(), op, writeState)
+              logger?.info?.(`写 provider 配置：${op.op} ${op.routeId}（经 ${result.via}）`)
+              // 路由/额度面板吃的是同一份 providers，写完立刻让快照失效
+              invalidatePlanSnapshot()
+              json(res, 200, { ok: true, via: result.via, warnings: result.warnings, providers: result.providers })
+            } catch (error) {
+              json(res, 500, { ok: false, error: messageOf(error), via: writeState.via, warnings: [messageOf(error)] })
+            }
+          })()
+        })
+      },
+    }),
+    'dsh-llm-provider: /provider/mutate route',
+  )
+
+  // 删除 provider：从配置里摘掉这条路由 + 清掉对应凭据；内置原生路由拒绝
   ctx.effect(
     () => webServer.register({
       kind: 'exact',
@@ -684,9 +782,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
           json(res, 400, { ok: false, error: '内置原生路由不支持在这里删除' })
           return
         }
-        const settings = service<SettingsService>('settings')
-        if (typeof settings?.mutate !== 'function') throw new Error('settings 服务不可用')
-        await settings.mutate('llm-pi-ai', [{ op: 'unset', path: ['providers', route.id] }])
+        const result = await writeProviderRoutes(providerDeps(), { op: 'unset', routeId: route.id }, writeState)
         let keyCleared = true
         try {
           const credentials = service<CredentialsService>('credentials')
@@ -704,7 +800,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
             value: { ...cached.value, accounts: cached.value.accounts.filter((entry) => entry.id !== route.id) },
           }
         }
-        json(res, 200, { ok: true, keyCleared })
+        json(res, 200, { ok: true, keyCleared, via: result.via, warnings: result.warnings })
       }),
     }),
     'dsh-llm-provider: /provider/remove route',
