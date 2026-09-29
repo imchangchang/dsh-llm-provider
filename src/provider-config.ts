@@ -129,39 +129,34 @@ function legacyFromSettings(settings: SettingsService | undefined, warnings: str
 }
 
 /**
- * 老 `llm-pi-ai` 段：0.2.x 上 settings 服务没有 get/section，段还留在 profile patch 的那一行里。
+ * 老 `llm-pi-ai` 段：0.2.x 上 settings 服务没有 get/section，段还在 profile patch 的那一行里。
  *
- * 从 loader 的根 include 条目拿补丁行（宿主自己的 config-editor 也是这么找条目的），
- * 递归展开 `insert`，找 `id === 'llm-pi-ai'` 且带 `config.providers` 的那一行。
+ * 那一行的位置：**loader 的条目列表**（profile 的根 include 把各层 patch 组合成条目树，
+ * 每行一个 Entry，`options.id` / `options.config` 就是行本身）。注意不是 include 条目自己的
+ * config——那是 `{path, patches}`（Include 的配置），曾经照它读，结果永远读不到东西。
+ *
+ * @param loader - loader 服务。
+ * @param warnings - 失败留痕。
  */
 function legacyFromLoader(loader: LoaderService | undefined, warnings: string[]): { providers: ProviderRecord, read: boolean, error?: string } {
   if (loader === undefined || typeof loader.entries !== 'function') return { providers: {}, read: false }
-  let rows: unknown
+  let entries: unknown[]
   try {
-    const entries = loader.entries()
-    if (!Array.isArray(entries)) return { providers: {}, read: false }
-    const include = entries.find((entry) => readString(asRecord(entry)['id']) === 'include')
-    rows = include === undefined ? undefined : asRecord(include)['config']
+    const listed = loader.entries()
+    entries = Array.isArray(listed) ? listed : [...(listed as Iterable<unknown>)]
   } catch (error) {
     const message = `loader.entries() 读失败：${messageOf(error)}`
     warnings.push(message)
     return { providers: {}, read: false, error: message }
   }
-  // 能列出补丁行就算「读到了」：里面没有 llm-pi-ai 那行说明本来就没有老段，没什么可丢的
-  if (!Array.isArray(rows)) return { providers: {}, read: false }
-  return { providers: providersOf(findPatchRow(rows, LEGACY_NS)), read: true }
-}
-
-/** 在补丁行数组（可能嵌套 insert）里找一条 id 匹配的行，返回它的 config。 */
-function findPatchRow(rows: unknown, id: string): unknown {
-  if (!Array.isArray(rows)) return undefined
-  for (const raw of rows) {
-    const row = asRecord(raw)
-    if (readString(row['id']) === id && row['config'] !== undefined) return row['config']
-    const nested = findPatchRow(row['insert'], id)
-    if (nested !== undefined) return nested
+  // 能列出条目就算「读到了」：里面没有 llm-pi-ai 那行说明本来就没有老段，没什么可丢的
+  for (const entry of entries) {
+    const options = asRecord(asRecord(entry)['options'])
+    if (readString(options['id']) !== LEGACY_NS) continue
+    // 行被 disable 也一样读：配置还在，只是这一行没挂载
+    return { providers: providersOf(options['config']), read: true }
   }
-  return undefined
+  return { providers: {}, read: true }
 }
 
 /**

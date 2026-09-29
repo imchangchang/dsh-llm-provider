@@ -24,9 +24,15 @@ function check(name, cond) {
   if (!cond) failures += 1
 }
 
-/** 某个 id 是否被 `disabled: true` 禁掉。 */
+/** 某个 id 是否被禁掉（字面 true 或 !!js 守卫表达式都算）。 */
 function disabled(id) {
-  return new RegExp(`id:\\s*${id}\\s*\\n\\s*disabled:\\s*true`).test(text)
+  return new RegExp(`id:\\s*${id}\\s*\\n\\s*disabled:\\s*(true|!!js)`).test(text)
+}
+
+/** 某个 id 的禁用是不是带「只在本插件启用时」的守卫。 */
+function guarded(id) {
+  const block = new RegExp(`id:\\s*${id}\\s*\\n\\s*disabled:\\s*(!!js[^\\n]*)`).exec(text)
+  return block !== null && block[1].indexOf('dsh-llm-provider') !== -1 && block[1].indexOf('mine.disabled') !== -1
 }
 
 const disablesDeepseek = disabled('llm-deepseek')
@@ -44,6 +50,13 @@ check('patch 里不再声明 providers：0.2.x 上那个键是界面写入的落
   !/config:\s*\n\s*providers:/.test(text))
 check('禁用了官方 ui-model-selection（座位与 /model 整体接管，不留两套状态机）', disabled('ui-model-selection'))
 check('禁用了官方 ui-settings-models（官方 Models 页退役）', disabled('ui-settings-models'))
+// 四行的禁用都必须带守卫：用户在插件管理里关掉本插件（不卸载）时，那四行要自己恢复，
+// 否则「插件关了、官方也被禁着」= 一个模型都没有（用户实测撞到的死角）
+for (const id of ['llm-pi-ai', 'llm-deepseek', 'ui-model-selection', 'ui-settings-models']) {
+  check(`禁用 ${id} 带「仅本插件启用时」的守卫`, guarded(id))
+}
+check('守卫表达式按 id 或模块名认本插件那一行', /options\.id === 'dsh-llm-provider'/.test(text) && /@dsh-one\/dsh-llm-provider/.test(text))
+check('守卫异常时不禁用官方行（失败时宁可官方可用）', /catch \{ return false \}/.test(text))
 
 console.log(failures === 0 ? '\npatch 层检查通过' : `\n${failures} 个失败`)
 process.exit(failures === 0 ? 0 : 1)

@@ -5,7 +5,13 @@
 # 命不中的 id，dsh 只警告并跳过（@deepseek-ai/cordis-plugin-include 的语义）——所以本文件
 # 挂到不含这些行的 profile 上也安全。
 #
-# 本插件要接管的官方行全部在这里禁用：
+# 本插件要接管的官方行在这里禁用，但**只在本插件自己被启用时**（disabled 是 !!js 表达式，
+# 由 Loader 求值）：用户在插件管理里关掉本插件（而不是卸载）时，那四行会自动恢复，
+# 模型照旧能用。表达式读 loader 的条目列表找本插件那一行，取反它的 disabled；
+# 任何异常一律返回 false（不禁用官方行）——失败时宁可让官方插件可用，
+# 也不要出现「插件关了、官方也被禁着、一个模型都没有」这种死角。
+#
+# 本插件要接管的官方行有：
 #
 # 1) llm-pi-ai：ctx.llm.registerAdapter 对同名路由直接抛 DUPLICATE_ADAPTER，没有遮蔽机制，
 #    桥接要接手路由只能在这一层禁用官方行。本插件内部的桥接副本接管它的全部行为
@@ -21,16 +27,16 @@
 #    它独有的逐模型清单编辑（ModelListEditor / DeepSeekModelsEditor / CustomProviderCard）
 #    没有替代——记在 README「已知缺口」一节。
 - id: llm-pi-ai
-  disabled: true
+  disabled: !!js "(() => { try { const l = ctx.get('loader'); const rows = l && l.entries ? [...l.entries()] : []; const mine = rows.find((e) => e && e.options && (e.options.id === 'dsh-llm-provider' || String(e.options.name || '').indexOf('@dsh-one/dsh-llm-provider') === 0)); return mine === undefined ? false : !mine.disabled } catch { return false } })()"
 
 - id: llm-deepseek
-  disabled: true
+  disabled: !!js "(() => { try { const l = ctx.get('loader'); const rows = l && l.entries ? [...l.entries()] : []; const mine = rows.find((e) => e && e.options && (e.options.id === 'dsh-llm-provider' || String(e.options.name || '').indexOf('@dsh-one/dsh-llm-provider') === 0)); return mine === undefined ? false : !mine.disabled } catch { return false } })()"
 
 - id: ui-model-selection
-  disabled: true
+  disabled: !!js "(() => { try { const l = ctx.get('loader'); const rows = l && l.entries ? [...l.entries()] : []; const mine = rows.find((e) => e && e.options && (e.options.id === 'dsh-llm-provider' || String(e.options.name || '').indexOf('@dsh-one/dsh-llm-provider') === 0)); return mine === undefined ? false : !mine.disabled } catch { return false } })()"
 
 - id: ui-settings-models
-  disabled: true
+  disabled: !!js "(() => { try { const l = ctx.get('loader'); const rows = l && l.entries ? [...l.entries()] : []; const mine = rows.find((e) => e && e.options && (e.options.id === 'dsh-llm-provider' || String(e.options.name || '').indexOf('@dsh-one/dsh-llm-provider') === 0)); return mine === undefined ? false : !mine.disabled } catch { return false } })()"
 
 - insert:
     - id: dsh-llm-provider
