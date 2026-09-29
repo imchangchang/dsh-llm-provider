@@ -132,6 +132,14 @@ check('0.2.x：enumerable 键在但解析值为空（读写不同步）也按接
   const view = readProviderConfig({ loader: { entries: () => [ownRow({ providers: {} })] }, ownConfig: {} })
   return Object.keys(view.providers).length === 0
 })())
+// 手改 patch 把手写坏（providers: null / [] / 字符串）：按「没写过」处理，别把内置默认与老段
+// 一起吞掉——那样用户只看到一个空列表，还说不出为什么
+for (const broken of [null, [], 'x', 3]) {
+  check(`0.2.x：providers 是坏形状（${JSON.stringify(broken)}）时不吞掉内置默认与老段`, (() => {
+    const view = readProviderConfig({ loader: { entries: () => [legacyRowEntry, ownRow({ providers: broken })] }, ownConfig: {} })
+    return view.providers.deepseek !== undefined && view.providers['kimi-coding'] !== undefined
+  })())
+}
 
 // 写不动的 route id（0.1.x 的 composition base）：界面不给删除入口，/provider/remove 也拦住
 check('0.1.x：内置默认那条列进 immutableIds', (() => {

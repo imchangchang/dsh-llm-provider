@@ -282,7 +282,11 @@ export function readProviderConfig(deps: ProviderConfigDeps): ProviderConfigView
   // 就是「删不掉」，而 /provider/remove 这时已经把凭据清掉了，卡片直接变 MISSING_CREDENTIAL。
   // 所以看原始 patch 行里**有没有 providers 这个键**：有（哪怕是空对象）就是接管过了。
   const ownRaw = settingsHost ? undefined : loaderRowConfig(deps.loader, deps.entryId ?? OWN_ENTRY_ID)
-  const takenOver = ownCount > 0 || (isPlainRecord(ownRaw) && Object.hasOwn(ownRaw, 'providers'))
+  // 判据要窄一点：只有 `providers` 真的是个普通对象（哪怕空对象）才算接管。手改 patch 写成
+  // `providers:`（YAML 里键在值为 null）、`[]` 或字符串这种坏形状时按「没写过」处理——
+  // 那种情况下把内置默认与老段一起吞掉，用户会看到一个空的 provider 列表却说不出为什么。
+  const ownRawProviders = isPlainRecord(ownRaw) ? ownRaw['providers'] : undefined
+  const takenOver = ownCount > 0 || isPlainRecord(ownRawProviders)
   // 两代宿主的合并语义不一样，因为「哪一层可以写」不一样：
   //   0.1.x（settings）：老段就是用户层、可写，官方读的是 mergeLayers(base, section)。
   //     所以这里也逐字段深合并，界面显示的 provider 才等于真正生效的那份；base 里只放

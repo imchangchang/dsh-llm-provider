@@ -858,18 +858,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
           })
           return
         }
+        // 写不下去就抛（两条策略都不通会抛），所以走到这里说明宿主那边已经落盘并重载过。
+        // 「写完再回读确认」在这里做不到可信：result.providers 是写之前本地算的，回读又会踩到
+        // 重挂那一拍（0.2.x 第一次写入会走普通 update、插件重挂，闭包里的 config 就旧了）——
+        // 假确认比没有确认更糟，所以只保留上面那道 immutableIds 前置判断。
         const result = await writeProviderRoutes(providerDeps(), { op: 'unset', routeId: route.id }, writeState)
         deletedIds.add(route.id)
-        // 再确认一次路由真的没了才动凭据：别的宿主形状下写入策略可能没删掉它
-        if (result.providers[route.id] !== undefined) {
-          json(res, 500, {
-            ok: false,
-            error: `${route.id} 没能从配置里删掉（当前写入路径：${result.via}），没有清凭据`,
-            via: result.via,
-            warnings: result.warnings,
-          })
-          return
-        }
         let keyCleared = true
         try {
           const credentials = service<CredentialsService>('credentials')
