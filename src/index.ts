@@ -427,8 +427,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
             }))
         } catch { /* 路由发现失败时留空 */ }
         // 磁盘占用是唯一要异步的部分：其余诊断先算好，占用到了再一起发（不阻塞事件循环）
-        void vendorUsageFresh().then((usage) => {
-        json(res, 200, {
+        const payload = {
           bridge: bridge.ok
             ? {
                 active: true,
@@ -471,12 +470,13 @@ export function apply(ctx: PluginContext, config: unknown): void {
             pending: bridgeState['needsRestart'] === true ? readString(bridgeState['piAiVersion']) : undefined,
             rejected: readRejected(bridgeState['latestRejected']),
           },
-          // 磁盘占用（issue #4）：下载了多少份 pi-ai、npm 缓存多大，界面上能看见才有得清
-          storage: usage,
-          // 测试环境标识（scripts/test-profile.sh 启动时带 DSH_PROVIDER_TEST=1）：
-          // 浏览器端看到后给标题/favicon 加「测」标，一眼区分测试实例
-          testMode: process.env.DSH_PROVIDER_TEST === '1',
-        })
+            // 磁盘占用在下面按需补上（异步统计）：这里只留测试实例标记
+            // 测试环境标识（scripts/test-profile.sh 启动时带 DSH_PROVIDER_TEST=1）：
+            // 浏览器端看到后给标题/favicon 加「测」标，一眼区分测试实例
+            testMode: process.env.DSH_PROVIDER_TEST === '1',
+        }
+        void vendorUsageFresh().then((usage) => {
+          json(res, 200, { ...payload, storage: usage })
         })
       },
     }),
