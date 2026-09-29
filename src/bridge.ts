@@ -386,7 +386,6 @@ export function probePiAi(requirements: readonly PiAiRequirement[], root: string
  *   3. dsh 自己装的那份——从官方 bundle 的位置解析出来，包放哪一层都能找到
  */
 export function piAiCandidates(): PiAiCandidate[] {
-  const list: PiAiCandidate[] = []
   const versions = installedVersions()
   const downloads: PiAiCandidate[] = []
   for (let i = versions.length - 1; i >= 0; i -= 1) {
