@@ -168,11 +168,33 @@ export function quotaTextOf(account: PlanAccount | undefined | null): string | u
   return undefined
 }
 
-/** 窗口短名（卡片头部摘要）：5 小时窗口→5h，每周/订阅周期→7d（对齐 CC Switch 的 7 天口径）。 */
-export function shortWindowLabel(name: unknown): string {
+/** 窗口档位：卡片头部分组、短名共用的三档 + 认不出的那一档。 */
+export type WindowTier = '5h' | '7d' | '30d' | 'other'
+
+/** 档位的固定显示顺序（分割线位置不随上游返回顺序跳）。 */
+export const WINDOW_TIER_ORDER: readonly WindowTier[] = ['5h', '7d', '30d', 'other']
+
+/**
+ * 窗口名 → 档位。**先窄后宽**：5 小时 → 月 → 周 → 认不出（保持出现顺序）。
+ *
+ * 「每月窗口」里带一个「每」字，早先那版拿裸 `每` 当周口径，于是月窗被显示成第二个 7d
+ * （倒计时还能到 8d17h），issue #2 报的就是这个；所以月必须排在周前面判断，
+ * 5 小时又必须排在月前面（`5 小时滚动窗口` 里没有「月」，但顺序写死更不容易被后续措辞绊倒）。
+ * @param name - 适配器给的窗口展示名（中文为主，兼容英文关键词）。
+ */
+export function windowTier(name: unknown): WindowTier {
   var text = String(name ?? '')
-  if (text.indexOf('5 小时') !== -1 || text.indexOf('5小时') !== -1) return '5h'
-  if (text.indexOf('每') !== -1 || text.indexOf('订阅') !== -1 || text.indexOf('周') !== -1) return '7d'
+  if (/\b5\s*小时|5\s*hour/i.test(text) || text.indexOf('5小时') !== -1) return '5h'
+  if (/月|month/i.test(text)) return '30d'
+  if (/周|week|订阅/i.test(text)) return '7d'
+  return 'other'
+}
+
+/** 窗口短名（卡片头部摘要）：5 小时窗口→5h、每周/订阅周期→7d、每月窗口→30d（对齐 CC Switch 口径）。 */
+export function shortWindowLabel(name: unknown): string {
+  var tier = windowTier(name)
+  if (tier !== 'other') return tier
+  var text = String(name ?? '')
   return text === '' ? '窗口' : text.slice(0, 4)
 }
 
@@ -250,7 +272,8 @@ export function quotaTipOf(account: PlanAccount | undefined | null): string | un
 }
 
 /** 卡片头部摘要：直给最关键信息——coding plan 显示各窗口余量，API 显示余额。
- *  顺序：5 小时窗在前、订阅周期在后，两组之间带分割线。 */
+ *  窗口按档位分组（5h / 7d / 30d / 其他），**组与组之间**插分割线：
+ *  三档窗口就是两条线，两档仍是一条线，空档不画线。 */
 export function headlineChips(account: PlanAccount | undefined | null): HeadlineChip[] {
   if (account === undefined || account === null) return [{ text: '无数据', percent: undefined }]
   if (account.authConfigured === false) return [{ text: '未配置 key', percent: 0 }]
@@ -262,33 +285,33 @@ export function headlineChips(account: PlanAccount | undefined | null): Headline
     return account.oauthAuthorized === true ? [{ text: '已通过 OAuth 登录', percent: undefined }] : []
   }
   var windows = Array.isArray(account.windows) ? account.windows : []
-  var fiveHour: HeadlineChip[] = []
-  var others: HeadlineChip[] = []
+  var groups: Record<WindowTier, HeadlineChip[]> = { '5h': [], '7d': [], '30d': [], other: [] }
   for (var i = 0; i < windows.length; i += 1) {
+    var tier = windowTier(windows[i].window)
     // 不带百分比的窗口（适配器标了 note，比如 Copilot 的「不限量」）：出一枚纯文字 chip，
     // 不参与颜色分级，也不跟倒计时。直接 continue 会让它整条消失，用户以为漏了。
     if (typeof windows[i].percentLeft !== 'number') {
       var noteText = windows[i].note
       if (typeof noteText === 'string' && noteText !== '') {
-        var noteChip: HeadlineChip = { label: shortWindowLabel(windows[i].window), text: noteText, percent: undefined }
-        if (/5\s*小时/.test(String(windows[i].window))) fiveHour.push(noteChip)
-        else others.push(noteChip)
+        groups[tier].push({ label: shortWindowLabel(windows[i].window), text: noteText, percent: undefined })
       }
       continue
     }
-    var chip: HeadlineChip = {
+    groups[tier].push({
       label: shortWindowLabel(windows[i].window),
       text: String(windows[i].percentLeft) + '%',
       percent: windows[i].percentLeft,
       reset: windows[i].resetAt,
-    }
-    if (/5\s*小时/.test(String(windows[i].window))) fiveHour.push(chip)
-    else others.push(chip)
+    })
   }
   var chips: HeadlineChip[] = []
-  for (var f = 0; f < fiveHour.length; f += 1) chips.push(fiveHour[f])
-  if (fiveHour.length > 0 && others.length > 0) chips.push({ sep: true })
-  for (var o = 0; o < others.length; o += 1) chips.push(others[o])
+  for (var g = 0; g < WINDOW_TIER_ORDER.length; g += 1) {
+    var group = groups[WINDOW_TIER_ORDER[g]]
+    if (group.length === 0) continue
+    // 档与档之间才画线；同一档出现多次（上游重复下发）不画。
+    if (chips.length > 0) chips.push({ sep: true })
+    for (var k = 0; k < group.length; k += 1) chips.push(group[k])
+  }
   if (chips.length > 0) return chips
   var balances = Array.isArray(account.balances) ? account.balances : []
   if (balances.length > 0) chips.push({ text: String(balances[0].value), percent: undefined })

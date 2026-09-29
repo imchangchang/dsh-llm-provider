@@ -234,6 +234,59 @@ rowsCheck('不限量窗口出 chip', unlimitedChips.some((c) => c.label === '对
 rowsCheck('不限量 chip 不带百分比（不参与配色）', unlimitedChips.find((c) => c.label === '对话').percent === undefined)
 rowsCheck('真额度窗口照旧带百分比', unlimitedChips.some((c) => c.label === '高级请求' && c.text === '100%'))
 
+// ---- 三档窗口：短名与分割线（issue #2 把月窗显示成第二个 7d，#8 三档只画一条线）----
+const { shortWindowLabel, windowTier, quotaTipOf } = moduleExports
+rowsCheck('5 小时窗口 → 5h', shortWindowLabel('5 小时滚动窗口') === '5h')
+rowsCheck('每周窗口 → 7d', shortWindowLabel('每周窗口') === '7d')
+rowsCheck('每月窗口 → 30d（不再被裸「每」吞进 7d）', shortWindowLabel('每月窗口') === '30d')
+rowsCheck('月度限额 → 30d', shortWindowLabel('月度限额') === '30d')
+rowsCheck('Monthly → 30d', shortWindowLabel('Monthly window') === '30d')
+rowsCheck('Weekly → 7d', shortWindowLabel('Weekly window') === '7d')
+rowsCheck('认不出的窗口名保持原样（截 4 字）', shortWindowLabel('高级请求') === '高级请求')
+rowsCheck('空名字给「窗口」', shortWindowLabel('') === '窗口')
+rowsCheck('档位函数与短名一致', windowTier('每月窗口') === '30d' && windowTier('每周窗口') === '7d')
+
+const threeTier = headlineChips({
+  id: 'opencode-go', displayName: 'OpenCode Go', kind: 'quota', authConfigured: true,
+  balances: [], windows: [
+    { window: '5 小时滚动窗口', percentLeft: 100, resetAt: '2026-10-01T00:00:00Z' },
+    { window: '每周窗口', percentLeft: 65, resetAt: '2026-10-04T00:00:00Z' },
+    { window: '每月窗口', percentLeft: 8, resetAt: '2026-10-07T00:00:00Z' },
+  ],
+})
+rowsCheck('三档窗口出三枚 chip + 两条分割线',
+  threeTier.filter((c) => c.sep !== true).length === 3 && threeTier.filter((c) => c.sep === true).length === 2)
+rowsCheck('chips 顺序固定为 5h → 7d → 30d',
+  threeTier.filter((c) => c.sep !== true).map((c) => c.label).join(',') === '5h,7d,30d')
+rowsCheck('分割线插在档与档之间（不是末尾）',
+  threeTier.map((c) => (c.sep === true ? '|' : c.label)).join(' ') === '5h | 7d | 30d')
+rowsCheck('月窗的 tooltip 也是 30d', String(quotaTipOf({
+  id: 'opencode-go', kind: 'quota', windows: [{ window: '每月窗口', percentLeft: 8, resetAt: '2026-10-07T00:00:00Z' }],
+})).indexOf('30d余量 8%') === 0)
+
+// 上游把月窗排在前面时，显示顺序要按档位规整，分割线位置不跟着跳
+const shuffled = headlineChips({
+  id: 'opencode-go', kind: 'quota', windows: [
+    { window: '每月窗口', percentLeft: 8 },
+    { window: '5 小时滚动窗口', percentLeft: 100 },
+    { window: '每周窗口', percentLeft: 65 },
+  ],
+})
+rowsCheck('乱序返回也规整成 5h → 7d → 30d',
+  shuffled.map((c) => (c.sep === true ? '|' : c.label)).join(' ') === '5h | 7d | 30d')
+
+// 只有两档时仍是一条线（保持视觉不变）
+const twoTier = headlineChips({
+  id: 'deepseek', kind: 'quota', windows: [
+    { window: '5 小时滚动窗口', percentLeft: 90 },
+    { window: '每周窗口', percentLeft: 40 },
+  ],
+})
+rowsCheck('两档窗口仍是一条分割线', twoTier.filter((c) => c.sep === true).length === 1)
+rowsCheck('只有一档时不画线', headlineChips({
+  id: 'deepseek', kind: 'quota', windows: [{ window: '每周窗口', percentLeft: 40 }],
+}).filter((c) => c.sep === true).length === 0)
+
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',
   dotClass({ id: 'github-copilot', authConfigured: true, oauthAuthorized: true, kind: 'unknown-provider' }) === 'plan_dot plan_dot_ok')
