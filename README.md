@@ -105,11 +105,11 @@ The test instance uses a separate profile, so instances can run side by side: `P
 node lib/adapters/run.js all            # run every quota adapter (keys from env or ~/.dsh/.credentials.yaml)
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # build + 13 offline tests; this is what finishing and merging run
+npm test                                # build + 14 offline tests; this is what finishing and merging run
 npm run typecheck                       # tsc --noEmit (npm test does not include it)
 ```
 
-The 13 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the multi-source merge of model capabilities, provider configuration across both host generations (including self-healing), the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
+The 14 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the multi-source merge of model capabilities, provider configuration across both host generations (including self-healing), namespace adaptation for model discovery, the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
 
 ## Implementation
 
@@ -217,6 +217,7 @@ The host compares keys while resolving them for each provider and warns in the U
 | `GET /provider/models` | model metadata merged from three sources: `input` declared by the route → the pi-ai catalog → adapter self-report (`listModels`/`resolveModelInfo`, only for providers the catalog does not cover, with per-call and total timeouts). 60s cache (`?fresh=1` bypasses it); used by detail cards and capability badges |
 | `GET /provider/presets` | provider presets available for adding (with configured flags) |
 | `POST /provider/refresh` | refresh one card's quota (live query, updates the global snapshot) |
+| `POST /provider/discover` | draft model discovery (the "add provider" test button); tries the namespace for the dsh version (`llm-pi-ai` on 0.1.x, the plugin entry id on 0.2.x) and self-heals |
 | `POST /provider/mutate` | write provider configuration (`merge` / `unset` / `unsetFields`); the host picks the write path for the dsh version and self-heals |
 | `POST /provider/remove` | remove a provider (route and credential) |
 | `POST /provider/test` | query one provider's quota with the stored key (read-only, does not update the snapshot) |
@@ -330,11 +331,12 @@ Boundaries:
 | `src/provider-presets.ts` | preset list for adding a provider (generated from the pi-ai catalog plus Custom Gateway); marks OAuth-only providers |
 | `src/oauth.ts` | OAuth sign-in bridge: mounts the `authorization` service the official bundles never mount, and exposes its flows to the browser (5 HTTP routes + SSE) |
 | `src/provider-config.ts` | provider configuration layer: multi-source merge and capability-probing, self-healing write strategies for both host generations |
+| `src/model-discovery.ts` | namespace adaptation for draft discovery: tries `llm-pi-ai` (0.1.x) and the plugin entry id (0.2.x), remembers which works |
 | `src/model-details.ts` | model details and capabilities: read the providers data files of the active pi-ai package, then merge the route's declared `input` and the adapter's self-reported modalities (indexed by `provider + id`) |
 | `src/pi-ai-names.ts` | read names from the pi-ai registry (the source of display names) |
 | `src/credential-check.ts` | credential check |
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
 | `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `model-editor` (model list editor) · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | 13 offline tests (no dsh, no services) |
+| `test/*.mjs` | 14 offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

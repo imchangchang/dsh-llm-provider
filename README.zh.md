@@ -102,11 +102,11 @@ scripts/test-profile.sh stop   # 停掉
 node lib/adapters/run.js all            # 跑全部额度适配器（key 从环境变量或 ~/.dsh/.credentials.yaml 找）
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # 构建 + 十三个离线测试；自测与合入跑的就是这条
+npm test                                # 构建 + 十四个离线测试；自测与合入跑的就是这条
 npm run typecheck                       # tsc --noEmit（npm test 不含它）
 ```
 
-十三个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、目录链清理（摘链不碰链目标）、旧版本清理的保留规则、模型能力的多链路合并、provider 配置的两代宿主兼容与自愈、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
+十四个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、目录链清理（摘链不碰链目标）、旧版本清理的保留规则、模型能力的多链路合并、provider 配置的两代宿主兼容与自愈、模型发现的命名空间适配、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
 
 ## 实现
 
@@ -214,6 +214,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | `GET /provider/models` | 模型元数据，三条链路合并：route 声明的 `input` → pi-ai 目录 → 适配器自报（`listModels`/`resolveModelInfo`，只补目录里没有的 provider，带单调用超时与总预算）。60 秒缓存（`?fresh=1` 绕开）；详情卡与能力徽章用 |
 | `GET /provider/presets` | 可添加的供应商预设清单（含已配置标记） |
 | `POST /provider/refresh` | 单卡刷新额度（实查并更新全局快照） |
+| `POST /provider/discover` | 草稿探测模型清单（「添加供应商 → 测试」）；按 dsh 版本试命名空间（0.1.x 的 `llm-pi-ai` / 0.2.x 的插件条目 id）并自愈 |
 | `POST /provider/mutate` | 写 provider 配置（`merge` / `unset` / `unsetFields`），宿主按 dsh 版本选写入口并自愈 |
 | `POST /provider/remove` | 删除供应商（清路由 + 清凭据） |
 | `POST /provider/test` | 用已存的 key 查一次某家的额度（只读，不动全局快照） |
@@ -327,11 +328,12 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 | `src/provider-presets.ts` | 添加供应商的预设清单（pi-ai 目录动态生成 + Custom Gateway） |
 | `src/oauth.ts` | OAuth 登录桥：补齐官方没挂的 `authorization` 服务，并把 flow 暴露给浏览器端（5 条 HTTP 路由 + SSE） |
 | `src/provider-config.ts` | provider 配置的读写层：两代宿主的多个来源合并、两条写策略的能力探测与自愈 |
+| `src/model-discovery.ts` | 草稿探测的命名空间适配：0.1.x 的 `llm-pi-ai` 与 0.2.x 的插件条目 id 都试、记住能用的那条 |
 | `src/model-details.ts` | 模型详情与能力：读生效 pi-ai 包的 providers 数据文件，再合并 route 声明的 `input` 与适配器自报的模态（按 `provider + id` 索引） |
 | `src/pi-ai-names.ts` | 读 pi-ai 注册表里的名字（显示名的来源之一） |
 | `src/credential-check.ts` | 凭据检查 |
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
 | `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `model-editor`（模型清单编辑器）· `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
-| `test/*.mjs` | 十三个离线测试（不进 dsh、不起服务） |
+| `test/*.mjs` | 十四个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |

@@ -44,6 +44,7 @@ import {
   type ProviderRecord,
   type ProviderWriteState,
 } from './provider-config.js'
+import { discoverModelsVia, type DiscoveryState } from './model-discovery.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
 import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
@@ -136,6 +137,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
 
   /** 写策略记忆：这次进程里哪条路走得通（自愈用）。 */
   const writeState: ProviderWriteState = {}
+  /** 模型发现的命名空间记忆（0.1.x 是 llm-pi-ai，0.2.x 是本插件条目 id）。 */
+  const discoveryState: DiscoveryState = {}
   /**
    * provider 配置的读写依赖。每次调用现取服务：0.2.x 上插件会随配置写入被重载，
    * 服务实例可能已经换了一轮，缓存住会指向旧 fiber。
@@ -727,6 +730,41 @@ export function apply(ctx: PluginContext, config: unknown): void {
       }),
     }),
     'dsh-llm-provider: /provider/refresh route',
+  )
+
+  /**
+   * 草稿探测（「添加供应商 → 测试」）：按命名空间找注册的发现器。
+   *
+   * 命名空间在两代宿主不是一个值（0.1.x 常量 `llm-pi-ai` / 0.2.x 插件条目 id），
+   * 客户端不该知道这件事——这里两种都试、记住能用的那条（见 src/model-discovery.ts）。
+   */
+  ctx.effect(
+    () => webServer.register({
+      kind: 'exact',
+      path: '/provider/discover',
+      handler: (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { allow: 'POST' })
+          res.end()
+          return
+        }
+        let body = ''
+        req.on('data', (chunk) => { body += String(chunk) })
+        req.on('end', () => {
+          void (async () => {
+            try {
+              const parsed = asRecord(JSON.parse(body === '' ? '{}' : body))
+              const request = asRecord(parsed['request'] ?? parsed)
+              const result = await discoverModelsVia(service<LlmService>('llm'), request, discoveryState, ownEntryId)
+              json(res, 200, { ok: true, models: result.models, ns: result.ns, warnings: result.warnings })
+            } catch (error) {
+              json(res, 200, { ok: false, error: messageOf(error), ns: discoveryState.ns ?? null })
+            }
+          })()
+        })
+      },
+    }),
+    'dsh-llm-provider: /provider/discover route',
   )
 
   /**

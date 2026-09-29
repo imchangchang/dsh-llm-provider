@@ -72,6 +72,13 @@ export interface LlmService {
    * `inputModalities` 缺省 = 未知；显式给了就照它算（「没有 image」是阴性能力，不是未知）。
    */
   listModels?: (provider: string) => Promise<{ id: string, name?: string, inputModalities?: readonly string[] }[]>
+  /**
+   * 注册在某个命名空间下的「草稿探测」：给一条还没落盘的路由问出模型清单。
+   *
+   * 命名空间两代宿主不同（0.1.x 是常量 `llm-pi-ai`，0.2.x 是插件条目 id），
+   * 见 src/model-discovery.ts——那里按候选顺序试并记住能用的那个。
+   */
+  discoverModels?: (settingsNs: string, request: unknown) => Promise<unknown>
   /** 精确一条 route 的模型信息：模态、上下文、输出上限都可能在这（能力自报的兜底）。 */
   resolveModelInfo?: (provider: string, model: string, signal?: AbortSignal) => Promise<{
     id?: string
