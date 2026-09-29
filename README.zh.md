@@ -73,17 +73,22 @@ dsh web                   # 插件树变了，必须重启
 | 配置存在哪 | `settings.yaml` 的 `llm-pi-ai` 段 | profile patch 里**本插件条目的 config**（settings 命名空间 = 已加载条目的 id） |
 | 读 | `settings.get/section('llm-pi-ai')` | 老段从 loader 的**条目列表**里 id 为 `llm-pi-ai` 那一行读（`options.config`；注意不是 include 条目自己的 `{path,patches}`）；界面写的那份在条目 config 里 |
 | 写 | `settings.mutate('llm-pi-ai', ops)` | `ctx.configEditor.edit(条目, change)`（写 profile patch 并让 Loader 重载） |
-| 官方 bundle 的 providers | 传入的 config **+ `settings.installSection` 叠上 `llm-pi-ai` 段** | **只认传入的 config**（`config.providers.get()`），不再读 `llm-pi-ai` 段 |
+| 官方 bundle 的 providers | 传入的 config 被 `settings.installSection` 当 **composition base**，解析结果是 `mergeLayers(base, 用户段)`；所以传给它的只有内置默认与条目 config，用户那批路由由 settings 用户层叠上来 | **只认传入的 config**（`config.providers.get()`），不再读 `llm-pi-ai` 段；所以交给它的是**完整合并结果** |
 
 **关闭（不是卸载）本插件时，官方那四条会自己恢复**：patch 里的 `disabled` 写成 `!!js` 表达式（「仅当本插件的条目在场且启用时才禁用官方行」），Loader 每次求值，所以插件开关一拨就跟着变，不会出现「插件关了、官方也被禁着、一个模型都没有」的死角；表达式异常时一律不禁用（宁可官方插件可用）。
 
-合并优先级（低 → 高）：**内置默认**（DeepSeek 那条，在 `src/provider-config.ts` 的 `BUILTIN_PROVIDERS`）→ **老 `llm-pi-ai` 段** → **本插件条目的 config**。后者一旦有内容就整体接管：界面写下去的是整份合并结果，所以老段里的路由会被一次性搬进条目，之后删改都生效，也不会被老段里的同名路由压住。
+两代宿主的合并方式不一样，因为「哪一层能写」不一样：
+
+- **0.1.x**：老 `llm-pi-ai` 段就是可写的用户层，官方读的是 `mergeLayers(composition base, 用户段)`。我们也照这个语义算：内置默认与条目 config 当 base，用户段叠在上面，**逐字段递归合并**。于是界面显示的 provider 等于真正生效的那份；用户在界面上删掉的路由不会从 base 复活（这是踩过的坑：把整份合并结果当 base 交出去，`mergeLayers` 会让 base 里的键永远活下来，`unset apiKeyEnv` 之后官方适配器照旧抛 `MISSING_CREDENTIAL`，删掉整条路由刷新又回来）。
+- **0.2.x**：老段所在的条目被 patch 禁着、界面写不进去，所以界面一写就把**整份合并结果（含内置默认）**写进本插件条目，条目从此整体接管：老段只当一次性的迁移来源。接管之后内置默认也不再额外加回来——不然用户删掉内置的 DeepSeek 路由，下次读又会冒出来，看着像「删了没反应」。「写过没有」的判据是 patch 行里**有没有 `providers` 这个键**（不看条数）：把路由删到一条不剩时写下去的是 `providers: {}`，那也是接管过，不能因为空又把默认与老段加回来。第一次界面写入会把当时的整份结果（含内置默认）一起写进去，所以正常使用不会丢默认路由；反过来说，手写（或从别处恢复）一份不含 `deepseek` 的条目 config，就是明确不要那条默认路由。
 
 写配置的两条策略都留着，**按能力挑、失败自动换另一条并记住能走通的那条**（自愈）：宿主升级/降级、条目被禁用、profile patch 被 home patch 覆盖这些变化都不需要改配置。「pi-ai 桥接」标签页有一行「配置写入」写明当前走的哪条路、providers 来自哪里、有没有没清干净的告警。这条写路径只是没装（0.1.x 没有 `configEditor`、0.2.x 的 `settings.mutate` 写不了老命名空间）时不报告警——那是版本差异，不是故障。
 
 写下去的合并是**逐字段合并**：省略某个字段不等于删掉它。要删得显式说出来（HTTP 接口里是 `merge` 的 `unsets`，界面上是卡片里的修正动作）——OAuth 授权成功后清掉配置里的 `apiKeyEnv` 就走这条，那个 ref 留着会让官方适配器只认它，取不到值直接报 `MISSING_CREDENTIAL`，等于把刚走完的登录堵死。
 
-交给官方 bundle 的 providers 是**活值访问器**：0.2.x 上我们条目 config 的变更走 Loader 的 volatile 快路径，插件不会重挂，如果传的是挂载那一刻的快照，官方那边（`config.providers.get()`）就永远停在旧值——界面写完配置得重启 dsh 才生效。所以每次读都重新合并一遍，内容没变（按内容指纹比）才复用同一个对象，官方那套 identity 记忆化照样有效。
+交给官方 bundle 的 providers 是**活值访问器**：0.2.x 上我们条目 config 的变更走 Loader 的 volatile 快路径，插件不会重挂，如果传的是挂载那一刻的快照，官方那边（`config.providers.get()`）就永远停在旧值——界面写完配置得重启 dsh 才生效。所以每次读都重新合并一遍，内容没变（按结构比）才复用同一个对象，官方那套 identity 记忆化照样有效。
+
+另外两条写路径的语义现在完全一致：`merge` 是逐字段合并，`unsetFields` 只删列出的字段（删空也留着这条路由，`{routeId: {}}` 是合法 profile，也正是 OAuth-only 路由的形态），删整条路由只有 `unset`。
 
 pi-ai 更新有两个触发路径：插件启动时后台查一次（6 小时节流，`DSH_PROVIDER_UPDATE=off` 可关），以及设置页上的「检查更新」按钮（`POST /provider/update`）。
 
@@ -276,6 +281,7 @@ npm run typecheck  # tsc --noEmit
 
 如实说明（没验到的、没做的）：
 
+- **0.1.x 上内置默认那条（DeepSeek）删不掉**。它在我们交给宿主的 composition base 里，而 base 之上的用户层无法表达「删除」（`mergeLayers` 只会合并，base 里的键一定活下来）；能写的老段删掉它，解析结果里它仍在。默认那条留着也让「默认模型 deepseek」开箱可用，所以这里没去动它。界面上这条不给删除入口（宿主返回的账号里 `deletable: false`），`POST /provider/remove` 也会拦住并说明原因——不会出现「路由删不掉、凭据却被清掉」。0.2.x 不存在这个问题：条目接管后内置默认不再额外加回来，删得掉。
 - **0.2.x 上老 `llm-pi-ai` 段会变成残留**。第一次在界面上写配置时，老段里的路由会被搬进插件条目，老段本身（profile patch 里那行 `llm-pi-ai`）删不掉——它的条目被本插件的 patch 禁用着，宿主不让写。之后这行只是历史，生效的是插件条目里那份；要清理得手改 profile patch（`~/.dsh/profiles/<profile>/cordis.patch.yml`）。
 - **桥接整体不可用时只有局部提示（全局告警排 0.3.x）**。候选全灭（目录坏了、权限问题、上游改导出名）时插件会退回「纯计费模式」，官方那四条条目仍被 patch 禁用，于是模型列表空掉——这时只有「pi-ai 桥接」标签页里一行错误行（`bridge.active === false`），composer 那边没有任何提示。要一眼看懂得再加一条全局告警，目前没做。
 

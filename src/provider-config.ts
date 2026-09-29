@@ -6,23 +6,25 @@
  * | 能力 | 0.1.x | 0.2.x（0.2.0-rc.2） |
  * |---|---|---|
  * | 配置存在哪 | `settings.yaml` 的 `llm-pi-ai` 段，`settings.get/section(ns)` 读、`settings.mutate(ns, ops)` 写 | profile patch 里**插件条目自己的 config**；settings 服务没有 `get/section`，命名空间 = 已加载条目的 id |
- * | 官方 bundle 从哪拿 providers | 传入的 config **+ `settings.installSection(NS)` 把 `llm-pi-ai` 段叠上来** | **只认传入的 config**（`config.providers.get()`），不再读 `llm-pi-ai` 段 |
+ * | 官方 bundle 从哪拿 providers | 传入的 config 被 `settings.installSection(NS)` 当 **composition base**，解析结果是 `mergeLayers(base, 用户段)`（见 {@link mergeLayers} 的注释） | **只认传入的 config**（`config.providers.get()`），不再读 `llm-pi-ai` 段 |
  * | 写配置 | `settings.mutate('llm-pi-ai', ops)` | `ctx.configEditor.edit(条目, change)`（写 profile patch 并触发 Loader 重载）；`settings.mutate` 只剩「volatile 字段」且要求该 id 有活性条目 |
  *
  * 所以 0.2.x 上我们插件遭遇的是三重失效：桥接拿不到用户那批路由、路由发现依赖的
  * `settings.get/section` 不存在、写配置被 "No configurable plugin entry" 拒绝。
  *
  * 这一层的做法：
- *   1. **读**：多个来源依次尝试，合并成一份 providers——
- *      内置默认（最低） < 老 `llm-pi-ai` 段（0.1.x 的 settings、0.2.x 的 profile patch 行）
- *      < **我们自己条目的 config**（0.2.x 上由界面写进去的那份，最高；一旦非空就整体接管，
- *      因为写的时候是整份写下去的，见下）。
+ *   1. **读**：两代宿主各按自己的合并语义算，因为「哪一层能写」不一样——
+ *      0.1.x：老段就是可写的用户层，内置默认与条目 config 当 base，**逐字段递归合并**
+ *      （{@link mergeLayers}），跟宿主解析出来的那份一致；
+ *      0.2.x：老段写不进去，界面一写就把整份合并结果写进条目，条目从此整体接管
+ *      （判据是 patch 行里有没有 `providers` 键，不看条数——删光时也是接管）。
  *   2. **写**：`configEditor.edit`（0.2.x）与 `settings.mutate('llm-pi-ai', …)`（0.1.x）
  *      两条策略都留着，按能力挑、失败就换另一条（自愈），并把成功的那条记进状态里给界面看。
  *      0.2.x 上写的是**整份合并结果**，于是老 `llm-pi-ai` 段里的路由被一次性搬进我们条目——
  *      之后删改都能生效（否则删一条只存在于老段里的路由会「点了没反应」）。
  *   3. **改**：merge / unset / unsetFields 三种操作。merge 是**逐字段**语义：只覆盖给到的键，
- *      手写的 `models` / `compat` / `retryPolicy` 一个字不动（issue #1 那条提醒）。
+ *      手写的 `models` / `compat` / `retryPolicy` 一个字不动（issue #1 那条提醒）；要删字段得
+ *      在 `unsets` 里说，要删整条走 `unset`——{@link applyProviderOp} 的两条路径语义一致。
  */
 import { asRecord, readString, type AnyRecord, type ConfigEditorService, type LoaderService, type SettingsService } from './types.js'
 
@@ -68,13 +70,31 @@ export type ProviderOp =
 /** 读的结果：合并后的 providers + 各来源的条数（诊断用）。 */
 export interface ProviderConfigView {
   providers: ProviderRecord
+  /**
+   * 交给官方 bundle 的那份 providers（两代含义不同，都是「官方真正会看到的东西」）。
+   *
+   * 0.1.x：官方 bundle 把这份 config 交给 `settings.installSection(..., config, ...)` 当
+   * **composition base**。dsh-settings 的解析是 `schema(mergeLayers(base, section))`，而
+   * {@link mergeLayers} 是递归合并——base 里有的键一定活下来，用户在 section 里删不掉。
+   * 所以这里只放界面写不进去的那部分（内置默认 + 本插件条目 config），用户那批路由靠
+   * settings 的用户层叠上来（官方读的正是解析后的值）。
+   *
+   * 0.2.x：官方 bundle 只读 `config.providers.get()`，不碰 settings 层，所以这里就是完整的
+   * {@link providers}（写少了就等于用户那批路由全丢）。
+   */
+  bridgeProviders: ProviderRecord
   /** 我们自己条目 config 里的 providers 条数。 */
   ownCount: number
   /** 老 `llm-pi-ai` 段里的条数。 */
   legacyCount: number
   /** 合并结果里有多少条来自内置默认。 */
   builtinCount: number
-  /** 哪个来源在说话：own（自己条目，0.2.x 写过的）/ legacy（老段）/ builtin（只有默认）。 */
+  /**
+   * 哪个来源在说话：own（自己条目，0.2.x 写过的）/ legacy（老段）/ builtin（只有默认）。
+   *
+   * 0.2.x 上条目一有内容就整体接管，所以 own 优先；0.1.x 上老段可写、两层叠着，说话的是
+   * 用户层（legacy），自己条目那份只是叠在下面的默认。
+   */
   mode: 'own' | 'legacy' | 'builtin'
   /**
    * 老段是从哪儿读的：settings（0.1.x）/ loader（0.2.x 的 profile patch 行）/ none（两处都没读成）。
@@ -85,6 +105,11 @@ export interface ProviderConfigView {
   legacySource: 'settings' | 'loader' | 'none'
   /** 老段读取失败的原因（读成功但为空不算失败）。 */
   legacyError?: string
+  /**
+   * 写不到的那些 route id：0.1.x 上它们在我们交给宿主的 composition base 里，
+   * 而 base 之上的用户层表达不了「删除」（`mergeLayers` 只合并）。界面据此不给删除入口。
+   */
+  immutableIds: Set<string>
   /** 读的过程中遇到的非致命问题（界面上要能看见，不能只进日志）。 */
   warnings: string[]
 }
@@ -112,6 +137,26 @@ export interface ProviderConfigDeps {
 const isPlainRecord = (value: unknown): value is AnyRecord =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
+/**
+ * 递归合并两层配置（与 dsh-settings 的 `mergeLayers(under, over)` 同语义：`over` 赢，
+ * 普通对象逐层递归，其余值整体替换）。`undefined` 键跳过——稀疏 patch 不能擦掉下层。
+ *
+ * 为什么这里要跟宿主一模一样：0.1.x 上官方 bundle 读的是宿主解析后的值，我们自己也得算出
+ * 同一份，界面显示的 provider 才等于真正生效的那份。
+ */
+export function mergeLayers(under: unknown, over: unknown): unknown {
+  // 与宿主逐字同语义：over 缺席就留 under；任一侧不是普通对象就整体取 over（标量/数组/类实例
+  // 都是「整层替换」）。写成「不是普通对象就给空对象」会把 `apiKeyEnv: 'X'` 这种叶子擦成 {}。
+  if (over === undefined) return under
+  if (!isPlainRecord(under) || !isPlainRecord(over)) return over
+  const merged: AnyRecord = { ...under }
+  for (const [key, value] of Object.entries(over)) {
+    if (value === undefined) continue
+    merged[key] = key in merged ? mergeLayers(merged[key], value) : value
+  }
+  return merged
+}
+
 /** 从一个 config（或 providers 值）里取出 providers 记录；认不出就给空对象。 */
 export function providersOf(config: unknown): ProviderRecord {
   if (!isPlainRecord(config)) return {}
@@ -126,26 +171,39 @@ export function providersOf(config: unknown): ProviderRecord {
   return out
 }
 
-/** 老 `llm-pi-ai` 段：0.1.x 从 settings 服务读，取不到再退回 section()。 */
+/**
+ * 老 `llm-pi-ai` 段：0.1.x 从 settings 服务读。
+ *
+ * **优先读 `section()`（用户层原文），只在没有 section 时才退回 `get()`**：`get()` 返回的是
+ * 「composition base ∪ 用户层」的解析结果，我们交出去的 config 正是那个 base，拿它当用户层会
+ * 自咬——用户在设置里删掉的路由会被 base 复活（实测 0.1.6：unset 掉 apiKeyEnv 后 `get()` 里
+ * 那个 ref 还在，官方适配器照旧抛 MISSING_CREDENTIAL）。
+ */
 function legacyFromSettings(settings: SettingsService | undefined, warnings: string[]): { providers: ProviderRecord, read: boolean, error?: string } {
   if (settings === undefined) return { providers: {}, read: false }
-  const readers: { name: string, read: () => unknown }[] = []
-  if (typeof settings.get === 'function') readers.push({ name: 'settings.get', read: () => settings.get?.(LEGACY_NS) })
-  if (typeof settings.section === 'function') readers.push({ name: 'settings.section', read: () => settings.section?.(LEGACY_NS) })
-  let lastError: string | undefined
-  for (const reader of readers) {
+  const resolvedWarning = `宿主只有 settings.get（没有 section），读到的是含 composition base 的合并值：在界面上删除老 ${LEGACY_NS} 段里的路由可能不生效`
+  // 用户层原文。**空也算读到了**：用户把里面的路由删光是合法状态，不能因为空就退回去读 `get()`
+  // ——那是「base ∪ 用户层」的解析值，会把用户刚删掉的路由又读回来（实测 0.1.6 就是这样）。
+  if (typeof settings.section === 'function') {
     try {
-      const providers = providersOf(reader.read())
-      // 「读成功但为空」也算读到了：宿主这个版本就是没有这一节，没什么可丢的
-      if (Object.keys(providers).length > 0) return { providers, read: true }
-      lastError = undefined
+      return { providers: providersOf(settings.section(LEGACY_NS)), read: true }
     } catch (error) {
-      // 这一条读法不可用：留痕（宿主版本差异就靠这条线索），再试下一条
-      lastError = `${reader.name}('${LEGACY_NS}') 读失败：${messageOf(error)}`
-      warnings.push(lastError)
+      warnings.push(`settings.section('${LEGACY_NS}') 读失败：${messageOf(error)}`)
     }
   }
-  return { providers: {}, read: readers.length > 0 && lastError === undefined, ...(lastError === undefined ? {} : { error: lastError }) }
+  // 没有 section（或它读不了）才退回 get()：读到的含 base，删不干净，得说出来
+  if (typeof settings.get === 'function') {
+    try {
+      const providers = providersOf(settings.get(LEGACY_NS))
+      warnings.push(resolvedWarning)
+      return { providers, read: true }
+    } catch (error) {
+      const message = `settings.get('${LEGACY_NS}') 读失败：${messageOf(error)}`
+      warnings.push(message)
+      return { providers: {}, read: false, error: message }
+    }
+  }
+  return { providers: {}, read: false }
 }
 
 /**
@@ -189,9 +247,11 @@ function legacyFromLoader(loader: LoaderService | undefined, warnings: string[])
 /**
  * 读一份合并后的 provider 配置。
  *
- * 合并优先级（低 → 高）：内置默认 → 老 `llm-pi-ai` 段 → 我们条目自己的 config。
- * 我们条目的 providers 非空时**整体接管**：写下去的就是整份合并结果（见 writeProviderRoutes），
- * 界面上的改动因此不会被老段里的同 id 路由shadow掉。
+ * 两代宿主的合并方式不同（因为能写的层不同，见模块头注释）：
+ *   - 0.1.x（`settings` 宿主）：内置默认与条目 config 当 composition base，用户段（`section`）
+ *     叠在上面逐字段合并；{@link ProviderConfigView.bridgeProviders} 只交 base 出去。
+ *   - 0.2.x（`loader` 宿主）：条目一被界面写过（哪怕写成空的 `providers: {}`）就整体接管，
+ *     否则内置默认叠上老段的行；{@link ProviderConfigView.bridgeProviders} 就是完整结果。
  */
 export function readProviderConfig(deps: ProviderConfigDeps): ProviderConfigView {
   const warnings: string[] = []
@@ -214,10 +274,32 @@ export function readProviderConfig(deps: ProviderConfigDeps): ProviderConfigView
   const builtins = deps.builtins ?? BUILTIN_PROVIDERS
   const ownCount = Object.keys(own).length
   const legacyCount = Object.keys(legacy).length
-  const base = ownCount > 0 ? own : legacy
-  const providers: ProviderRecord = { ...builtins, ...base }
-  // 条目接管之后，老段里新加/手改的路由不会再被读（生效的是条目那份）：说出来，别静默失效
-  if (ownCount > 0 && legacyCount > 0) {
+  // 内置默认 + 本插件条目 config：界面在 0.1.x 上写不到这两处，可以安全地当 composition base
+  const compositionBase = mergeLayers(builtins, own) as ProviderRecord
+  const settingsHost = legacySource === 'settings'
+  // 「界面写过没有」不能只看 providers 条数：删掉最后一条路由时界面写下去的是
+  // `providers: {}`，条数又回 0，于是下一次读又把内置默认（和老段残留）加回来——用户眼里
+  // 就是「删不掉」，而 /provider/remove 这时已经把凭据清掉了，卡片直接变 MISSING_CREDENTIAL。
+  // 所以看原始 patch 行里**有没有 providers 这个键**：有（哪怕是空对象）就是接管过了。
+  const ownRaw = settingsHost ? undefined : loaderRowConfig(deps.loader, deps.entryId ?? OWN_ENTRY_ID)
+  // 判据要窄一点：只有 `providers` 真的是个普通对象（哪怕空对象）才算接管。手改 patch 写成
+  // `providers:`（YAML 里键在值为 null）、`[]` 或字符串这种坏形状时按「没写过」处理——
+  // 那种情况下把内置默认与老段一起吞掉，用户会看到一个空的 provider 列表却说不出为什么。
+  const ownRawProviders = isPlainRecord(ownRaw) ? ownRaw['providers'] : undefined
+  const takenOver = ownCount > 0 || isPlainRecord(ownRawProviders)
+  // 两代宿主的合并语义不一样，因为「哪一层可以写」不一样：
+  //   0.1.x（settings）：老段就是用户层、可写，官方读的是 mergeLayers(base, section)。
+  //     所以这里也逐字段深合并，界面显示的 provider 才等于真正生效的那份；base 里只放
+  //     内置默认与条目 config，用户删掉的路由才不会被 base 复活（见 compositionBase 的注释）。
+  //   0.2.x（loader）：老段所在的条目被 patch 禁着、写不进去，界面一写就把**整份合并结果**
+  //     （含内置默认）写进本插件条目，条目从此整体接管：老段只当迁移来源，内置默认也不再额外
+  //     加回来——不然用户删掉内置的那条路由（deepseek）下次读又会冒出来，看着像「删了没反应」。
+  const providers: ProviderRecord = settingsHost
+    ? (mergeLayers(compositionBase, legacy) as ProviderRecord)
+    : (takenOver ? own : (mergeLayers(builtins, legacy) as ProviderRecord))
+  // 条目接管之后，老段里新加/手改的路由不会再被读（生效的是条目那份）：说出来，别静默失效。
+  // 0.1.x 不存在接管（两层是叠着的），所以只在 loader 宿主上提醒。
+  if (!settingsHost && takenOver && legacyCount > 0) {
     const orphans = Object.keys(legacy).filter((id) => own[id] === undefined && deps.deletedIds?.has(id) !== true)
     if (orphans.length > 0) {
       warnings.push(`老 ${LEGACY_NS} 段里有 ${String(orphans.length)} 行已被插件条目覆盖（${orphans.slice(0, 5).join('、')}${orphans.length > 5 ? '…' : ''}）：界面以条目为准，这些行不再生效（要清理就手改 profile patch）`)
@@ -225,10 +307,17 @@ export function readProviderConfig(deps: ProviderConfigDeps): ProviderConfigView
   }
   return {
     providers,
+    bridgeProviders: settingsHost ? compositionBase : providers,
     ownCount,
     legacyCount,
-    builtinCount: Object.keys(builtins).length,
-    mode: ownCount > 0 ? 'own' : (legacyCount > 0 ? 'legacy' : 'builtin'),
+    // 合并结果里有多少条来自内置默认：0.2.x 上条目接管后内置默认不再额外加回来，就是 0
+    builtinCount: !settingsHost && takenOver ? 0 : Object.keys(builtins).length,
+    mode: settingsHost
+      ? (legacyCount > 0 ? 'legacy' : (ownCount > 0 ? 'own' : 'builtin'))
+      : (takenOver ? 'own' : (legacyCount > 0 ? 'legacy' : 'builtin')),
+    // 写不动的那些 route id（0.1.x 上在 composition base 里的）：界面不该给删除入口，
+    // /provider/remove 也要拦住——路由删不掉、凭据却被清了，卡片会变成 MISSING_CREDENTIAL
+    immutableIds: settingsHost ? new Set(Object.keys(compositionBase)) : new Set<string>(),
     legacySource,
     ...(legacyError === undefined ? {} : { legacyError }),
     warnings,
@@ -256,8 +345,11 @@ export function applyProviderOp(providers: ProviderRecord, op: ProviderOp): Prov
   }
   const merged: AnyRecord = { ...(existing ?? {}) }
   for (const field of op.fields) delete merged[field]
-  if (Object.keys(merged).length === 0) delete next[op.routeId]
-  else next[op.routeId] = merged
+  // 删空也要留着这条路由（`{routeId: {}}`）：空 profile 是合法的（两代 profile schema 只有
+  // `models[].id` 是必填），而且正是 OAuth-only 路由的形态——凭据在授权记录里，配置里没有字段。
+  // 顺手摘掉会造成「点一下『改用 OAuth 认证』provider 就没了」：那条路由常见形状恰好只有
+  // apiKeyEnv 一个字段。要删整条走 `unset`（/provider/remove 就是那条），两条 op 各司其职。
+  next[op.routeId] = merged
   return next
 }
 
@@ -372,6 +464,10 @@ export async function writeProviderRoutes(
     ? capable
     : [state.via, ...capable.filter((item) => item !== state.via)]
   let lastError: unknown
+  let lastRealError: unknown
+  // 抛出去时的原因清单：与 warnings 分开记——「这条写路径这个宿主上没有」不该进界面的告警，
+  // 但两条都不通时说清原因还是要的（不然错误文案以「：」结尾，看不出为什么）
+  const reasons: string[] = []
   for (const strategy of strategies) {
     try {
       if (strategy === 'config-editor') {
@@ -388,15 +484,20 @@ export async function writeProviderRoutes(
       return { via: strategy, providers, warnings }
     } catch (error) {
       lastError = error
+      const reason = `${strategy === 'config-editor' ? 'configEditor.edit' : 'settings.mutate'}：${messageOf(error)}`
+      reasons.push(reason)
       // 服务压根不在（0.1.x 没有 configEditor / 0.2.x 的 settings 写不了）不算「失败告警」——
       // 那是版本差异，不是故障；只有真的调用出错才值得报给用户
       if (!(error instanceof ProviderWriteUnavailable)) {
-        warnings.push(`${strategy === 'config-editor' ? 'configEditor.edit' : 'settings.mutate'} 失败：${messageOf(error)}`)
+        warnings.push(reason)
+        lastRealError = error
       }
     }
   }
-  state.lastError = messageOf(lastError)
-  throw new Error(`写 provider 配置失败（两条路都不通）：${warnings.join('；')}`)
+  // 界面上「上一次写配置失败」要显示**真正的原因**：逐条试的时候最后一条往往只是
+  // 「这个宿主上没有 configEditor」，把它当失败原因会把用户引到错的地方
+  state.lastError = messageOf(lastRealError ?? lastError)
+  throw new Error(`写 provider 配置失败（两条路都不通）：${reasons.join('；')}`)
 }
 
 /** 0.2.x：把我们条目的完整 config 写进 profile patch。 */
@@ -465,7 +566,6 @@ export function configWithProviders(config: unknown, liveProviders: () => Provid
   // 而宿主对这份 config 做 structuredClone（Proxy 会抛 DataCloneError），所以这里只能是普通对象。
   const shim: AnyRecord = { ...snapshot }
   let lastMerged = snapshot
-  let lastSignature = signatureOf(snapshot)
   Object.defineProperty(shim, 'get', {
     // 不可枚举：0.1.x 的 Object.entries 不会把它当成一条路由，structuredClone 也不碰它
     value: () => {
@@ -474,11 +574,9 @@ export function configWithProviders(config: unknown, liveProviders: () => Provid
       // 就永远返回挂载那一刻的旧值——界面写了配置要重启 dsh 才生效，正是这个形态。
       // 重读代价是几次对象拼装 + 遍历 loader 条目，可以接受。
       const next = liveProviders()
-      const signature = signatureOf(next)
       // 内容没变就复用同一个对象：官方那套 identity 记忆化才认为「配置没动」，不会白算
-      if (signature !== undefined && signature === lastSignature) return lastMerged
+      if (sameContent(lastMerged, next)) return lastMerged
       lastMerged = next
-      lastSignature = signature
       return lastMerged
     },
     enumerable: false,
@@ -487,45 +585,70 @@ export function configWithProviders(config: unknown, liveProviders: () => Provid
   return { ...config, providers: shim }
 }
 
+/**
+ * 从 loader 条目列表里取某个条目那一行的**原始** config（0.2.x 的 profile patch 行）。
+ *
+ * 为什么要原始那份：`options.config` 是 patch 行里的原文，键在不在看得见；解析后的 config
+ * 里 `providers: {}` 与「压根没写过」长得一样，而这两件事的行为不一样（见 takenOver）。
+ */
+function loaderRowConfig(loader: LoaderService | undefined, entryId: string): AnyRecord | undefined {
+  if (loader === undefined || typeof loader.entries !== 'function') return undefined
+  try {
+    const listed = loader.entries()
+    for (const entry of (Array.isArray(listed) ? listed : [...(listed as Iterable<unknown>)])) {
+      const options = asRecord(asRecord(entry)['options'])
+      if (readString(options['id']) !== entryId) continue
+      return asRecord(options['config'])
+    }
+  } catch {
+    /* 读不到就当没有：takenOver 退回按条数判断 */
+  }
+  return undefined
+}
+
 /** 从 loader 条目里取 options.id（形状不认识就给 undefined）。 */
 function entryIdOf(row: unknown): string | undefined {
   const options = asRecord(asRecord(row)['options'])
   return readString(options['id'])
 }
 
-/** 给 {@link signatureOf} 里出现过的函数编号（同一个函数要拿到同一个号）。 */
-const functionIds = new WeakMap<object, number>()
-/** WeakMap 没有 size，自己数。 */
-let functionIdCount = 0
-
-/** 取（必要时分配）某个函数的编号。 */
-function functionIdOf(fn: object): number {
-  const existing = functionIds.get(fn)
-  if (existing !== undefined) return existing
-  functionIdCount += 1
-  functionIds.set(fn, functionIdCount)
-  return functionIdCount
+/**
+ * 两份配置「内容一样吗」（{@link configWithProviders} 用它决定要不要复用同一个对象）。
+ *
+ * 不用 JSON.stringify 当指纹：那会把 Map/Set/RegExp 之类一律写成 `{}`，内容变了却判成没变，
+ * `get()` 就永远返回旧值；`undefined` 还得靠哨兵，又可能和真值撞车。这里直接比结构：
+ *   - 同一个引用（配置多半是冻住的快照，没变时就是同一个对象）→ 一次 `===` 结束
+ *   - 普通对象逐键比、数组逐项比
+ *   - 其余（Map/Set/RegExp/函数/类实例…）只认同一个引用：认不出就当「变了」，重算一遍
+ *     总比留住旧值强
+ * 递归有深度上限，防止两份不同的循环引用互相追下去；超限按「变了」处理。
+ */
+function sameContent(a: unknown, b: unknown, depth = 0): boolean {
+  if (a === b) return true
+  if (depth > 24) return false
+  if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    return a.every((item, index) => sameContent(item, b[index], depth + 1))
+  }
+  // 普通对象才逐键比。**不能用 isPlainRecord**：它只排除数组，Map/Set 在它眼里也是「记录」，
+  // 而 Map 的条目不是自有可枚举属性（Object.keys 为空）——两个内容不同的 Map 会被判成一样。
+  // 这里按原型判断：只认 Object.prototype / null 原型（配置的普通对象、冻结快照都算）。
+  if (!isStrictPlainObject(a) || !isStrictPlainObject(b)) return false
+  const keys = Object.keys(a)
+  if (keys.length !== Object.keys(b).length) return false
+  for (const key of keys) {
+    if (!Object.hasOwn(b, key)) return false
+    if (!sameContent(a[key], b[key], depth + 1)) return false
+  }
+  return true
 }
 
-/**
- * 配置内容指纹（{@link configWithProviders} 用它判断「内容变了没有」）。
- *
- * `undefined` 这类值 JSON 会丢掉，两份只在 `undefined` 字段上不同的配置就会被判成一样——
- * 用一个不会出现在配置里的哨兵替掉它。算不出来（循环引用之类）就给 `undefined`，调用方
- * 按「变了」处理：宁可多算一次，也不能留住旧值。
- */
-function signatureOf(value: unknown): string | undefined {
-  try {
-    return JSON.stringify(value, (_key, item: unknown) => {
-      // JSON 会丢掉 undefined，两个只在 undefined 字段上不同的配置会被判成一样 → 换哨兵
-      if (item === undefined) return '\u0000undefined'
-      // 函数同理（配置里基本不该出现，出现了也不能让两个不同的函数算成同一个）
-      if (typeof item === 'function') return `\u0000function:${String(functionIdOf(item as object))}`
-      return item
-    })
-  } catch {
-    return undefined
-  }
+/** 普通对象（原型是 Object.prototype 或 null）：Map/Set/RegExp/类实例都不算。 */
+function isStrictPlainObject(value: unknown): value is AnyRecord {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value) as unknown
+  return prototype === Object.prototype || prototype === null
 }
 
 function messageOf(error: unknown): string {
