@@ -70,6 +70,8 @@ export interface ModelDetail {
   thinkingLevels?: string[]
   /** 能力是从哪条链路来的：route 声明 / pi-ai 目录 / 适配器自报。 */
   source?: 'route' | 'catalog' | 'adapter'
+  /** 能力字段是真查到了，还是「不知道」（false 的 false 只有前者能当结论）。 */
+  capabilitiesKnown?: boolean
 }
 
 /** /plan/status 的 accounts 项：额度快照里的一家 provider（宿主在通用字段外还会带几个）。 */

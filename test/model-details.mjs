@@ -38,6 +38,7 @@ const catalog = loadModelDetails(fakePiAi())
 check('目录里读出两条', catalog.length === 2)
 check('目录能力来自 input', catalog[1].vision === true && catalog[0].vision === false)
 check('目录条目标了 catalog 来源', catalog.every((d) => d.source === 'catalog'))
+check('目录里有 input 的条目：能力算查到了', catalog.every((d) => d.capabilitiesKnown === true))
 
 // ---- 链路 1：route 声明盖过目录（自定义 id 的视觉能力就是这么来的）----
 const index = indexDetails(catalog)
@@ -54,11 +55,17 @@ check('自定义 id 新增进来了', custom !== undefined)
 check('自定义 id 的能力按声明给', custom.vision === true && custom.video === false)
 check('自定义 id 的上下文/输出按声明给', custom.contextWindow === 128000 && custom.maxTokens === 4096)
 check('自定义 id 标了 route 来源', custom.source === 'route')
+check('声明了 input 的自定义 id：能力算查到了', custom.capabilitiesKnown === true)
 const overridden = index.get(detailKey('deepseek', 'deepseek-v4-flash'))
 check('声明盖过目录（text → text,image）', overridden.vision === true)
 check('盖过之后仍标 route 来源', overridden.source === 'route')
 check('没声明 input 时保留目录能力', index.get(detailKey('deepseek', 'deepseek-v4-flash-vision-exp')).vision === true)
 check('没声明 input 时也标 route（声明过这条）', index.get(detailKey('deepseek', 'deepseek-v4-flash-vision-exp')).source === 'route')
+check('没声明 input、目录也没写时的能力注明未知（route 简写指向目录里没有的 id）',
+  (() => {
+    applyDeclaredCapabilities(index, [{ routeId: 'nowhere', entry: 'ghost-model' }])
+    return index.get(detailKey('nowhere', 'ghost-model')).capabilitiesKnown === false
+  })())
 
 // ---- 链路 3：适配器自报，只补目录/声明都没覆盖的 provider ----
 const calls = []
@@ -89,6 +96,7 @@ check('自报补了几条', added === 3)
 const adapterVision = index.get(detailKey('modlens-opencode-go', 'deepseek-v4-flash'))
 check('自报的模态变成视觉能力', adapterVision.vision === true)
 check('自报条目标 adapter 来源', adapterVision.source === 'adapter')
+check('自报的模态算查到了', adapterVision.capabilitiesKnown === true)
 check('同名模型不串家：目录那份没被动', index.get(detailKey('deepseek', 'deepseek-v4-flash')).source === 'route')
 const resolved = index.get(detailKey('modlens-opencode-go', 'no-modalities'))
 check('listModels 没报模态时问 resolveModelInfo', calls.includes('resolve:modlens-opencode-go/no-modalities'))
@@ -96,6 +104,7 @@ check('resolveModelInfo 的模态也认', resolved.vision === true)
 check('resolveModelInfo 的上下文/输出一并带上', resolved.contextWindow === 256000 && resolved.maxTokens === 8192)
 const plain = index.get(detailKey('plain-adapter', 'mystery'))
 check('没模态信息的自报照旧列出来（只是不打徽章）', plain !== undefined && plain.vision === false)
+check('没模态信息的自报标成「能力未知」', plain.capabilitiesKnown === false)
 
 // ---- 适配器卡住不能拖死响应 ----
 const started = Date.now()

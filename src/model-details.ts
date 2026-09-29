@@ -40,6 +40,13 @@ export interface ModelDetail {
   thinkingLevels: string[]
   /** 这条详情的来源（界面据此说明「能力从哪来」）。 */
   source?: ModelDetailSource
+  /**
+   * 能力字段是不是真查到了。
+   *
+   * `vision/video` 的 false 有两种意思：「查过，就是不支持」和「不知道」。前者是个结论（文本模型
+   * 不该被说成「能力未知」），后者才该在详情卡里注明未知。有 `input` / `inputModalities` 才算查到。
+   */
+  capabilitiesKnown?: boolean
 }
 
 /** 读一个 pi-ai 包目录的 providers 数据文件，拍平成模型详情数组。 */
@@ -78,6 +85,7 @@ export function loadModelDetails(piAiRoot: string | undefined): ModelDetail[] {
           reasoning: entry['reasoning'] === true,
           thinkingLevels: thinking,
           source: 'catalog',
+          capabilitiesKnown: input.length > 0,
         })
       }
     }
@@ -138,11 +146,16 @@ export function applyDeclaredCapabilities(index: ModelDetailIndex, declared: rea
           reasoning: false,
           thinkingLevels: [],
           source: 'route',
+          capabilitiesKnown: false,
         }
       : { ...previous, source: 'route' }
     if (input.length > 0) {
       detail.vision = input.includes('image')
       detail.video = input.includes('video')
+      detail.capabilitiesKnown = true
+    } else if (previous !== undefined) {
+      // 声明里没写 input：能力沿用目录那份（resolveEntry 的 `declaredInput(...) ?? base?.input`）
+      detail.capabilitiesKnown = previous.capabilitiesKnown === true
     }
     if (detail.contextWindow === undefined) detail.contextWindow = readNumber(raw['contextWindow'])
     if (detail.maxTokens === undefined) detail.maxTokens = readNumber(raw['maxTokens'])
@@ -223,6 +236,7 @@ export async function applyAdapterCapabilities(
         reasoning: false,
         thinkingLevels: [],
         source: 'adapter',
+        capabilitiesKnown: false,
       }
       const modalities = readModalities(model['inputModalities'])
       if (modalities !== undefined) {
@@ -258,6 +272,7 @@ function readModalities(value: unknown): string[] | undefined {
 function applyModalities(detail: ModelDetail, modalities: readonly string[]): void {
   detail.vision = modalities.includes('image')
   detail.video = modalities.includes('video')
+  detail.capabilitiesKnown = true
 }
 
 /** 给一个 promise 套超时（适配器卡住时不能拖死整个响应）。 */

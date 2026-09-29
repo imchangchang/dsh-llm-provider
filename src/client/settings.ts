@@ -388,7 +388,10 @@ function modelTip(model: CatalogModel, account: PlanAccount, detail: ModelDetail
     if (detail.video === true) caps.push(tipCap('视频', 'pv_capVideo'))
     if (detail.reasoning === true) caps.push(tipCap('推理', 'pv_capReason'))
     if (caps.length > 0) rows.push(react.createElement('div', { className: 'pv_tipCaps', key: 'c' }, caps))
-    else rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'nocap' }, '能力未知：三条链路（路由声明 / pi-ai 目录 / 适配器）都没报，所以不打徽章'))
+    else if (detail.capabilitiesKnown === false) {
+      // 能力字段一个都没查到：说清「不知道」，别让人以为这是「都没有」
+      rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'nocap' }, '能力未知：三条链路（路由声明 / pi-ai 目录 / 适配器）都没报，所以不打徽章'))
+    }
     if (detail.contextWindow !== undefined) rows.push(tipLine('上下文窗口', detail.contextWindow.toLocaleString('en-US'), 'cw'))
     if (detail.maxTokens !== undefined) rows.push(tipLine('最大输出', detail.maxTokens.toLocaleString('en-US'), 'mt'))
     rows.push(tipLine('思维链', detail.reasoning === true
