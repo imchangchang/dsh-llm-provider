@@ -185,7 +185,8 @@ export const WINDOW_TIER_ORDER: readonly WindowTier[] = ['5h', '7d', '30d', 'oth
 export function windowTier(name: unknown): WindowTier {
   var text = String(name ?? '')
   if (/\b5\s*小时|5\s*hour/i.test(text) || text.indexOf('5小时') !== -1) return '5h'
-  if (/月|month/i.test(text)) return '30d'
+  // 月窗与「30 天窗口」（kimi 的按天口径）是同一档；「每天窗口」不受影响（它没有 30 这个数字）
+  if (/月|month|30\s*天/i.test(text)) return '30d'
   if (/周|week|订阅/i.test(text)) return '7d'
   return 'other'
 }

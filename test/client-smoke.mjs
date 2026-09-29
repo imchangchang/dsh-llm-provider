@@ -240,6 +240,8 @@ rowsCheck('5 小时窗口 → 5h', shortWindowLabel('5 小时滚动窗口') === 
 rowsCheck('每周窗口 → 7d', shortWindowLabel('每周窗口') === '7d')
 rowsCheck('每月窗口 → 30d（不再被裸「每」吞进 7d）', shortWindowLabel('每月窗口') === '30d')
 rowsCheck('月度限额 → 30d', shortWindowLabel('月度限额') === '30d')
+rowsCheck('30 天窗口 → 30d（kimi 的按天口径）', shortWindowLabel('30 天窗口') === '30d')
+rowsCheck('每天窗口不算 30d', shortWindowLabel('每天窗口') !== '30d')
 rowsCheck('Monthly → 30d', shortWindowLabel('Monthly window') === '30d')
 rowsCheck('Weekly → 7d', shortWindowLabel('Weekly window') === '7d')
 rowsCheck('认不出的窗口名保持原样（截 4 字）', shortWindowLabel('高级请求') === '高级请求')
