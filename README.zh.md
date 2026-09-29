@@ -66,7 +66,9 @@ dsh web                   # 插件树变了，必须重启
 
 pi-ai 更新有两个触发路径：插件启动时后台查一次（6 小时节流，`DSH_PROVIDER_UPDATE=off` 可关），以及设置页上的「检查更新」按钮（`POST /provider/update`）。
 
-两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载。pi-ai 换了版本要重启 dsh 才生效——桥接在进程启动时装载。
+两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载——手动点「检查更新」也会先拿当前生效的那份比一次版本。pi-ai 换了版本要重启 dsh 才生效——桥接在进程启动时装载。
+
+下载一份 pi-ai 要占 80 MB 上下，所以插件只保留「比 dsh 自带那份新」的版本：同名或更旧的重复副本在装完后清掉，npm 缓存放系统临时目录（`<tmpdir>/dsh-llm-provider-npm-cache`），不落在插件目录里。「pi-ai 桥接」标签页显示当前占用（`vendor/` 总量 + npm 缓存），旁边的「清理」按钮（`POST /provider/prune`）删掉不会再被选中的旧版本与缓存；正在用的那份、以及「已下载、等重启生效」的那份都不动。
 
 ### 测试实例
 
@@ -83,11 +85,11 @@ scripts/test-profile.sh stop   # 停掉
 node lib/adapters/run.js all            # 跑全部额度适配器（key 从环境变量或 ~/.dsh/.credentials.yaml 找）
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # 构建 + 九个离线测试；自测与合入跑的就是这条
+npm test                                # 构建 + 十一个离线测试；自测与合入跑的就是这条
 npm run typecheck                       # tsc --noEmit（npm test 不含它）
 ```
 
-九个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
+十一个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、目录链清理（摘链不碰链目标）、旧版本清理的保留规则、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
 
 ## 实现
 
@@ -112,6 +114,8 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | dsh 自带 | 沿官方 bundle 的 `node_modules` 链找到的那份（不写死路径） | 前两个都没装，或检查不通过 |
 
 没安装的来源直接跳过。只有**存在但检查不通过**时才列进「被跳过」并给出原因。dsh 自带那份的版本随 dsh 发布走，不一定比上游旧。
+
+版本相同的重复副本不占热更新档的位置：下载档里版本不高于「本机已有的最好那份」（dsh 自带、兜底依赖）的，排在两个本机来源之后——同样的代码，优先复用本机那份，省掉一份 80 MB 的副本，也免得白重启一次。只有比本机新才排在最前。
 
 后两个来源的目录都不写死。官方 bundle 按这个顺序沿解析链找：profile 的 `node_modules`、dsh 安装树（含嵌在 dsh 包里的 `node_modules`）、最后是本插件。pi-ai 从找到的那份 bundle 位置继续沿解析链找。所以 dsh 换布局（bundle 放进自己的安装目录、依赖提升到别处）不会让某个来源凭空消失。
 
@@ -147,7 +151,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 - 添加供应商：选预设 → 填密钥与端点（带 OAuth 的预设可直接走 OAuth 登录，自动写入同一套凭据存储）→ 通过测试才能写入（目录里有的 provider，这一步读的是 pi-ai 目录、不发请求也不校验密钥，密钥要到发第一条消息时才验；只有自建网关那一步是真·实连探测）。写的是 `settings/mutate` 的 `llm-pi-ai.providers` 段与 `credentials/set`，与官方同一套存储。
 - 补密钥：路由在、凭据没值时，卡片展开体里那一行就是输入框（官方 Models 页已禁用，这是唯一入口）。存完立刻实查一次额度。这种供应商在添加列表里标「缺密钥」而不是「已配置」，不会被禁选堵住。
 - 删除：清路由 + 清凭据。内置原生路由不允许在这里删。
-- 「pi-ai 桥接」标签：当前版本与来源、被跳过的候选及原因、上游版本与检查更新按钮。
+- 「pi-ai 桥接」标签：当前版本与来源、被跳过的候选及原因、磁盘占用与清理按钮、上游版本与检查更新按钮。
 
 ### 额度适配器
 
@@ -186,8 +190,9 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | 路由 | 作用 |
 |---|---|
 | `GET /plan/status` | 各供应商额度快照（60 秒缓存，`?refresh=1` 绕过） |
-| `GET /provider/status` | 桥接状态、路由表、更新状态、测试实例标记 |
+| `GET /provider/status` | 桥接状态、路由表、更新状态、磁盘占用、测试实例标记 |
 | `POST /provider/update` | 手动触发一次上游检查与更新 |
+| `POST /provider/prune` | 清理不会再被选中的 pi-ai 旧版本与 npm 缓存（正在用/待生效的不动） |
 | `GET /provider/models` | pi-ai 模型全量元数据（60 秒缓存；详情卡与能力徽章用） |
 | `GET /provider/presets` | 可添加的供应商预设清单（含已配置标记） |
 | `POST /provider/refresh` | 单卡刷新额度（实查并更新全局快照） |
@@ -293,7 +298,7 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 |---|---|
 | `src/index.ts` | 宿主入口：挂桥接、注册 HTTP 路由 |
 | `src/bridge.ts` | 桥接装载：拷 bundle、按检查挑 pi-ai、管理软链；`hostPackageEntry()` 供按宿主锚点解析官方包 |
-| `src/updater.ts` | 上游更新器：查 registry、校验 tarball、装依赖、标待重启 |
+| `src/updater.ts` | 上游更新器：查 registry、校验 tarball、装依赖、标待重启、清理旧版本与缓存、统计占用 |
 | `src/routes.ts` | 路由发现、官网链接、显示名兜底 |
 | `src/provider-presets.ts` | 添加供应商的预设清单（pi-ai 目录动态生成 + Custom Gateway） |
 | `src/oauth.ts` | OAuth 登录桥：补齐官方没挂的 `authorization` 服务，并把 flow 暴露给浏览器端（5 条 HTTP 路由 + SSE） |
@@ -303,5 +308,5 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
 | `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
-| `test/*.mjs` | 九个离线测试（不进 dsh、不起服务） |
+| `test/*.mjs` | 十一个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |

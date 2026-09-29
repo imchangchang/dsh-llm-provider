@@ -287,6 +287,27 @@ rowsCheck('只有一档时不画线', headlineChips({
   id: 'deepseek', kind: 'quota', windows: [{ window: '每周窗口', percentLeft: 40 }],
 }).filter((c) => c.sep === true).length === 0)
 
+// ---- 磁盘占用行（issue #4：代码 220 KB、运行副本 260 MB，界面得看得见、清得掉）----
+const { piAiStorageRows, formatBytes } = moduleExports
+rowsCheck('字节人性化：MB', formatBytes(82 * 1024 * 1024) === '82 MB')
+rowsCheck('字节人性化：GB', formatBytes(1.5 * 1024 * 1024 * 1024) === '1.5 GB')
+rowsCheck('0 字节不显示成 0 B', formatBytes(0) === '0 MB')
+const storageRows = piAiStorageRows({
+  vendorBytes: 260 * 1024 * 1024,
+  downloads: [{ version: '0.85.1', bytes: 82 * 1024 * 1024 }],
+  cacheBytes: 178 * 1024 * 1024,
+  legacyCacheBytes: 0,
+})
+rowsCheck('占用行给总量', storageRows[0].key === 'disk' && storageRows[0].value === '260 MB')
+rowsCheck('占用行的 title 列出已下载版本', String(storageRows[0].title).indexOf('0.85.1 82 MB') !== -1)
+rowsCheck('缓存行单列', storageRows.some((r) => r.key === 'disk-cache' && r.value === '178 MB'))
+rowsCheck('没有缓存就不出缓存行',
+  piAiStorageRows({ vendorBytes: 1024, downloads: [], cacheBytes: 0, legacyCacheBytes: 0 }).length === 1)
+rowsCheck('老缓存（插件目录里那份）也算进缓存行',
+  piAiStorageRows({ vendorBytes: 1024, downloads: [], cacheBytes: 0, legacyCacheBytes: 5 * 1024 * 1024 })[1].value === '5 MB')
+rowsCheck('拿不到 storage 段就不出占用行', piAiStorageRows(undefined).length === 0)
+rowsCheck('上游行文字', piAiUpstreamText({ latest: '0.86.0' }).indexOf('上游 0.86.0') === 0)
+
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',
   dotClass({ id: 'github-copilot', authConfigured: true, oauthAuthorized: true, kind: 'unknown-provider' }) === 'plan_dot plan_dot_ok')

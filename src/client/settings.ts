@@ -234,6 +234,51 @@ export function piAiUpstreamText(update: unknown): string {
   return '上游 ' + String(updateRecord.latest) + when
 }
 
+/** 字节数人性化：1.2 GB / 82 MB / 512 KB。 */
+export function formatBytes(value: unknown): string {
+  var n = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(n) || n <= 0) return '0 MB'
+  if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB'
+  if (n >= 1024 * 1024) return Math.round(n / 1024 / 1024) + ' MB'
+  return Math.max(1, Math.round(n / 1024)) + ' KB'
+}
+
+/**
+ * 「pi-ai 桥接」标签页里的磁盘占用行（issue #4：代码 220 KB，运行副本 260 MB，界面上得看得见、
+ * 清得掉）。
+ * @param storage - /provider/status 的 storage 段（见宿主 updater 的 vendorUsage）。
+ */
+export function piAiStorageRows(storage: unknown): BridgeRow[] {
+  if (storage === undefined || storage === null) return []
+  var record = storage as AnyRecord
+  var downloads = Array.isArray(record.downloads) ? record.downloads : []
+  var parts = []
+  for (var i = 0; i < downloads.length; i += 1) {
+    var entry = downloads[i] as AnyRecord
+    parts.push(String(entry.version) + ' ' + formatBytes(entry.bytes))
+  }
+  var rows: BridgeRow[] = [
+    {
+      key: 'disk',
+      text: '插件目录占用',
+      value: formatBytes(record.vendorBytes),
+      title: (parts.length > 0 ? '已下载的 pi-ai：' + parts.join('、') : '没有已下载的 pi-ai 版本，跑的是 dsh 自带或用兜底依赖那份')
+        + '。清理只删「不会再被选中」的重复副本与旧版本，正在用的那份一个字节不动。',
+    },
+  ]
+  var cacheBytes = (typeof record.cacheBytes === 'number' ? record.cacheBytes : 0)
+    + (typeof record.legacyCacheBytes === 'number' ? record.legacyCacheBytes : 0)
+  if (cacheBytes > 0) {
+    rows.push({
+      key: 'disk-cache',
+      text: 'npm 缓存',
+      value: formatBytes(cacheBytes),
+      title: '更新依赖时用的 npm 缓存（系统临时目录）。清理掉只影响下次装依赖的速度，不影响已装好的版本。',
+    })
+  }
+  return rows
+}
+
 /** 单个摘要 chip：「5h余量:90% 34min后重置」；余额类无标签只显示金额；sep 为组间分割线。 */
 function headlineChip(chip: HeadlineChip, key: number) {
   if (chip.sep === true) {
@@ -1455,6 +1500,30 @@ export function ProviderSettingsSection() {
       })
   }
 
+  /** 清理旧 pi-ai 副本与 npm 缓存（宿主侧按保留规则判断，正在用的那份不动）。 */
+  function prune() {
+    setBusy(true)
+    setNote('正在清理 ...')
+    postJson('/provider/prune')
+      .then(function (result) {
+        if (result.ok !== true) {
+          setNote('清理失败：' + String((result && result.error) || '未知错误'))
+        } else {
+          var count = Array.isArray(result.removed) ? result.removed.length : 0
+          setNote(count > 0
+            ? '已删除 ' + String(count) + ' 份旧版本，释放 ' + formatBytes(result.freedBytes)
+            : '没有可清理的版本（释放 ' + formatBytes(result.freedBytes) + '）')
+        }
+        refresh(true)
+      })
+      .catch(function (cause) {
+        setNote('清理失败：' + String(cause && cause.message ? cause.message : cause))
+      })
+      .then(function () {
+        setBusy(false)
+      })
+  }
+
   /** 折叠态记忆：undefined 时回落到默认值（报警/错误的卡片默认展开）。 */
   function isOpen(key: string, dflt: boolean) {
     return openMap[key] === undefined ? dflt : openMap[key]
@@ -1474,11 +1543,14 @@ export function ProviderSettingsSection() {
   var bridge = status === null || status.bridge === undefined ? undefined : status.bridge
   var update = status === null || status.update === undefined ? undefined : status.update
   var oauthStatus = status === null || status.oauth === undefined ? undefined : status.oauth
+  var storage = status === null || status.storage === undefined ? undefined : status.storage
   // 桥接明细：放在「pi-ai 桥接」二级标签页里展示。行的内容由 piAiBridgeRows 给（纯函数，离线可测）
   var bridgeRows = piAiBridgeRows(bridge, update, oauthStatus)
+  // 磁盘占用行（issue #4）：不是「桥接状态」而是「它占了多少盘」，排在明细之后、动作按钮之前
+  var storageRows = piAiStorageRows(storage)
   var bridgeLines = []
-  for (var bi = 0; bi < bridgeRows.length; bi += 1) {
-    var row = bridgeRows[bi]
+  /** 一行明细：文本 + 右侧次要文字（title 挂在次要文字上）。 */
+  function detailLine(row: BridgeRow) {
     var children = [row.text]
     if (row.value !== undefined) {
       children.push(react.createElement(
@@ -1487,10 +1559,24 @@ export function ProviderSettingsSection() {
         row.value,
       ))
     }
-    bridgeLines.push(react.createElement(
+    return react.createElement(
       'div',
       { className: 'pv_line' + (row.bad === true ? ' plan_badText' : row.warn === true ? ' plan_warnText' : ''), key: row.key },
       children,
+    )
+  }
+  for (var bi = 0; bi < bridgeRows.length; bi += 1) bridgeLines.push(detailLine(bridgeRows[bi]))
+  for (var si = 0; si < storageRows.length; si += 1) bridgeLines.push(detailLine(storageRows[si]))
+  if (storageRows.length > 0) {
+    bridgeLines.push(react.createElement(
+      'div',
+      { className: 'pv_line', key: 'prune' },
+      '清理只删不会再被选中的旧版本与 npm 缓存，正在用的那份不动',
+      react.createElement(
+        'button',
+        { type: 'button', className: 'pv_action pv_push', disabled: busy, onClick: prune },
+        busy ? '处理中 ...' : '清理',
+      ),
     ))
   }
   // 上游那一行右侧跟按钮：检查更新（宿主先校验下载内容、再做兼容性体检，都过了才等重启生效）

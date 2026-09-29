@@ -22,9 +22,9 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { activePiAiRoot, loadBridge, vendorDir } from './bridge.js'
+import { activePiAiRoot, activePiAiVersion, loadBridge, vendorDir } from './bridge.js'
 import { loadModelDetails, type ModelDetail } from './model-details.js'
-import { checkAndUpdate, startBackgroundCheck } from './updater.js'
+import { checkAndUpdate, pruneVersions, startBackgroundCheck, vendorUsage } from './updater.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
 import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
@@ -370,12 +370,19 @@ export function apply(ctx: PluginContext, config: unknown): void {
     'dsh-llm-provider: /plan/status route',
   )
 
+  // vendor/ 磁盘占用缓存：统计走全目录递归，而 /provider/status 会随设置页反复拉
+  let vendorUsageCache: { at: number, value: ReturnType<typeof vendorUsage> } | undefined
+
   ctx.effect(
     () => webServer.register({
       kind: 'exact',
       path: '/provider/status',
       handler: (_req, res) => {
         const { status: bridgeState, updater } = readVendorState()
+        // 磁盘占用：递归统计 vendor/ 不便宜（几十万个文件），60 秒缓存
+        if (vendorUsageCache === undefined || Date.now() - vendorUsageCache.at > 60_000) {
+          vendorUsageCache = { at: Date.now(), value: vendorUsage() }
+        }
         // 诊断：这一插件实际发现了哪些路由（含凭据名，不含值），排查配置问题时最有用
         const llm = service<LlmService>('llm')
         let declaredCount = -1
@@ -432,6 +439,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
             pending: bridgeState['needsRestart'] === true ? readString(bridgeState['piAiVersion']) : undefined,
             rejected: readRejected(bridgeState['latestRejected']),
           },
+          // 磁盘占用（issue #4）：下载了多少份 pi-ai、npm 缓存多大，界面上能看见才有得清
+          storage: vendorUsageCache.value,
           // 测试环境标识（scripts/test-profile.sh 启动时带 DSH_PROVIDER_TEST=1）：
           // 浏览器端看到后给标题/favicon 加「测」标，一眼区分测试实例
           testMode: process.env.DSH_PROVIDER_TEST === '1',
@@ -452,12 +461,41 @@ export function apply(ctx: PluginContext, config: unknown): void {
           return
         }
         void (async () => {
-          const result = await checkAndUpdate((line) => logger?.info?.(`[pi-ai updater] ${line}`))
+          // 正在用的那份也传进去：手动「检查更新」以前不传，点一次就白下一份同版本副本（issue #4）
+          const result = await checkAndUpdate(
+            (line) => logger?.info?.(`[pi-ai updater] ${line}`),
+            bridge.ok ? bridge.piAiVersion : activePiAiVersion(),
+          )
           json(res, 200, result)
         })()
       },
     }),
     'dsh-llm-provider: /provider/update route',
+  )
+
+  // 清理 vendor 里不会再被选中的 pi-ai 副本与 npm 缓存（「pi-ai 桥接」标签页的清理按钮）
+  ctx.effect(
+    () => webServer.register({
+      kind: 'exact',
+      path: '/provider/prune',
+      handler: (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { allow: 'POST' })
+          res.end()
+          return
+        }
+        try {
+          const result = pruneVersions()
+          // 清理后的占用立刻回报，别让 60 秒缓存继续展示旧数字
+          vendorUsageCache = { at: Date.now(), value: vendorUsage() }
+          logger?.info?.(`[pi-ai updater] 清理完成：删 ${String(result.removed.length)} 份，释放 ${String(Math.round(result.freedBytes / 1024 / 1024))} MB`)
+          json(res, 200, { ok: true, ...result, usage: vendorUsageCache.value })
+        } catch (error) {
+          json(res, 200, { ok: false, error: messageOf(error), usage: vendorUsage() })
+        }
+      },
+    }),
+    'dsh-llm-provider: /provider/prune route',
   )
 
   // 模型详情（悬浮卡）：pi-ai 数据文件的全量元数据，60 秒缓存

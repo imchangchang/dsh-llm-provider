@@ -69,7 +69,9 @@ Providers come from `llm-pi-ai.providers` in `settings.yaml`. With no route ther
 
 pi-ai updates are triggered two ways: once in the background at plugin startup (throttled to 6 hours, `DSH_PROVIDER_UPDATE=off` disables it) and by the 「检查更新」 button on the provider page (`POST /provider/update`).
 
-Either way, **nothing is replaced before it passes both checks**: the tarball integrity from the registry (`dist.integrity`) and the compatibility check. Only then is the new version marked as pending a restart, and a version you already run is not downloaded again. pi-ai versions take effect only after a dsh restart, because the bridge is loaded at process start.
+Either way, **nothing is replaced before it passes both checks**: the tarball integrity from the registry (`dist.integrity`) and the compatibility check. Only then is the new version marked as pending a restart, and a version you already run is not downloaded again — the manual "check for updates" button compares against the version in use first. pi-ai versions take effect only after a dsh restart, because the bridge is loaded at process start.
+
+A downloaded pi-ai costs around 80 MB, so only versions **newer than the one dsh ships with** are kept: a duplicate at the same version or older is removed after an install, and the npm cache lives in the system temp directory (`<tmpdir>/dsh-llm-provider-npm-cache`) instead of the plugin directory. The "pi-ai bridge" tab shows the current footprint (`vendor/` total plus npm cache) next to a "clean up" button (`POST /provider/prune`) that removes versions that can no longer be selected and the cache; the version in use and any version already downloaded and waiting for a restart are left alone.
 
 ### Test instance
 
@@ -86,11 +88,11 @@ The test instance uses a separate profile, so instances can run side by side: `P
 node lib/adapters/run.js all            # run every quota adapter (keys from env or ~/.dsh/.credentials.yaml)
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # build + 7 offline tests; this is what finishing and merging run
+npm test                                # build + 11 offline tests; this is what finishing and merging run
 npm run typecheck                       # tsc --noEmit (npm test does not include it)
 ```
 
-The seven tests cover route discovery, the credential check, the patch layer, the pi-ai check, the provider preset list, the vendor state merge, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
+The 11 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
 
 ## Implementation
 
@@ -115,6 +117,8 @@ Which pi-ai gets used is decided by the [compatibility check](#compatibility-che
 | Bundled with dsh | found along the official bundle's `node_modules` chain (no hardcoded path) | neither of the above is installed, or fails the check |
 
 Sources that are not installed are skipped silently. A source is only listed as skipped, with a reason, when it exists but fails the compatibility check. The pi-ai that ships with dsh follows dsh's own release cycle and is not necessarily older than upstream.
+
+A duplicate at the same version never takes the hot-update slot: a downloaded version that is not newer than the best local source (dsh's own copy, the pinned dependency) is ordered after both local sources — it is the same code, so the local copy is reused and the 80 MB duplicate plus a needless restart are avoided. Only a strictly newer version sorts first.
 
 Neither of the last two directories is hardcoded. The official bundle is resolved along the module resolution chain in this order: the profile's `node_modules`, the dsh installation tree (including the `node_modules` nested inside the dsh package), then this plugin. pi-ai is resolved the same way, starting from the bundle that was found. A different dsh layout (bundle inside its own install directory, dependencies hoisted elsewhere) therefore does not make a source disappear.
 
@@ -150,7 +154,7 @@ Adds a 「模型服务」 tab to the settings page (the official `ui-settings-mo
 - Adding a provider: pick a preset → enter key and endpoint (presets that ship an OAuth flow offer a sign-in button instead, writing to the same credential store) → a live test must pass before it is written. Writes go to `llm-pi-ai.providers` via `settings/mutate` and to the credential store via `credentials/set`, the same storage the official page uses.
 - Adding a key: when a route exists but has no credential, that row in the card body is an input field (the official Models page is disabled, so this is the only place to enter it). Saving it runs a live quota query immediately. Such providers are labelled 「缺密钥」 in the add-provider list rather than 「已配置」, so they stay selectable.
 - Removing: clears the route and the credential. Built-in native routes cannot be removed here.
-- The 「pi-ai 桥接」 sub-tab shows the current version and source, skipped candidates with reasons, the upstream version and the update button.
+- The 「pi-ai 桥接」 sub-tab shows the current version and source, skipped candidates with reasons, the disk footprint with a clean-up button, the upstream version and the update button.
 
 ### Quota adapters
 
@@ -189,8 +193,9 @@ The host compares keys while resolving them for each provider and warns in the U
 | Route | Purpose |
 |---|---|
 | `GET /plan/status` | quota snapshot for every provider (60s cache, `?refresh=1` bypasses it) |
-| `GET /provider/status` | bridge status, route table, update status, test-instance flag |
+| `GET /provider/status` | bridge status, route table, update status, disk footprint, test-instance flag |
 | `POST /provider/update` | trigger one upstream check and update |
+| `POST /provider/prune` | remove pi-ai versions that can no longer be selected and the npm cache (the one in use or pending a restart is untouched) |
 | `GET /provider/models` | full pi-ai model metadata (60s cache; used by detail cards and capability badges) |
 | `GET /provider/presets` | provider presets available for adding (with configured flags) |
 | `POST /provider/refresh` | refresh one card's quota (live query, updates the global snapshot) |
@@ -296,7 +301,7 @@ Boundaries:
 |---|---|
 | `src/index.ts` | host entry: mounts the bridge, registers the HTTP routes |
 | `src/bridge.ts` | bridge loading: copy the bundle, pick pi-ai through the check, manage links; `hostPackageEntry()` resolves official packages through the host anchors |
-| `src/updater.ts` | upstream updater: check the registry, verify the tarball, install, mark pending |
+| `src/updater.ts` | upstream updater: check the registry, verify the tarball, install, mark pending, prune old versions and caches, report disk usage |
 | `src/routes.ts` | route discovery, website links, display name fallback |
 | `src/provider-presets.ts` | preset list for adding a provider (generated from the pi-ai catalog plus Custom Gateway); marks OAuth-only providers |
 | `src/oauth.ts` | OAuth sign-in bridge: mounts the `authorization` service the official bundles never mount, and exposes its flows to the browser (5 HTTP routes + SSE) |
@@ -306,5 +311,5 @@ Boundaries:
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
 | `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | nine offline tests (no dsh, no services) |
+| `test/*.mjs` | 11 offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

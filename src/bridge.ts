@@ -252,6 +252,17 @@ function piAiVersionOf(root: string): string | undefined {
 }
 
 /**
+ * 当前生效那份 pi-ai 的版本号（loadBridge 挑定的那份）。
+ *
+ * 给更新器当「已有什么」用：桥接加载失败时调用方拿不到 loadBridge 的结论，
+ * 再退回这里按 {@link activePiAiRoot} 的静态推断读一次版本，免得白下一份同版本的。
+ */
+export function activePiAiVersion(): string | undefined {
+  const root = activePiAiRoot()
+  return root === undefined ? undefined : piAiVersionOf(root)
+}
+
+/**
  * 从 bundle 源码里抠出它对 pi-ai 的 import 需求。
  *
  * 拷来的那份代码写的是 bare specifier；上游改了导出名或子路径，加载就会炸。
@@ -377,18 +388,39 @@ export function probePiAi(requirements: readonly PiAiRequirement[], root: string
 export function piAiCandidates(): PiAiCandidate[] {
   const list: PiAiCandidate[] = []
   const versions = installedVersions()
+  const downloads: PiAiCandidate[] = []
   for (let i = versions.length - 1; i >= 0; i -= 1) {
     const version = versions[i]
     if (version === undefined) continue
-    list.push({ key: version, version, root: join(piAiVersionsDir, version), link: true })
+    downloads.push({ key: version, version, root: join(piAiVersionsDir, version), link: true })
   }
   const dependency = pluginDependencyRoot()
-  list.push({ key: 'dependency', version: piAiVersionOf(dependency) ?? '内置依赖', root: dependency, link: false })
-  const dshRoot = dshPiAiRoot(findSourceBundle())
-  if (dshRoot !== undefined) {
-    list.push({ key: 'dsh', version: piAiVersionOf(dshRoot) ?? 'dsh 自带', root: dshRoot, link: true })
+  const dependencyCandidate: PiAiCandidate = {
+    key: 'dependency',
+    version: piAiVersionOf(dependency) ?? '内置依赖',
+    root: dependency,
+    link: false,
   }
-  return list
+  const dshRoot = dshPiAiRoot(findSourceBundle())
+  const dshCandidate: PiAiCandidate | undefined = dshRoot === undefined
+    ? undefined
+    : { key: 'dsh', version: piAiVersionOf(dshRoot) ?? 'dsh 自带', root: dshRoot, link: true }
+  const locals = [dependencyCandidate, ...(dshCandidate === undefined ? [] : [dshCandidate])]
+  // 版本号解析不出（'dsh 自带' 这种占位串）的不参与「本机最好那份」的比较。
+  const bestLocal = locals
+    .map((candidate) => candidate.version)
+    .filter((version) => /^\d+(\.\d+)*$/.test(version))
+    .reduce<string | undefined>((best, version) => (best === undefined || compareVersions(version, best) > 0 ? version : best), undefined)
+  // 下载档里**不高于**本机最好那份的排到本机档之后：同一版本优先复用宿主/兜底那份
+  // （省下 80 MB 级的重复副本，也免掉一次「换版本要重启」）。比本机新的照旧排最前——
+  // 热更新的意义就是跑得比宿主新。
+  const redundant = bestLocal === undefined
+    ? []
+    : downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) <= 0)
+  const fresh = bestLocal === undefined
+    ? downloads
+    : downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) > 0)
+  return [...fresh, ...locals, ...redundant]
 }
 
 function readStatus(): AnyRecord {
@@ -397,6 +429,11 @@ function readStatus(): AnyRecord {
   } catch {
     return {}
   }
+}
+
+/** 读 vendor/status.json（启动时写下的那次桥接结论）。清理旧版本时要看 needsRestart。 */
+export function readBridgeStatus(): AnyRecord {
+  return readStatus()
 }
 
 /**
