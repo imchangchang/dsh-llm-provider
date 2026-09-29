@@ -48,11 +48,18 @@ function runApply(commandDuplicate) {
   const registrations = []
   const slotInjects = []
   const injectedServices = []
+  const contributions = []
   let commandRegistered = false
 
   const effect = (fn) => {
     const disposer = fn()
     return typeof disposer === 'function' ? disposer : () => {}
+  }
+  // 桩：sessions 服务。只有一个会话是「寻址到子代理」的，用来验 /model 的 available 过滤。
+  const sessions = {
+    subagentAddress(id) {
+      return id === 'subagent-1' ? { parentId: 'root-1' } : undefined
+    },
   }
   const scope = {
     effect,
@@ -71,9 +78,10 @@ function runApply(commandDuplicate) {
       if (names.includes('commandUi')) {
         callback({
           commandUi: {
-            register() {
+            register(contribution) {
               if (commandDuplicate) throw new Error('ui-commands: duplicate contribution for /model')
               commandRegistered = true
+              contributions.push(contribution)
               return () => {}
             },
           },
@@ -99,14 +107,14 @@ function runApply(commandDuplicate) {
   // 真机上的 ctx 是 cordis 代理：取没 inject 的服务属性直接抛
   // （"cannot get property \"styles\" without inject"）。桩必须照这个行为来，否则
   // 「把 ctx.styles 的读取挪到 try 外面」这种改动测不出来——那一抛会让整个插件加载失败。
-  const ctx = { effect, slots: scope.slots, inject: scope.inject }
+  const ctx = { effect, slots: scope.slots, inject: scope.inject, sessions }
   Object.defineProperty(ctx, 'styles', {
     get() {
       throw new Error('cannot get property "styles" without inject')
     },
   })
   moduleExports.apply(ctx)
-  return { registrations, slotInjects, injectedServices, commandRegistered }
+  return { registrations, slotInjects, injectedServices, commandRegistered, contributions }
 }
 
 // 场景 1：官方 /model 还在（同名注册会抛）——插件必须静默让位，其余座位照常
@@ -146,6 +154,20 @@ if (!(typeof seat.options.priority === 'number' && seat.options.priority < 0)) {
 // 命令注册的两条路径
 if (duplicated.commandRegistered) throw new Error('官方 /model 还在时不该抢注册')
 if (!free.commandRegistered) throw new Error('官方行禁用后我们的 /model 应该注册成功')
+
+// 命令贡献必须带官方契约必填的 available（issue #7）：CommandUiRuntime.candidates() 对注册表里
+// 每一条贡献都直接调它，漏了就是 TypeError，整个 `/` 候选列表（含 composer 的「＋」按钮）一起挂。
+const contribution = free.contributions[0]
+if (contribution === undefined) throw new Error('没有捕获到 /model 命令贡献')
+console.log('命令贡献:', JSON.stringify({
+  name: contribution.name,
+  hasAvailable: typeof contribution.available === 'function',
+  uiKind: contribution.ui && contribution.ui.kind,
+}))
+if (typeof contribution.available !== 'function') throw new Error('命令贡献缺 available（官方契约必填，漏了整个 / 菜单会挂）')
+if (contribution.available({ sessionId: 'session-1' }) !== true) throw new Error('普通会话里 /model 应当可用')
+if (contribution.available({ sessionId: 'subagent-1' }) !== false) throw new Error('寻址到子代理的会话里 /model 应当不可用')
+if (contribution.available(undefined) !== true) throw new Error('没有会话上下文时不该把 /model 藏掉（照可用处理）')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
 const { routeProfileOf, routeRepairOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports

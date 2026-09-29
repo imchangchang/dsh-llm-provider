@@ -258,14 +258,25 @@ export interface CommandOption {
   detail: string
 }
 
+/** 命令回调收到的会话上下文（官方 ClientSessionContext 里我们用到的那一个字段）。 */
+export interface CommandSession {
+  sessionId?: string
+}
+
 export interface CommandContribution {
   name: string
   label: () => string
   description: () => string
+  /**
+   * 官方契约里的**必填**项（`CommandContribution.available(session): boolean`，没有问号）。
+   * 官方的 CommandUiRuntime.candidates() 对注册表里每一条贡献都直接调它，缺了就是 TypeError，
+   * 会把整个 `/` 候选列表打挂——所以这里不给可选。
+   */
+  available: (session: CommandSession | null | undefined) => boolean
   ui: {
     kind: string
-    options: () => Promise<CommandOption[]>
-    onSelect: (option: CommandOption, session: { sessionId?: string } | null | undefined) => unknown
+    options: (session: CommandSession | null | undefined) => Promise<CommandOption[]>
+    onSelect: (option: CommandOption, session: CommandSession | null | undefined) => unknown
   }
 }
 

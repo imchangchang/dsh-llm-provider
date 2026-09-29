@@ -176,7 +176,7 @@ export function apply(ctx: ClientContext) {
   // ui-model-selection 行被禁用时这里才注册得进去；官方在时静默让位（模型座位
   // 靠 priority 遮蔽已经接管，不受影响）。
   ctx.inject(['commandUi'], function (scope) {
-    registerModelCommand(scope)
+    registerModelCommand(scope, sessionsFace)
   })
 }
 
