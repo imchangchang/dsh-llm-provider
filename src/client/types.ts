@@ -57,15 +57,19 @@ export interface CatalogGroup {
   models: CatalogModel[]
 }
 
-/** /provider/models 里的一条模型详情（生效 pi-ai 包的元数据），按模型 id 建索引。 */
+/** /provider/models 里的一条模型详情（生效 pi-ai 包的元数据），按 `provider + id` 建索引。 */
 export interface ModelDetail {
   id?: string
+  /** 这条详情属于哪条 route：同名模型跨 provider，索引必须带上它（issue #5）。 */
+  provider?: string
   contextWindow?: number
   maxTokens?: number
   vision?: boolean
   video?: boolean
   reasoning?: boolean
   thinkingLevels?: string[]
+  /** 能力是从哪条链路来的：route 声明 / pi-ai 目录 / 适配器自报。 */
+  source?: 'route' | 'catalog' | 'adapter'
 }
 
 /** /plan/status 的 accounts 项：额度快照里的一家 provider（宿主在通用字段外还会带几个）。 */

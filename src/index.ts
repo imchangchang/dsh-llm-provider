@@ -23,7 +23,14 @@ import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { activePiAiRoot, activePiAiVersion, loadBridge, vendorDir } from './bridge.js'
-import { loadModelDetails, type ModelDetail } from './model-details.js'
+import {
+  applyAdapterCapabilities,
+  applyDeclaredCapabilities,
+  indexDetails,
+  loadModelDetails,
+  type DeclaredModelEntry,
+  type ModelDetail,
+} from './model-details.js'
 import { checkAndUpdate, pruneVersions, startBackgroundCheck, vendorUsage } from './updater.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
 import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
@@ -504,17 +511,62 @@ export function apply(ctx: PluginContext, config: unknown): void {
     'dsh-llm-provider: /provider/prune route',
   )
 
-  // 模型详情（悬浮卡）：pi-ai 数据文件的全量元数据，60 秒缓存
-  let modelDetailsCache: { at: number; value: ModelDetail[] } | undefined
+  // 模型详情（悬浮卡 + 能力徽章）：三条链路合并（route 声明 → pi-ai 目录 → 适配器自报），60 秒缓存
+  let modelDetailsCache: { at: number, value: ModelDetail[] } | undefined
+  let modelDetailsPending: Promise<ModelDetail[]> | undefined
+  /**
+   * 合并一次详情：目录 + route 声明 + 适配器自报。
+   * 结果按「provider + id」索引建好再摊平成数组下发（客户端也按同一个键查，裸 id 只作兜底）。
+   */
+  async function buildModelDetails(): Promise<ModelDetail[]> {
+    const details = loadModelDetails(activePiAiRoot())
+    const index = indexDetails(details)
+    try {
+      const routes = [...providerRoutes(service<SettingsService>('settings'), service<LlmService>('llm')).values()]
+      const declared: DeclaredModelEntry[] = []
+      for (const route of routes) {
+        if (!Array.isArray(route.models)) continue
+        for (const entry of route.models) declared.push({ routeId: route.id, entry })
+      }
+      applyDeclaredCapabilities(index, declared)
+    } catch (error) {
+      logger?.warn?.(`route 声明的模型能力合并失败：${messageOf(error)}`)
+    }
+    try {
+      const added = await applyAdapterCapabilities(index, service<LlmService>('llm'))
+      if (added > 0) logger?.info?.(`适配器自报补了 ${String(added)} 条模型能力`)
+    } catch (error) {
+      logger?.warn?.(`适配器自报的模型能力合并失败：${messageOf(error)}`)
+    }
+    return [...index.values()]
+  }
   ctx.effect(
     () => webServer.register({
       kind: 'exact',
       path: '/provider/models',
       handler: (_req, res) => {
-        if (modelDetailsCache === undefined || Date.now() - modelDetailsCache.at > 60_000) {
-          modelDetailsCache = { at: Date.now(), value: loadModelDetails(activePiAiRoot()) }
+        const fresh = modelDetailsCache !== undefined && Date.now() - modelDetailsCache.at <= 60_000
+        if (!fresh) {
+          // 同一个请求窗口里并发进来只跑一次（自报那段要 await 适配器）
+          if (modelDetailsPending === undefined) {
+            modelDetailsPending = buildModelDetails()
+              .then((value) => {
+                modelDetailsCache = { at: Date.now(), value }
+                return value
+              })
+              .finally(() => { modelDetailsPending = undefined })
+          }
+          void modelDetailsPending.then(
+            (value) => { json(res, 200, { models: value, fetchedAt: new Date().toISOString() }) },
+            () => { json(res, 200, { models: [], fetchedAt: new Date().toISOString() }) },
+          )
+          return
         }
-        json(res, 200, { models: modelDetailsCache.value, fetchedAt: new Date().toISOString() })
+        const cached = modelDetailsCache
+        if (cached !== undefined) {
+          json(res, 200, { models: cached.value, fetchedAt: new Date().toISOString() })
+          return
+        }
       },
     }),
     'dsh-llm-provider: /provider/models route',

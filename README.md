@@ -88,11 +88,11 @@ The test instance uses a separate profile, so instances can run side by side: `P
 node lib/adapters/run.js all            # run every quota adapter (keys from env or ~/.dsh/.credentials.yaml)
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # build + 11 offline tests; this is what finishing and merging run
+npm test                                # build + 12 offline tests; this is what finishing and merging run
 npm run typecheck                       # tsc --noEmit (npm test does not include it)
 ```
 
-The 11 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
+The 12 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the multi-source merge of model capabilities, the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
 
 ## Implementation
 
@@ -141,7 +141,7 @@ Takes over the composer's `conversation.input.model` slot and the `/model` comma
 - The current selection is the session's own record when there is one, and the catalog default otherwise. The default effort is the `defaultEffort` the catalog declares; when it declares none, the official `Default` label is shown.
 - Switching models **forces a level pick**: choosing a new model no longer closes the menu — it jumps to the effort panel so you confirm a level (with `Default` among the choices; the already-checked level is clickable too — that click *is* the confirmation). The initially selected level is inherited from the previous one: a direct hit on the new model's level table reuses it, otherwise the index is mapped proportionally through interval centres (5-level #3 → 3-level #2). A new model without reasoning metadata shows an empty state with an "OK" button that submits a level-less selection.
 - A session recorded before this plugin may name the official `deepseek-official` route, which no longer exists. That selection is mapped to its current route (`deepseek`) for display and quota, and the seat rewrites the session's record once — the host refuses to send a prompt while the recorded provider has no adapter. The rewrite only happens when the target route and model are both in the catalog.
-- Extras: provider filter chips with quota dots, cross-provider search (substring, acronym, edit distance), capability badges, context labels, and a model detail card.
+- Extras: provider filter chips with quota dots, cross-provider search (substring, acronym, edit distance), capability badges, context labels, and a model detail card. Details are looked up by `provider + id` (the same model id belongs to several providers and a bare-id index mixes them up); when none of the three sources has an answer no badge is shown, the detail card says the capability is unknown and names the source it did use.
 - **Models are filtered by the account's entitlement list.** Pi-ai records which models an account may use in the credential at sign-in (`availableModelIds`); the host exposes it as `availableModels` on `/plan/status` and both the picker and the card filter by it. The static catalog and the entitlement are different things — the Copilot catalog lists 28 models while one account may only use 6, and picking outside the list earns a 400 `model_not_supported`. The currently selected model stays listed even when it falls outside, so it never looks like it vanished.
 - The quota indicator on the trigger reads the same snapshot as the provider cards and shows the tightest window's percentage; the card lists every window separately.
 - When space runs out, the provider segment is hidden first and the model name is truncated last; effort and quota never shrink. Below a composer width of 760px the provider segment is hidden, below 620px the quota drops to a dot. The pill is capped at `min(560px, 60cqw)`, and the full name is always in its `title`.
@@ -197,7 +197,7 @@ The host compares keys while resolving them for each provider and warns in the U
 | `GET /provider/status` | bridge status, route table, update status, disk footprint, test-instance flag |
 | `POST /provider/update` | trigger one upstream check and update |
 | `POST /provider/prune` | remove pi-ai versions that can no longer be selected and the npm cache (the one in use or pending a restart is untouched) |
-| `GET /provider/models` | full pi-ai model metadata (60s cache; used by detail cards and capability badges) |
+| `GET /provider/models` | model metadata merged from three sources: `input` declared by the route → the pi-ai catalog → adapter self-report (`listModels`/`resolveModelInfo`, only for providers the catalog does not cover, with per-call and total timeouts). 60s cache; used by detail cards and capability badges |
 | `GET /provider/presets` | provider presets available for adding (with configured flags) |
 | `POST /provider/refresh` | refresh one card's quota (live query, updates the global snapshot) |
 | `POST /provider/remove` | remove a provider (route and credential) |
@@ -306,11 +306,11 @@ Boundaries:
 | `src/routes.ts` | route discovery, website links, display name fallback |
 | `src/provider-presets.ts` | preset list for adding a provider (generated from the pi-ai catalog plus Custom Gateway); marks OAuth-only providers |
 | `src/oauth.ts` | OAuth sign-in bridge: mounts the `authorization` service the official bundles never mount, and exposes its flows to the browser (5 HTTP routes + SSE) |
-| `src/model-details.ts` | model details: read the providers data files of the active pi-ai package |
+| `src/model-details.ts` | model details and capabilities: read the providers data files of the active pi-ai package, then merge the route's declared `input` and the adapter's self-reported modalities (indexed by `provider + id`) |
 | `src/pi-ai-names.ts` | read names from the pi-ai registry (the source of display names) |
 | `src/credential-check.ts` | credential check |
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
 | `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `model-editor` (model list editor) · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | 11 offline tests (no dsh, no services) |
+| `test/*.mjs` | 12 offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

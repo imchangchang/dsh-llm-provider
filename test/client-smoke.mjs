@@ -445,6 +445,27 @@ rowsCheck('声明过清单时给「恢复跟随目录」出口', declaredEditor.
 rowsCheck('声明过清单时状态行说是自己声明的', declaredEditor.indexOf('自己声明的 2 个') !== -1)
 rowsCheck('声明行的字段出现在面板里', declaredEditor.indexOf('deepseek-flash') !== -1 && declaredEditor.indexOf('low,high=max') !== -1)
 
+// ---- 能力详情按 provider + id 建索引（issue #5：裸 id 会让同名模型串家）----
+const { buildDetailMap, detailOf, detailSourceLabel } = moduleExports
+const detailPayload = [
+  { id: 'claude-opus-5', provider: 'anthropic', vision: true, source: 'catalog' },
+  { id: 'claude-opus-5', provider: 'cloudflare-ai-gateway', vision: false, source: 'catalog' },
+  { id: 'deepseek-flash', provider: 'opencode-go', vision: true, source: 'route' },
+  { id: 'only-here', provider: 'solo', vision: true, source: 'adapter' },
+]
+const detailMap = buildDetailMap(detailPayload)
+rowsCheck('同名模型按 provider 各查各的',
+  detailOf(detailMap, 'anthropic', 'claude-opus-5').vision === true
+  && detailOf(detailMap, 'cloudflare-ai-gateway', 'claude-opus-5').vision === false)
+rowsCheck('自定义 id 在 route 那一份上查得到', detailOf(detailMap, 'opencode-go', 'deepseek-flash').vision === true)
+rowsCheck('跨 provider 的同名 id 不互相兜底', detailOf(detailMap, 'opencode-go', 'claude-opus-5') === undefined)
+rowsCheck('全局唯一的 id 允许裸兜底', detailOf(detailMap, 'unknown-route', 'only-here').vision === true)
+rowsCheck('空表返回 undefined', detailOf(undefined, 'x', 'y') === undefined)
+rowsCheck('来源文案三档', detailSourceLabel('route').indexOf('路由声明') === 0
+  && detailSourceLabel('catalog') === 'pi-ai 目录'
+  && detailSourceLabel('adapter') === '适配器自报')
+rowsCheck('认不出的来源不硬编', detailSourceLabel('whatever') === undefined)
+
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',
   dotClass({ id: 'github-copilot', authConfigured: true, oauthAuthorized: true, kind: 'unknown-provider' }) === 'plan_dot plan_dot_ok')

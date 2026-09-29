@@ -21,6 +21,7 @@ import {
   startOauthAttempt,
   withKey,
   withKeys,
+  detailOf,
 } from './data.js'
 import { dotClass, formatContext, fuzzyMatch, headlineChips, linkTextOf, modelVisible, refreshable, relativeTime, resetCountdownText, shortName, toneColor, worstPercent } from './format.js'
 import { caretSvg } from './icons.js'
@@ -345,7 +346,7 @@ function headlineChip(chip: HeadlineChip, key: number) {
 
 /** 模型行：名称 + 能力徽章（视觉/推理/视频）+ 上下文标签，悬浮出 Cherry 式详情卡。 */
 function modelRow(model: CatalogModel, account: PlanAccount, detailsById: Record<string, ModelDetail> | undefined | null) {
-  var detail = detailsById === undefined || detailsById === null ? undefined : detailsById[model.id]
+  var detail = detailOf(detailsById, account.id, model.id)
   var cw = detail !== undefined && detail.contextWindow !== undefined ? detail.contextWindow : model.contextWindow
   var ctx = formatContext(cw)
   var caps = []
@@ -365,6 +366,17 @@ function modelRow(model: CatalogModel, account: PlanAccount, detailsById: Record
   )
 }
 
+/**
+ * 能力来源的显示名（issue #5 的四条链路）。
+ * @param source - 详情里的 source 字段。
+ */
+export function detailSourceLabel(source: unknown): string | undefined {
+  if (source === 'route') return '路由声明（settings.yaml）'
+  if (source === 'catalog') return 'pi-ai 目录'
+  if (source === 'adapter') return '适配器自报'
+  return undefined
+}
+
 /** Cherry 式模型详情卡：服务商 / 模型 ID / 能力标记 / 上下文 / 最大输出 / 思维链。 */
 function modelTip(model: CatalogModel, account: PlanAccount, detail: ModelDetail | undefined) {
   var rows = [react.createElement('div', { className: 'pv_tipTitle', key: 't' }, model.name)]
@@ -376,13 +388,16 @@ function modelTip(model: CatalogModel, account: PlanAccount, detail: ModelDetail
     if (detail.video === true) caps.push(tipCap('视频', 'pv_capVideo'))
     if (detail.reasoning === true) caps.push(tipCap('推理', 'pv_capReason'))
     if (caps.length > 0) rows.push(react.createElement('div', { className: 'pv_tipCaps', key: 'c' }, caps))
+    else rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'nocap' }, '能力未知：三条链路（路由声明 / pi-ai 目录 / 适配器）都没报，所以不打徽章'))
     if (detail.contextWindow !== undefined) rows.push(tipLine('上下文窗口', detail.contextWindow.toLocaleString('en-US'), 'cw'))
     if (detail.maxTokens !== undefined) rows.push(tipLine('最大输出', detail.maxTokens.toLocaleString('en-US'), 'mt'))
     rows.push(tipLine('思维链', detail.reasoning === true
       ? (Array.isArray(detail.thinkingLevels) && detail.thinkingLevels.length > 0 ? detail.thinkingLevels.join('、') : '自动')
       : '关闭', 'tk'))
+    var sourceLabel = detailSourceLabel(detail.source)
+    if (sourceLabel !== undefined) rows.push(tipLine('能力来源', sourceLabel, 'src'))
   } else {
-    rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'dim' }, '该模型没有本地元数据'))
+    rows.push(react.createElement('div', { className: 'pv_tipDim', key: 'dim' }, '该模型没有本地元数据：能力未知，不打徽章（不猜）'))
   }
   return react.createElement('div', { className: 'pv_tip' }, rows)
 }
