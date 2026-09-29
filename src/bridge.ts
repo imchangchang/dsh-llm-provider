@@ -17,7 +17,7 @@
  * 边界：本模块只写插件自己的 vendor/ 目录，pi-ai 本身的文件一个字节都不改——改第三方包的
  * 文件不可复现，也没法保证跟 lockfile 对得上。
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -350,7 +350,7 @@ export function probePiAi(requirements: readonly PiAiRequirement[], root: string
     const linkDir = join(dir, 'node_modules', '@earendil-works')
     mkdirSync(linkDir, { recursive: true })
     const link = join(linkDir, 'pi-ai')
-    rmSync(link, { force: true, recursive: true })
+    removeLinkOrDir(link)
     const spec = linkSpec(linkDir, root)
     symlinkSync(spec.target, link, spec.type)
     // 具名需求验证导出存在；bare 需求（namespace/默认/副作用导入、export *）只要子路径能加载
@@ -492,6 +492,41 @@ export function loadBridge(): BridgeLoadResult {
   }
 }
 
+/**
+ * 清掉一个路径：链就摘链，真目录才递归删。
+ *
+ * **为什么不能直接 `rmSync(path, { recursive: true })`**：Windows 上这里的链是 junction，
+ * 从 Node 24.15 起（dsh 自带运行时就是这一档：electron 43 / node 24.18）递归删会**连目标目录的
+ * 内容一起删掉**，只留一个空壳；同一句在 node ≤24.14 上只是摘链。链指向 dsh 自带那份 pi-ai 时，
+ * 等于每启动一次就把宿主那份清空——之后「桥接不可用 → 卸载插件 → 官方 llm-pi-ai 去加载已被清空的
+ * 那份 → dsh 起不来」。issue #4 / #6 的事故链就是这三行。
+ *
+ * 所以先 lstat（junction 在 lstat 下就是 symbolicLink），是链只 unlink，一个字节都不碰目标；
+ * 真目录（探针目录这类自己 mkdir 出来的）才递归删，且必须在 allowedRoot 内——拦住拼错路径
+ * 把用户目录删掉的写法。
+ *
+ * @param path - 要清掉的路径。
+ * @param allowedRoot - 允许递归删的根（默认 vendor/）；链不受此限制（摘链不改目标）。
+ */
+export function removeLinkOrDir(path: string, allowedRoot: string = vendorDir): void {
+  let info
+  try {
+    info = lstatSync(path)
+  } catch {
+    return // 本来就不存在：清链是幂等动作
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    unlinkSync(path)
+    return
+  }
+  const resolved = resolve(path)
+  const root = resolve(allowedRoot)
+  if (resolved !== root && !resolved.startsWith(root + sep)) {
+    throw new Error(`拒绝递归删除 vendor 之外的目录：${resolved}`)
+  }
+  rmSync(resolved, { force: true, recursive: true })
+}
+
 /** 把桥接副本的 pi-ai 链指向指定包目录（指向没变就不动，避免无谓的 mtime 抖动）。 */
 function setPiAiLink(target: string): void {
   const linkDir = join(bridgeDir, 'node_modules', '@earendil-works')
@@ -505,7 +540,7 @@ function setPiAiLink(target: string): void {
     current = readlinkSync(linkPath)
   } catch { /* 还没有链 */ }
   if (current === spec.target) return
-  rmSync(linkPath, { force: true, recursive: true })
+  removeLinkOrDir(linkPath)
   symlinkSync(spec.target, linkPath, spec.type)
 }
 
@@ -515,7 +550,7 @@ function setPiAiLink(target: string): void {
  * 这就是"回退到内置依赖"的动作——不用另外指一条链过去，Node 会自己往上找。
  */
 function clearPiAiLink(): void {
-  rmSync(join(bridgeDir, 'node_modules', '@earendil-works', 'pi-ai'), { force: true, recursive: true })
+  removeLinkOrDir(join(bridgeDir, 'node_modules', '@earendil-works', 'pi-ai'))
 }
 
 /**
