@@ -243,15 +243,17 @@ npm run typecheck  # tsc --noEmit
 
 ## 已知缺口
 
+版本节奏：**0.2.x 只收修复**；下面标了「0.3.x」的两条属于功能补齐，排在 0.3.x。
+
 官方那些条目有、本插件没有的：
 
-- **逐模型清单编辑只有个通用替代**。卡片展开体里「模型（N）」下面有「编辑清单」（`src/client/model-editor.ts`）：勾选要暴露的模型、或整份换成自定义清单，行内可改 `id` / `name` / `contextWindow` / `maxTokens` / `input`（文本、图片、视频）/ `reasoningEfforts` / `compat.thinkingFormat`，保存写回 `llm-pi-ai.providers.<id>.models`。与官方那套的差别：官方按 schema 给每类 provider 定制表单，这里是一张通用表格；`reasoningEfforts` 在配置里是 `{档位: 线上值}` 映射，界面上写成 `low,high=max` 这样的文本（留空 = 沿用 pi-ai 目录那份，`false` = 不推理）。保存前先校验（id 空、重名、非正整数、不认识的档位都不让存），因为宿主对清单是 strict 解析，一条坏的会让整条路由不可用。编辑器只对 `llm-pi-ai` 路由显示——原生路由（`deepseek-official` 这类）的模型不写在这套设置里；另外只在「能力查到了」或用户亲手动过勾选时才写 `input`：详情还没到就保存，不会拿一个占位的 `text` 把目录里的视觉能力盖掉。
+- **逐模型清单编辑只有个通用替代（官方式表单排 0.3.x）**。卡片展开体里「模型（N）」下面有「编辑清单」（`src/client/model-editor.ts`）：勾选要暴露的模型、或整份换成自定义清单，行内可改 `id` / `name` / `contextWindow` / `maxTokens` / `input`（文本、图片、视频）/ `reasoningEfforts` / `compat.thinkingFormat`，保存写回 `llm-pi-ai.providers.<id>.models`。与官方那套的差别：官方按 schema 给每类 provider 定制表单，这里是一张通用表格；`reasoningEfforts` 在配置里是 `{档位: 线上值}` 映射，界面上写成 `low,high=max` 这样的文本（留空 = 沿用 pi-ai 目录那份，`false` = 不推理）。保存前先校验（id 空、重名、非正整数、不认识的档位都不让存），因为宿主对清单是 strict 解析，一条坏的会让整条路由不可用。编辑器只对 `llm-pi-ai` 路由显示——原生路由（`deepseek-official` 这类）的模型不写在这套设置里；另外只在「能力查到了」或用户亲手动过勾选时才写 `input`：详情还没到就保存，不会拿一个占位的 `text` 把目录里的视觉能力盖掉。
 - **「当前模型不可路由」置灰**。官方 `ui-model-selection` 会在当前模型无法路由时把 composer 置灰；该条目被禁用后，当前供应商没配好时输入框照样能用。
 - **官方引导流程**。Models 页带的 DeepSeek 引导没有替代。
 
 如实说明（没验到的、没做的）：
 
-- **桥接整体不可用时只有局部提示**。候选全灭（目录坏了、权限问题、上游改导出名）时插件会退回「纯计费模式」，官方那四条条目仍被 patch 禁用，于是模型列表空掉——这时只有「pi-ai 桥接」标签页里一行错误行（`bridge.active === false`），composer 那边没有任何提示。要一眼看懂得再加一条全局告警，目前没做。
+- **桥接整体不可用时只有局部提示（全局告警排 0.3.x）**。候选全灭（目录坏了、权限问题、上游改导出名）时插件会退回「纯计费模式」，官方那四条条目仍被 patch 禁用，于是模型列表空掉——这时只有「pi-ai 桥接」标签页里一行错误行（`bridge.active === false`），composer 那边没有任何提示。要一眼看懂得再加一条全局告警，目前没做。
 
 - **多端点 / 多协议的 provider 没有实连验证过**。判定按官方回落链推的、离线断言也覆盖了，但 OpenRouter / Fireworks / opencode / opencode-go / Cloudflare / Bedrock 这几家没有可用的 key，没跑过真实发送（Copilot / DeepSeek 这类单端点是实连过的）。
 - **可用模型是登录时的快照**。OAuth 登录时 pi-ai 记下 `availableModelIds`，模型列表按它过滤；账号权益变了（放开新模型、升级订阅）要重新登录一次才刷新。
