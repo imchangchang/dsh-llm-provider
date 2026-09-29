@@ -16,10 +16,11 @@ function check(name, actual, expected) {
   }
 }
 
-const piAiSettings = {
-  get: (ns) => (ns === 'llm-pi-ai'
-    ? { providers: { 'kimi-coding': { apiKeyEnv: 'KIMI_CODING_API_KEY', api: 'anthropic-messages' }, 'zai-coding-cn': { apiKeyEnv: 'ZAI_CODING_CN_API_KEY' } } }
-    : undefined),
+// providers 记录：读取（0.1.x 的 settings 段 / 0.2.x 的条目 config / 合并优先级）在
+// test/provider-config.mjs 里测；这里只测「记录 → 路由表」的映射与原生路由那一条来源。
+const piAiProviders = {
+  'kimi-coding': { apiKeyEnv: 'KIMI_CODING_API_KEY', api: 'anthropic-messages' },
+  'zai-coding-cn': { apiKeyEnv: 'ZAI_CODING_CN_API_KEY' },
 }
 // llm 服务：llm-pi-ai 的目录条目 + 原生 deepseek-official
 const llm = {
@@ -30,51 +31,33 @@ const llm = {
   ],
 }
 
-const merged = providerRoutes(piAiSettings, llm)
+const merged = providerRoutes(piAiProviders, llm)
 check('配置过的 pi-ai 路由都在', [...merged.keys()].sort(), ['kimi-coding', 'zai-coding-cn', 'deepseek-official'].sort())
 check('未配置的 catalog provider 不进面板', merged.has('openai'), false)
 check('原生路由用已知默认凭据名', merged.get('deepseek-official').apiKeyEnv, 'DEEPSEEK_API_KEY')
 check('原生路由带友好名', merged.get('deepseek-official').label, 'DeepSeek')
-check('get() 给出的凭据名带上了', merged.get('kimi-coding').apiKeyEnv, 'KIMI_CODING_API_KEY')
-check('settings 里的协议带到路由上（卡片展开体要展示）', merged.get('kimi-coding').api, 'anthropic-messages')
-check('settings 没写协议就是 undefined，不编造', merged.get('zai-coding-cn').api, undefined)
+check('providers 里的凭据名带上了', merged.get('kimi-coding').apiKeyEnv, 'KIMI_CODING_API_KEY')
+check('providers 里的协议带到路由上（卡片展开体要展示）', merged.get('kimi-coding').api, 'anthropic-messages')
+check('没写协议就是 undefined，不编造', merged.get('zai-coding-cn').api, undefined)
 check('原生路由没有协议', merged.get('deepseek-official').api, undefined)
 
-// 场景：llm 服务不可用（老 dsh）→ 只靠 settings
-const noLlm = providerRoutes(piAiSettings, undefined)
+// 场景：llm 服务不可用（老 dsh）→ 只靠 providers
+const noLlm = providerRoutes(piAiProviders, undefined)
 check('llm 缺席时不崩，仍给出 pi-ai 路由', [...noLlm.keys()].sort(), ['kimi-coding', 'zai-coding-cn'])
 
-// 场景：老用户配过官方 llm-deepseek，目录里因此多一条 deepseek-official；插件的 config
-// 已经声明了 pi-ai 的 deepseek——同一家只留一张卡，不能冒出 deepseek-official
-const withPiAiDeepseek = {
-  get: () => ({ providers: { deepseek: { apiKeyEnv: 'DEEPSEEK_API_KEY', api: 'openai-completions' } } }),
-}
+// 场景：老用户配过官方 llm-deepseek，目录里因此多一条 deepseek-official；providers 里
+// 已经有 pi-ai 的 deepseek——同一家只留一张卡，不能冒出 deepseek-official
 check('pi-ai 已在服务这家时不再补原生那一条',
-  [...providerRoutes(withPiAiDeepseek, llm).keys()].sort(), ['deepseek'])
+  [...providerRoutes({ deepseek: { apiKeyEnv: 'DEEPSEEK_API_KEY', api: 'openai-completions' } }, llm).keys()].sort(), ['deepseek'])
 check('没有 pi-ai 那一条时原生路由照旧出来（patch 没生效、或用户删掉了它）',
-  [...providerRoutes({ get: () => ({ providers: {} }) }, llm).keys()].sort(), ['deepseek-official'])
+  [...providerRoutes({}, llm).keys()].sort(), ['deepseek-official'])
 
-// 场景：命名空间没注册（get() 取不到）→ 退回 section()，它直接读 dsh 解析好的文档
-const documentOnly = {
-  get: () => undefined,
-  section: (ns) => (ns === 'llm-pi-ai' ? { providers: { 'moonshotai-cn': { apiKeyEnv: 'MOONSHOTAI_CN_API_KEY' } } } : undefined),
-}
-check('命名空间没注册时退回 section()', [...providerRoutes(documentOnly, llm).keys()].sort(), ['moonshotai-cn', 'deepseek-official'].sort())
+// 场景：providers 缺席（读不到任何来源）→ 只剩原生路由
+check('providers 缺席时仍能给出原生路由', [...providerRoutes(undefined, llm).keys()], ['deepseek-official'])
 
-// 场景：get() 有值就用它——它是合并后的结果，含插件 config base 层那条 deepseek，
-// 而 section() 只有用户写过的那些，拿它当首选会漏掉 DeepSeek
-const bothWays = {
-  get: () => ({ providers: { deepseek: { apiKeyEnv: 'DEEPSEEK_API_KEY' } } }),
-  section: () => ({ providers: { 'kimi-coding': { apiKeyEnv: 'KIMI_CODING_API_KEY' } } }),
-}
-check('get() 优先于 section()', [...providerRoutes(bothWays, undefined).keys()], ['deepseek'])
-
-// 场景：两条路都拿不到 → 只剩原生路由
-check('两条路都空时仍能给出原生路由', [...providerRoutes(undefined, llm).keys()], ['deepseek-official'])
-
-// 场景：get() 和 section() 都抛（section 对非对象节会抛 TypeError）
-const throwing = { get: () => { throw new Error('boom') }, section: () => { throw new TypeError('must be an object') } }
-check('两条路抛错都被吞掉且不影响原生路由', [...providerRoutes(throwing, llm).keys()], ['deepseek-official'])
+// 场景：路由配置形状不认识（null / 字符串）也不能崩
+check('坏形状的路由配置不崩',
+  [...providerRoutes({ broken: null, 'weird-one': 'oops' }, undefined).keys()].sort(), ['broken', 'weird-one'])
 
 check('labelOf 已知 provider 用 pi-ai 名', labelOf('zai-coding-cn'), 'Z.AI Coding CN')
 check('labelOf 未知 provider 按 id 拼', labelOf('my-gateway'), 'My Gateway')

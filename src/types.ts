@@ -96,9 +96,34 @@ export interface SettingsService {
    *
    * 跟 get() 的区别：get() 给的是"解析后"的值（schema 默认 + 插件 config + 用户配置），
    * 但要求命名空间已注册；section() 读的是文档原文，命名空间还没注册时也拿得到。
+   *
+   * 0.2.x 起这两个方法都没了（settings 服务的命名空间 = 已加载插件条目的 id，
+   * 配置读写走 configEditor）——所以它们都是可选的，见 src/provider-config.ts。
    */
   section?: (namespace: string) => AnyRecord | undefined
   mutate?: (namespace: string, ops: readonly SettingsOp[]) => Promise<void>
+}
+
+/**
+ * 0.2.x 的配置编辑器（`ctx.configEditor`）：把插件条目的完整 config 写进 profile patch，
+ * 并由 Loader 立即重载。0.1.x 没有这个服务。
+ */
+export interface ConfigEditorService {
+  /** 可寻址的插件条目（只有 profile 根 include 下、id 唯一且已加载的条目）。 */
+  entries?: () => unknown[]
+  /**
+   * 校验并持久化一条条目的下一版 config。
+   * @param entry - {@link entries} 里的条目对象。
+   * @param change - 由当前 config 与继承层推导出下一版 config（完整替换，不是补丁）。
+   */
+  edit?: (entry: unknown, change: (current: unknown, inherited: unknown) => unknown) => Promise<void>
+  /** profile patch 文件路径（诊断用）。 */
+  documentPath?: string
+}
+
+/** Loader 服务：0.2.x 上从根 include 条目读 profile patch 的原始行（老 `llm-pi-ai` 段在那）。 */
+export interface LoaderService {
+  entries?: () => unknown[]
 }
 
 export interface CredentialsService {

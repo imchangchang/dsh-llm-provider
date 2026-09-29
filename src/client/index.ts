@@ -184,6 +184,6 @@ export function apply(ctx: ClientContext) {
 
 export { normalizeSelection, onPlanChange, mergePlanAccount, dropPlanAccount, parseOauthFrame, isSafeBlankPrompt, buildDetailMap, detailOf, detailKeyOf } from './data.js'
 export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort, effortRowDisabled } from './model-seat.js'
-export { piAiBridgeRows, piAiUpstreamText, piAiStorageRows, formatBytes, deleteConfirmText, addRouteOps, detailSourceLabel, presetPickState, refreshFailure, routeProfileOf, routeRepairOf, authEntryOf } from './settings.js'
+export { piAiBridgeRows, piAiUpstreamText, piAiStorageRows, formatBytes, deleteConfirmText, detailSourceLabel, presetPickState, refreshFailure, routeProfileOf, routeRepairOf, authEntryOf } from './settings.js'
 export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible, shortWindowLabel, windowTier, quotaTipOf } from './format.js'
 export { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, ModelListEditor } from './model-editor.js'

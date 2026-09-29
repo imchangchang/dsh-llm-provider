@@ -252,18 +252,6 @@ export interface AddProviderPanelProps {
    * 这条路由在配置里钉着的地址（用户自己写的企业版端点之类），没钉返回 undefined。
    */
   addressOf?: (routeId: string) => string | undefined
-  /**
-   * 这条路由是不是已经在配置里。
-   *
-   * 已存在时「添加」只能逐字段写：dsh-settings 的 `set` 是整对象覆盖，对已有 route 用它会把
-   * 用户手写的 `models` / `compat.thinkingFormat` / `retryPolicy` 一起抹掉（issue #1）。
-   */
-  existsOf?: (routeId: string) => boolean
-  /**
-   * `/provider/status` 的路由表拿到了没有。false 时「这条路由在不在」无从判断，
-   * 一律按「已在配置里」走逐字段写（猜错也只多写几个字段，不会整段覆盖）。
-   */
-  routesKnown?: boolean
 }
 
 /** 座位注册表：inject(name, factory) + register(描述符, 组件)。 */

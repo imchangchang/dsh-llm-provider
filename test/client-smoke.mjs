@@ -222,6 +222,24 @@ const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source:
 rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
 rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
 
+// ---- 配置写入现状（两代宿主的写入口不同，出问题先看这一行）----
+const storeRow = (store) => piAiBridgeRows({ active: true, piAiVersion: '0.86.0', source: '0.86.0' }, undefined, undefined, store)
+const editorStore = storeRow({ mode: 'own', ownCount: 3, legacyCount: 5, via: 'config-editor', lastError: null, warnings: [], legacyNs: 'llm-pi-ai' })
+const storeLine = editorStore.find((r) => r.key === 'store')
+rowsCheck('出配置写入那一行', storeLine !== undefined)
+rowsCheck('写出走的是哪条路（0.2.x → configEditor）', storeLine.value.indexOf('configEditor') !== -1)
+rowsCheck('写出来源与条数', String(storeLine.title).indexOf('本插件条目') !== -1 && String(storeLine.title).indexOf('自带条目 3') !== -1)
+rowsCheck('0.1.x 的形状也认（settings.mutate）',
+  storeRow({ mode: 'legacy', ownCount: 0, legacyCount: 5, via: 'settings-mutate' }).find((r) => r.key === 'store').value.indexOf('settings.mutate') !== -1)
+rowsCheck('还没写过时不硬说走了哪条',
+  storeRow({ mode: 'builtin', ownCount: 0, legacyCount: 0, via: null }).find((r) => r.key === 'store').value === '还没写过')
+rowsCheck('上次写失败要报警告行',
+  storeRow({ mode: 'legacy', ownCount: 0, legacyCount: 1, via: null, lastError: '两条路都不通' }).some((r) => r.key === 'store-err' && r.warn === true))
+rowsCheck('读来源的告警也列出来',
+  storeRow({ mode: 'builtin', ownCount: 0, legacyCount: 0, warnings: ['settings.get 读失败'] }).some((r) => String(r.key).indexOf('store-warn') === 0))
+rowsCheck('不给 providerStore 段就不出这行',
+  piAiBridgeRows({ active: true, piAiVersion: '0.86.0', source: '0.86.0' }, undefined).every((r) => r.key !== 'store'))
+
 // ---- 不带百分比的窗口（Copilot 的「不限量」）也要出 chip，不能整条消失 ----
 const unlimitedChips = headlineChips({
   id: 'github-copilot', displayName: 'GitHub Copilot', kind: 'quota', authConfigured: true,
@@ -335,48 +353,8 @@ rowsCheck('确认文案说明不可撤销', delText.indexOf('不可撤销') !== 
 rowsCheck('确认文案提到手写配置会消失', delText.indexOf('retryPolicy') !== -1)
 rowsCheck('没有凭据名时不硬凑', deleteConfirmText({ id: 'deepseek' }).indexOf('凭据') === -1)
 
-// ---- 添加供应商别整段覆盖已有 route（issue #1 的「顺带一个提醒」）----
-const { addRouteOps } = moduleExports
-// 桩：照 dsh-settings 的 applyPathOp 实现 set（逐层浅合并），用来验「写完之后原来的字还在不在」
-function applySet(section, op) {
-  const [head, ...rest] = op.path
-  if (rest.length === 0) return { ...section, [head]: op.value }
-  return { ...section, [head]: applySet(section[head] === undefined ? {} : section[head], { ...op, path: rest }) }
-}
-const existingSection = {
-  providers: {
-    'opencode-go': {
-      baseURL: 'https://opencode.ai/zen/go/v1',
-      models: [{ id: 'deepseek-flash', input: ['text', 'image'] }],
-      compat: { thinkingFormat: 'deepseek' },
-      retryPolicy: { maxRetries: 3 },
-    },
-  },
-}
-const freshOps = addRouteOps('opencode-go', { baseURL: 'https://x', apiKeyEnv: 'K' }, false)
-rowsCheck('新路由：一次 set 写整条', freshOps.length === 1 && freshOps[0].path.join('.') === 'providers.opencode-go')
-const mergedOps = addRouteOps('opencode-go', { baseURL: 'https://x', apiKeyEnv: 'K' }, true)
-rowsCheck('已有路由：逐字段写，不再整条覆盖', mergedOps.every((op) => op.path.length === 3))
-let after = existingSection
-for (const op of mergedOps) after = applySet(after, op)
-rowsCheck('手写的 models 活下来', JSON.stringify(after.providers['opencode-go'].models) === JSON.stringify(existingSection.providers['opencode-go'].models))
-rowsCheck('手写的 compat 活下来', after.providers['opencode-go'].compat.thinkingFormat === 'deepseek')
-rowsCheck('手写的 retryPolicy 活下来', after.providers['opencode-go'].retryPolicy.maxRetries === 3)
-rowsCheck('表单里的字段真的写进去了', after.providers['opencode-go'].baseURL === 'https://x' && after.providers['opencode-go'].apiKeyEnv === 'K')
-// 反向对照：老写法（整对象 set）确实会抹掉手写配置——这条要是过了，说明上面几条不是白测
-let clobbered = applySet(existingSection, { op: 'set', path: ['providers', 'opencode-go'], value: { baseURL: 'https://x', apiKeyEnv: 'K' } })
-rowsCheck('对照：整对象 set 会抹掉 models（老写法的毛病）', clobbered.providers['opencode-go'].models === undefined)
-rowsCheck('空路由 id 不产生操作', addRouteOps('  ', { baseURL: 'x' }, false).length === 0)
-// OAuth 路径：已有路由上那条旧的 apiKeyEnv 必须删掉（官方适配器只认它，留着就把 OAuth 堵死）
-const oauthOps = addRouteOps('anthropic', {}, true).filter((op) => op.path[2] === 'apiKeyEnv')
-rowsCheck('OAuth 重建已有路由时 unset apiKeyEnv', oauthOps.length === 1 && oauthOps[0].op === 'unset')
-rowsCheck('走密钥路径时不 unset apiKeyEnv',
-  addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => !(op.op === 'unset' && op.path[2] === 'apiKeyEnv')))
-rowsCheck('新路由不带 unset（整对象 set 本来就不写这个字段）',
-  addRouteOps('deepseek', { apiKeyEnv: 'K' }, false).length === 1)
-rowsCheck('undefined 值的键不发 set', addRouteOps('deepseek', { apiKeyEnv: undefined, baseURL: 'https://x' }, true).length === 2)
-rowsCheck('表单没填的字段不进 ops（原值保持）',
-  addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => op.path[2] === 'apiKeyEnv'))
+// ---- 添加供应商的「别整段覆盖」保证已搬到宿主（src/provider-config.ts 的 applyProviderOp）----
+// 客户端现在只发 { routeId, op: 'merge', value }，逐字段合并由宿主做；测试见 test/provider-config.mjs
 
 // ---- 模型清单编辑器（issue #1：官方 Models 页禁用后，逐模型参数得有条界面上的路）----
 const { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, buildDetailMap } = moduleExports

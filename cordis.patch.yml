@@ -35,20 +35,7 @@
 - insert:
     - id: dsh-llm-provider
       name: '@dsh-one/dsh-llm-provider'
-      # DeepSeek 走 pi-ai 的路由在这里声明：内置 llm-deepseek 被本文件禁用，得有人
-      # 接手。放插件自己的 config（dsh 的 settings 组合是「schema 默认 → 这里 → 用户
-      # settings.yaml 层」，见 dsh-settings 的 mergeLayers）而不是启动时往 settings
-      # 写——插件不写宿主配置。用户想改就在 settings.yaml 里写同名的
-      # llm-pi-ai.providers.deepseek，会覆盖这里的值。
-      #
-      # 不写 api、也不写 baseURL：协议和端点都由 pi-ai 目录决定（deepseek 的模型都在
-      # openai-completions 下，每个模型自带 api 和 baseUrl，工厂也有默认 baseUrl）。
-      # 路由上写了会盖掉模型自己的那份——官方适配器里是
-      # `request.api ?? base?.api ?? routeApi`、`request.baseURL ?? base?.baseUrl ?? providerBaseUrl`，
-      # 多协议多端点的 provider 写死一个就会让另一批发错地方。用户要覆盖（企业版端点这类）
-      # 就在 settings.yaml 里写同名条目。
-      config:
-        providers:
-          deepseek:
-            displayName: DeepSeek
-            apiKeyEnv: DEEPSEEK_API_KEY
+      # providers 不在这里声明：内置默认（DeepSeek 那条）放在 src/provider-config.ts 的
+      # BUILTIN_PROVIDERS 里，因为 0.2.x 宿主把我们条目的 config 同时当成「界面写配置的落点」，
+      # 默认值和用户写入混在同一个键里就没法分优先级了。写配置由 /provider/mutate 按宿主版本
+      # 选路（0.1.x 写 settings 的 llm-pi-ai 段，0.2.x 写 profile patch 里本条目）。

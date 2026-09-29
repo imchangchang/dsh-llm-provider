@@ -125,41 +125,6 @@ export function routeProfileOf(
   return profile
 }
 
-/**
- * 「添加供应商」要写的设置操作（纯函数，离线可测）。
- *
- * 为什么已存在的路由不能再用整对象 `set`：dsh-settings 的 `applyPathOp` 对 `set` 是
- * `{...section, [head]: op.value}`——对一条已经在配置里的 route 点「确认添加」，会把它手写的
- * `models`、`compat.thinkingFormat`、`retryPolicy`、`reasoningEfforts` 一起抹掉，只剩表单里的
- * 那几个字段（issue #1 的「顺带一个提醒」）。所以：
- *   - 路由不存在 → 一次 `set` 写整条（新建语义，本来就是这套字段）；
- *   - 路由已存在 → 逐字段 `set`，只覆盖表单管的键，`models` 这些一个字不动。
- * 表单没填的键不进 `profile`，因此不产生操作，原值保持。
- *
- * @param routeId - 表单里的路由 id。
- * @param profile - 表单产出的字段（见 routeProfileOf）。
- * @param exists - 这条路由当前是否已在配置里。
- */
-export function addRouteOps(routeId: string, profile: AnyRecord, exists: boolean): AnyRecord[] {
-  var id = routeId.trim()
-  if (id === '') return []
-  if (exists !== true) return [{ op: 'set', path: ['providers', id], value: profile }]
-  var ops: AnyRecord[] = []
-  var keys = Object.keys(profile)
-  for (var i = 0; i < keys.length; i += 1) {
-    // undefined 值的键不发（JSON 会把它丢掉，发出去等于一次没写进去的 set）
-    if (profile[keys[i]] === undefined) continue
-    ops.push({ op: 'set', path: ['providers', id, keys[i]], value: profile[keys[i]] })
-  }
-  // 这次走 OAuth（表单没产出 apiKeyEnv）：已有路由上那条旧的要删掉——官方适配器的
-  // resolveApiKey 只要看到 apiKeyEnv 就只认那个 ref，留着等于把 OAuth 堵死
-  // （0.2.0-alpha.3 修的正是这一类）。新路由走整对象 set，本来就不会写这个字段。
-  if (profile['apiKeyEnv'] === undefined) {
-    ops.push({ op: 'unset', path: ['providers', id, 'apiKeyEnv'] })
-  }
-  return ops
-}
-
 /** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
 function piAiSourceLabel(source: unknown): string {
   if (source === 'dependency') return '兜底依赖'
@@ -181,7 +146,7 @@ function piAiSourceHint(source: unknown): string {
  * @param oauth - 同上的 oauth 段（authorization 服务在不在、注册了几条 flow）。缺省不渲染这一行。
  * @returns `[{ key, text, value?, title?, warn? }]`；value 是右侧的次要文字。
  */
-export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown): BridgeRow[] {
+export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown, store?: unknown): BridgeRow[] {
   var rows: BridgeRow[] = []
   if (bridge === undefined || bridge === null) return rows
   var bridgeRecord = bridge as AnyRecord
@@ -240,6 +205,51 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
       })
     } else {
       rows.push({ key: 'oauth-ok', text: 'OAuth 登录可用', value: String(flows) + ' 个登录方式' })
+    }
+  }
+  // provider 配置的读写现状：0.1.x 写 settings 的 llm-pi-ai 段、0.2.x 写 profile patch 里
+  // 本插件的 config；两条路都试过才成功（自愈）也要说出来
+  if (store !== undefined && store !== null) {
+    var storeRecord = store as AnyRecord
+    var via = storeRecord['via']
+    var mode = String(storeRecord['mode'] === undefined ? '' : storeRecord['mode'])
+    var modeText = mode === 'own'
+      ? '本插件条目'
+      : mode === 'legacy'
+        ? '老 ' + String(storeRecord['legacyNs'] === undefined ? 'llm-pi-ai' : storeRecord['legacyNs']) + ' 段'
+        : '内置默认'
+    var viaText = via === 'config-editor'
+      ? 'configEditor（profile patch）'
+      : via === 'settings-mutate'
+        ? 'settings.mutate（settings 段）'
+        : '还没写过'
+    var counts = '自带条目 ' + String(storeRecord['ownCount']) + ' / 老段 ' + String(storeRecord['legacyCount'])
+    rows.push({
+      key: 'store',
+      text: '配置写入',
+      value: viaText,
+      title: '当前 providers 来自' + modeText + '（' + counts + '）。'
+        + '0.2.x 宿主只认插件条目里的 config，0.1.x 宿主读 settings 的 llm-pi-ai 段——'
+        + '两条路都会试，能走通的那条会记住。',
+    })
+    var storeWarnings = Array.isArray(storeRecord['warnings']) ? storeRecord['warnings'] : []
+    if (typeof storeRecord['lastError'] === 'string' && storeRecord['lastError'] !== '') {
+      rows.push({
+        key: 'store-err',
+        text: '上一次写配置失败',
+        value: '看原因',
+        title: String(storeRecord['lastError']),
+        warn: true,
+      })
+    }
+    for (var sw = 0; sw < storeWarnings.length; sw += 1) {
+      rows.push({
+        key: 'store-warn-' + sw,
+        text: '配置来源有告警',
+        value: '看原因',
+        title: String(storeWarnings[sw]),
+        warn: true,
+      })
     }
   }
   // 最近一次检查更新的结论
@@ -617,17 +627,14 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     }
     var typedKey = form.key.trim()
     var routeId = form.routeId.trim()
-    // 路由表没拿到时按「已在配置里」处理：逐字段写对两种情形都成立（不存在时逐字段写同样能
-    // 建出这条路由），而整对象 set 一旦猜错就把用户手写的 models / compat / retryPolicy 抹掉
-    var exists = props.routesKnown === false
-      ? true
-      : (props.existsOf === undefined ? false : props.existsOf(routeId) === true)
-    apiCall('settings/mutate', {
-      ns: 'llm-pi-ai',
-      // 已存在的路由逐字段写（见 addRouteOps）：整对象 set 会把它手写的 models / compat /
-      // retryPolicy 一起抹掉
-      ops: addRouteOps(routeId, profile, exists),
-    })
+    // 配置怎么写由宿主决定（0.1.x 写 settings 的 llm-pi-ai 段，0.2.x 写 profile patch 里本插件
+    // 条目的 config）；merge 是逐字段合并，手写的 models / compat / retryPolicy 一个字不动。
+    postJson('/provider/mutate', { routeId: routeId, op: 'merge', value: profile })
+      .then(function (result: AnyRecord) {
+        if (result === null || result === undefined || result.ok !== true) {
+          throw new Error(String((result && result.error) || '写配置失败'))
+        }
+      })
       .then(function () {
         // 只有手填了密钥才写凭据：OAuth 登录已经把凭据提交到凭据记录里（key 是
         // `llm-pi-ai/<provider>`，与这里的 apiKeyEnv 是两个键空间），拿空字符串去 set
@@ -1457,11 +1464,11 @@ export function ProviderSettingsSection() {
    */
   function dropRouteFields(account: PlanAccount, fields: string[], done: string) {
     setSavingKey(function (prev: AnyRecord) { return withKey(prev, account.id, true) })
-    apiCall('settings/mutate', {
-      ns: 'llm-pi-ai',
-      ops: fields.map(function (field) { return { op: 'unset', path: ['providers', account.id, field] } }),
-    })
-      .then(function () {
+    postJson('/provider/mutate', { routeId: account.id, op: 'unsetFields', fields: fields })
+      .then(function (result: AnyRecord) {
+        if (result === null || result === undefined || result.ok !== true) {
+          throw new Error(String((result && result.error) || '写配置失败'))
+        }
         showToast(done, true)
         setCatTick(function (n: number) { return n + 1 })
         refresh(true)
@@ -1629,8 +1636,9 @@ export function ProviderSettingsSection() {
   var update = status === null || status.update === undefined ? undefined : status.update
   var oauthStatus = status === null || status.oauth === undefined ? undefined : status.oauth
   var storage = status === null || status.storage === undefined ? undefined : status.storage
+  var providerStore = status === null || status.providerStore === undefined ? undefined : status.providerStore
   // 桥接明细：放在「pi-ai 桥接」二级标签页里展示。行的内容由 piAiBridgeRows 给（纯函数，离线可测）
-  var bridgeRows = piAiBridgeRows(bridge, update, oauthStatus)
+  var bridgeRows = piAiBridgeRows(bridge, update, oauthStatus, providerStore)
   // 磁盘占用行（issue #4）：不是「桥接状态」而是「它占了多少盘」，排在明细之后、动作按钮之前
   var storageRows = piAiStorageRows(storage)
   var bridgeLines = []
@@ -2254,17 +2262,6 @@ export function ProviderSettingsSection() {
             // retryPolicy），不存在才整条新建。
             // 三个来源都要查——只认额度快照时，/plan/status 拉不到（或自建路由不在预设列表里）
             // 就会退回整条 set，把用户手写的配置一次抹掉（issue #1 那条提醒的原始形态）。
-            routesKnown: statusLoaded,
-            existsOf: function (routeId: string) {
-              if (piAiRoutes[routeId] === true) return true
-              for (var ei = 0; ei < accounts.length; ei += 1) {
-                if (accounts[ei].id === routeId) return true
-              }
-              for (var pi2 = 0; pi2 < presets.length; pi2 += 1) {
-                if (presets[pi2].id === routeId && presets[pi2].configured === true) return true
-              }
-              return false
-            },
           }),
           cards,
         ),

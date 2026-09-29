@@ -67,6 +67,21 @@ Keys are stored through dsh's own credential service under the route's `apiKeyEn
 
 Providers come from `llm-pi-ai.providers` in `settings.yaml`. With no route there, the quota panel is empty — add one from the settings page as above. Keys are resolved by dsh's credentials service through each route's `apiKeyEnv`.
 
+### Compatibility with dsh versions
+
+One plugin serves both host generations, choosing its path from **runtime capabilities, never from a version number**:
+
+| Capability | 0.1.x (e.g. 0.1.6-alpha.2) | 0.2.x (0.2.0-rc.2 onward) |
+|---|---|---|
+| Where configuration lives | the `llm-pi-ai` section of `settings.yaml` | the **plugin's own entry config** in the profile patch (a settings namespace is the id of a loaded entry) |
+| Read | `settings.get/section('llm-pi-ai')` | the legacy section is read from the loader's profile-patch row; UI writes live in the entry config |
+| Write | `settings.mutate('llm-pi-ai', ops)` | `ctx.configEditor.edit(entry, change)` (writes the profile patch and lets Loader reload) |
+| Providers the official bundle sees | the config passed in **plus `settings.installSection` layering the `llm-pi-ai` section on top** | **only the config passed in** (`config.providers.get()`); it no longer reads the `llm-pi-ai` section |
+
+Merge order (low → high): **built-in defaults** (the DeepSeek route, in `BUILTIN_PROVIDERS` in `src/provider-config.ts`) → **legacy `llm-pi-ai` section** → **this plugin's entry config**. Once the last one has content it takes over completely: the UI writes the whole merged set, so routes from the legacy section are migrated into the entry on the first write, after which edits and deletions work and no same-id route in the legacy section can shadow them.
+
+Both write strategies stay in place and are **chosen by capability, with an automatic switch to the other one and a memory of which works** (self-healing): host upgrades or downgrades, a disabled entry, or a profile patch overridden by a home patch need no configuration change. A "configuration writes" row in the pi-ai bridge tab names the path in use, where providers came from, and any warning that did not clear.
+
 pi-ai updates are triggered two ways: once in the background at plugin startup (throttled to 6 hours, `DSH_PROVIDER_UPDATE=off` disables it) and by the 「检查更新」 button on the provider page (`POST /provider/update`).
 
 Either way, **nothing is replaced before it passes both checks**: the tarball integrity from the registry (`dist.integrity`) and the compatibility check. Only then is the new version marked as pending a restart, and a version you already run is not downloaded again — the manual "check for updates" button compares against the version in use first. pi-ai versions take effect only after a dsh restart, because the bridge is loaded at process start.
@@ -88,11 +103,11 @@ The test instance uses a separate profile, so instances can run side by side: `P
 node lib/adapters/run.js all            # run every quota adapter (keys from env or ~/.dsh/.credentials.yaml)
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # build + 12 offline tests; this is what finishing and merging run
+npm test                                # build + 13 offline tests; this is what finishing and merging run
 npm run typecheck                       # tsc --noEmit (npm test does not include it)
 ```
 
-The 12 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the multi-source merge of model capabilities, the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
+The 13 tests cover route discovery, the credential check, the patch layer, the pi-ai compatibility check, directory-link removal (unlinking must not touch the target), the retention rule for pruning old versions, the multi-source merge of model capabilities, provider configuration across both host generations (including self-healing), the provider preset list, the vendor state merge, the OAuth routes (including mounting and degrading the authorization service), the GitHub Copilot quota parsing, and the browser half's wiring. `AGENTS.md` describes the development workflow (no coding on main, everything in a worktree).
 
 ## Implementation
 
@@ -200,6 +215,7 @@ The host compares keys while resolving them for each provider and warns in the U
 | `GET /provider/models` | model metadata merged from three sources: `input` declared by the route → the pi-ai catalog → adapter self-report (`listModels`/`resolveModelInfo`, only for providers the catalog does not cover, with per-call and total timeouts). 60s cache (`?fresh=1` bypasses it); used by detail cards and capability badges |
 | `GET /provider/presets` | provider presets available for adding (with configured flags) |
 | `POST /provider/refresh` | refresh one card's quota (live query, updates the global snapshot) |
+| `POST /provider/mutate` | write provider configuration (`merge` / `unset` / `unsetFields`); the host picks the write path for the dsh version and self-heals |
 | `POST /provider/remove` | remove a provider (route and credential) |
 | `POST /provider/test` | query one provider's quota with the stored key (read-only, does not update the snapshot) |
 | `GET /provider/oauth/flows` | list the flows registered on `ctx.authorization` (same source as `preset.oauth` on `/provider/presets`) |
@@ -228,7 +244,7 @@ Dependencies are installed with `scripts/install-deps.sh`, not `npm install` dir
 
 ## Boundaries
 
-- **Never writes host configuration.** The dsh installation, `settings.yaml` and credentials are read-only. Writes happen in two places only: the plugin's own `vendor/` (downloaded pi-ai, bridge copy, status files, some of which are written at load time) and explicit user actions in the UI (adding or removing a provider). Nothing host-side is written at startup.
+- **Never writes host configuration.** The dsh installation and credentials are read-only. Writes happen in two places only: the plugin's own `vendor/` (downloaded pi-ai, bridge copy, status files, some of which are written at load time) and explicit user actions in the UI (adding or removing a provider, editing a model list, fixing fields on a card) — and those go through the host's own configuration write path (`settings.mutate` on 0.1.x, `configEditor.edit` on 0.2.x), never by editing files directly. Nothing host-side is written at startup; a legacy `llm-pi-ai` section is only merged into the in-memory view and moves into the plugin entry with the first UI write.
 - **Never modifies third-party files.** Not a byte of pi-ai is patched, even when its model data is a static snapshot that lags behind upstream — patching would break the registry integrity check and make installs unreproducible.
 - **Never modifies official plugins.** Takeover happens by disabling official entries in `cordis.patch.yml` (`llm-pi-ai`, `llm-deepseek`, `ui-model-selection`, `ui-settings-models`); everything else official is untouched. The plugin's own model seat registers with `priority: -10`, which is what would shadow an official occupant at the same slot.
 - **Key values never leave the host process.** The browser half receives conclusions and metadata only (a mask of the first 3 and last 4 characters).
@@ -263,6 +279,7 @@ Capabilities the official entries have that this plugin does not:
 
 Not implemented yet:
 
+- **On 0.2.x the old `llm-pi-ai` section becomes a leftover.** The first UI write migrates its routes into the plugin entry, but the section itself (the `llm-pi-ai` row in the profile patch) cannot be removed — its entry is disabled by this plugin's patch, so the host refuses to write it. It is history from then on; what takes effect is the plugin entry's copy. Cleaning it up means editing the profile patch by hand (`~/.dsh/profiles/<profile>/cordis.patch.yml`).
 - **A dead bridge is only reported locally (a global banner is scheduled for 0.3.x).** When every candidate fails (corrupt directory, permissions, an upstream export rename) the plugin falls back to "billing only", the four official entries stay disabled by the patch and the model list goes empty; the only signal is one error row in the "pi-ai bridge" tab (`bridge.active === false`), with nothing near the composer. A global banner would make this obvious at a glance; it is not implemented.
 
 - A sidebar entry and a global quota badge via `shell.overlay`.
@@ -310,11 +327,12 @@ Boundaries:
 | `src/routes.ts` | route discovery, website links, display name fallback |
 | `src/provider-presets.ts` | preset list for adding a provider (generated from the pi-ai catalog plus Custom Gateway); marks OAuth-only providers |
 | `src/oauth.ts` | OAuth sign-in bridge: mounts the `authorization` service the official bundles never mount, and exposes its flows to the browser (5 HTTP routes + SSE) |
+| `src/provider-config.ts` | provider configuration layer: multi-source merge and capability-probing, self-healing write strategies for both host generations |
 | `src/model-details.ts` | model details and capabilities: read the providers data files of the active pi-ai package, then merge the route's declared `input` and the adapter's self-reported modalities (indexed by `provider + id`) |
 | `src/pi-ai-names.ts` | read names from the pi-ai registry (the source of display names) |
 | `src/credential-check.ts` | credential check |
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
 | `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `model-editor` (model list editor) · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | 12 offline tests (no dsh, no services) |
+| `test/*.mjs` | 13 offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |
