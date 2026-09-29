@@ -17,7 +17,7 @@
 
 - **源码在 `src/`（TypeScript），`lib/` 是构建产物、不入库。** 改完要 `npm run build`
   （= `tsdown`）。插件是 profile 里 `link:` 进来的，跑的就是 `lib/`，忘了构建就是跑旧代码。
-- 自测 = `npm test`（= `npm run build` + `test/*.mjs` 七个离线测试，都在 command line 跑、
+- 自测 = `npm test`（= `npm run build` + `test/*.mjs` 十二个离线测试，都在 command line 跑、
   不起 dsh）。dev-finish 和 dev-merge 都会跑它。
 - `npm run typecheck`（= `tsc --noEmit`）是类型检查，`npm test` 不含它——构建不报类型错，
   类型错了要单独跑才看得见。

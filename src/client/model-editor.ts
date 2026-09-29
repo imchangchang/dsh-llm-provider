@@ -292,6 +292,12 @@ export function ModelListEditor(props: ModelListEditorProps) {
   var busyState = react.useState(false)
   var busy = busyState[0] === true
   var setBusy = busyState[1]
+  // 宿主那份清单变了（保存后刷新回来）就重置草稿：不然面板里留着的是上一版内容。
+  // 依赖用序列化签名——每次渲染都新对象，直接依赖 props.declared 会每帧重置。
+  var declaredSignature = JSON.stringify(props.declared === undefined ? null : props.declared)
+  react.useEffect(function () {
+    setRows(editorRowsOf(props.declared, props.catalog === undefined ? [] : props.catalog, props.detailsById))
+  }, [declaredSignature])
 
   /** 改一行里的某个字段。 */
   function patchRow(key: string, patch: Partial<ModelRow>) {
@@ -538,7 +544,10 @@ export function ModelListEditor(props: ModelListEditorProps) {
       react.createElement(
         'div',
         { className: 'pv_meHint', key: 'me-hint' },
-        '勾选要暴露给这条路由的模型，改完点保存；一份都不勾 = 恢复「跟随目录」。字段留空表示沿用 pi-ai 目录里那份（自定义模型 id 没得沿用，请把上下文与最大输出填全）。',
+        (declaredCount === 0
+          ? '这条路由现在跟随 pi-ai 目录：保存会把当前勾选的模型写成显式清单（此后目录新增的模型不再自动出现）；一份都不勾 = 保持跟随目录。'
+          : '勾选要暴露给这条路由的模型，改完点保存；一份都不勾 = 恢复「跟随目录」。')
+        + '字段留空表示沿用 pi-ai 目录里那份（目录里没有的自定义 id 没得沿用，请把上下文与最大输出填全）。',
       ),
       react.createElement('div', { className: 'pv_meRows', key: 'me-rows' }, rowEls),
       react.createElement('div', { className: 'pv_meActs', key: 'me-acts' }, actions),
