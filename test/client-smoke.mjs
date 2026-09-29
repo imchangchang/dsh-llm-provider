@@ -6,6 +6,7 @@
  *   node test/client-smoke.mjs
  */
 import { readFileSync } from 'node:fs'
+import { applyProviderOp as hostApplyProviderOp, parseProviderOp as hostParseProviderOp, providerStoreStatus } from '../lib/provider-config.js'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -170,7 +171,7 @@ if (contribution.available({ sessionId: 'subagent-1' }) !== false) throw new Err
 if (contribution.available(undefined) !== true) throw new Error('没有会话上下文时不该把 /model 藏掉（照可用处理）')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { routeProfileOf, routeRepairOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
+const { mergeRequestOf, routeClearedFields, routeProfileOf, routeRepairOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -239,6 +240,34 @@ rowsCheck('读来源的告警也列出来',
   storeRow({ mode: 'builtin', ownCount: 0, legacyCount: 0, warnings: ['settings.get 读失败'] }).some((r) => String(r.key).indexOf('store-warn') === 0))
 rowsCheck('不给 providerStore 段就不出这行',
   piAiBridgeRows({ active: true, piAiVersion: '0.86.0', source: '0.86.0' }, undefined).every((r) => r.key !== 'store'))
+// 上面的 store 是测试自己捏的。真正断过一次的是「宿主 payload 里没有这个字段」：
+// 客户端读 status.providerStore，宿主 /provider/status 却没拼它，两边各自的测试都过得去。
+// 所以这里拿宿主真正产出的那份（providerStoreStatus）喂进来。
+const hostStore = providerStoreStatus(
+  { providers: {}, ownCount: 4, legacyCount: 6, builtinCount: 1, mode: 'own', legacySource: 'loader', warnings: [] },
+  { via: 'config-editor' },
+  'dsh-llm-provider',
+)
+const hostRow = storeRow(hostStore).find((r) => r.key === 'store')
+rowsCheck('宿主真产出的 providerStore 能渲染出这一行', hostRow !== undefined)
+rowsCheck('宿主真产出的那份也读得出走的是哪条路', hostRow !== undefined && hostRow.value.indexOf('configEditor') !== -1)
+rowsCheck('宿主真产出的那份也读得出条数',
+  hostRow !== undefined && String(hostRow.title).indexOf('自带条目 4') !== -1 && String(hostRow.title).indexOf('老段 6') !== -1)
+
+// ---- 写路由的请求体：界面发出的包必须被宿主认出来 ----
+// 界面与宿主各测各的一半时，字段名对不上（少带 unsets、op 拼错）两边都是绿的。
+const mergeBody = mergeRequestOf('github-copilot', { api: 'openai-responses' }, [])
+rowsCheck('不带要删的字段时 body 里就没有 unsets', mergeBody.op === 'merge' && mergeBody.unsets === undefined)
+const oauthBody = mergeRequestOf('github-copilot', {}, routeClearedFields(true))
+rowsCheck('OAuth 走完要显式删 apiKeyEnv（逐字段合并下省略不等于删）',
+  JSON.stringify(oauthBody.unsets) === '["apiKeyEnv"]')
+rowsCheck('走密钥那条路不带 unsets', mergeRequestOf('x', { apiKeyEnv: 'K' }, routeClearedFields(false)).unsets === undefined)
+// 真把界面这个包喂给宿主的解析 + 应用：老配置里的 apiKeyEnv 必须消失，其它字段一个不动
+const hostOp = hostParseProviderOp(oauthBody)
+rowsCheck('宿主解析得了界面发来的包', hostOp !== undefined && hostOp.op === 'merge')
+const applied = hostApplyProviderOp({ 'github-copilot': { apiKeyEnv: 'GITHUB_COPILOT_API_KEY', retryPolicy: { maxRetries: 3 } } }, hostOp)
+rowsCheck('合并后老 apiKeyEnv 被删掉', applied['github-copilot'].apiKeyEnv === undefined)
+rowsCheck('同一条路由的其它字段留着', applied['github-copilot'].retryPolicy.maxRetries === 3)
 
 // ---- 不带百分比的窗口（Copilot 的「不限量」）也要出 chip，不能整条消失 ----
 const unlimitedChips = headlineChips({

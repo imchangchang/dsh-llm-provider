@@ -6,6 +6,9 @@
 //          写要走 `ctx.configEditor.edit(条目, change)`
 // 这里用桩服务把两代形状都摆出来，盯四件事：读的合并优先级、两条写策略的选择、
 // 失败自愈（换另一条路并记住）、以及 merge 的「不覆盖手写字段」保证。
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import {
   BUILTIN_PROVIDERS,
   LEGACY_NS,
@@ -14,9 +17,12 @@ import {
   configWithProviders,
   parseProviderOp,
   providersOf,
+  providerStoreStatus,
   readProviderConfig,
   writeProviderRoutes,
 } from '../lib/provider-config.js'
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 let failures = 0
 function check(name, cond) {
@@ -109,8 +115,36 @@ const orphaned = readProviderConfig({
   settings: { get: () => ({ providers: { a: {}, b: {}, c: {} } }) },
   ownConfig: { providers: { a: {} } },
 })
-check('老段里的孤儿路由出 warning', orphaned.warnings.some((w) => w.indexOf('2 条路由不在本插件条目里') !== -1))
+check('老段里的孤儿路由出 warning', orphaned.warnings.some((w) => w.indexOf('有 2 行已被插件条目覆盖') !== -1))
 check('孤儿路由不进生效集合（条目为准）', orphaned.providers.b === undefined && orphaned.providers.a !== undefined)
+
+// 刚被界面删掉的那些不算孤儿：0.2.x 上老段那一行删不掉（条目被 patch 禁着、寻不到址），
+// 用户前脚删完就看到「老段里还有 2 条」会以为没删掉
+const justDeleted = readProviderConfig({
+  settings: { get: () => ({ providers: { a: {}, b: {}, c: {} } }) },
+  ownConfig: { providers: { a: {} } },
+  deletedIds: new Set(['b', 'c']),
+})
+check('刚删掉的 route id 不再算孤儿（不弹假告警）', justDeleted.warnings.every((w) => w.indexOf('已被插件条目覆盖') === -1))
+check('没删过的照样报出来', (() => {
+  const view = readProviderConfig({
+    settings: { get: () => ({ providers: { a: {}, b: {} } }) },
+    ownConfig: { providers: { a: {} } },
+    deletedIds: new Set(['b']),
+  })
+  const viewOther = readProviderConfig({
+    settings: { get: () => ({ providers: { a: {}, b: {} } }) },
+    ownConfig: { providers: { a: {} } },
+  })
+  return view.warnings.every((w) => w.indexOf('覆盖') === -1) && viewOther.warnings.some((w) => w.indexOf('覆盖') !== -1)
+})())
+
+// loader 在场却一条条目都列不出来：树没建好、或我们的读法又错了。宁可算「没读到」，
+// 也不要当成「读到了、老段是空的」——那样护栏放行整份覆盖，会把用户已有路由删光
+const emptyTree = readProviderConfig({ loader: { entries: () => [] } })
+check('loader 列不出条目时算「没读成」并留痕',
+  emptyTree.legacySource === 'none' && emptyTree.legacyError !== undefined
+  && emptyTree.warnings.some((w) => w.indexOf('没列出任何条目') !== -1))
 
 // 护栏：老段读失败 + 条目为空 → 拒绝整份写（否则会把用户已有路由删光）
 const guardedState = {}
@@ -248,12 +282,72 @@ check('0.1.x：没有 configEditor 时走 settings.mutate', write01.via === 'set
 check('unsetFields 在老命名空间里逐字段 unset', onlySettings[0].ops[0].op === 'unset' && onlySettings[0].ops[0].path.join('.') === 'providers.kimi-coding.apiKeyEnv')
 
 // ---- 交给官方 bundle 的 config：两代读法都要认 ----
-const shimConfig = configWithProviders({ retryPolicy: { maxRetries: 1 } }, { a: { api: 'x' } })
+const shimConfig = configWithProviders({ retryPolicy: { maxRetries: 1 } }, () => ({ a: { api: 'x' } }))
 check('0.1.x 读法（普通对象展开）能拿到路由', Object.keys(shimConfig.providers).join(',') === 'a')
 check('0.2.x 读法（.get()）也能拿到同一份', shimConfig.providers.get().a.api === 'x')
 check('其它键透传（retryPolicy 这些官方代码也读）', shimConfig.retryPolicy.maxRetries === 1)
 check('providers 上的 get 不可枚举（不会被 Object.entries 当成路由）', Object.keys(shimConfig.providers).join(',') === 'a')
-check('config 不是对象时也能兜住', configWithProviders(undefined, { b: {} }).providers.get().b !== undefined)
+check('config 不是对象时也能兜住', configWithProviders(undefined, () => ({ b: {} })).providers.get().b !== undefined)
+
+// 宿主会对这份 config 做 structuredClone（dsh-settings 的 describe）：Proxy 会抛 DataCloneError，
+// 所以这里必须是普通对象 + 不可枚举的访问器
+let cloneError = ''
+try {
+  const cloned = structuredClone(shimConfig)
+  check('能过宿主的 structuredClone', cloned.providers.a.api === 'x')
+  check('克隆后 get 还在（克隆的是值，不是访问器）', typeof cloned.providers.get !== 'function' || cloned.providers.get().a.api === 'x')
+} catch (error) {
+  cloneError = error.message
+}
+check('structuredClone 不抛 DataCloneError', cloneError === '')
+
+// 0.2.x 的 volatile 快路径下插件不重挂：get() 必须每次读活值，否则界面写完配置要重启才生效
+let liveProviders = { a: { api: 'x' } }
+let supplierCalls = 0
+const liveShim = configWithProviders({}, () => { supplierCalls += 1; return liveProviders })
+const firstRead = liveShim.providers.get()
+liveProviders = { a: { api: 'x' }, b: { api: 'y' } }
+const secondRead = liveShim.providers.get()
+check('get() 每次都问一遍活值（不是挂载那一刻的快照）', supplierCalls >= 2)
+check('内容变了就给新对象，能看见新路由', secondRead.b !== undefined && secondRead !== firstRead)
+check('内容没变时复用同一个对象（官方那套 identity 记忆化不被打破）',
+  liveShim.providers.get() === secondRead && liveShim.providers.get() === liveShim.providers.get())
+check('第一次读的就是当时的内容', firstRead.b === undefined)
+
+// ---- merge 的 unsets：省略一个字段不等于删掉它 ----
+const unsetsOp = parseProviderOp({ routeId: 'copilot', op: 'merge', value: { api: 'openai-responses' }, unsets: ['apiKeyEnv'] })
+check('parse 认 unsets', unsetsOp !== undefined && unsetsOp.op === 'merge' && unsetsOp.unsets.join(',') === 'apiKeyEnv')
+check('merge 把 unsets 列出的字段删掉（老配置里的 apiKeyEnv 不再挡 OAuth）',
+  applyProviderOp({ copilot: { apiKeyEnv: 'GITHUB_COPILOT_API_KEY', retryPolicy: { maxRetries: 3 } } }, unsetsOp).copilot.apiKeyEnv === undefined
+  && applyProviderOp({ copilot: { apiKeyEnv: 'GITHUB_COPILOT_API_KEY' } }, unsetsOp).copilot.api === 'openai-responses')
+check('merge 不动没列出来的字段', applyProviderOp({ copilot: { apiKeyEnv: 'K' } }, unsetsOp).copilot.retryPolicy === undefined
+  && applyProviderOp({ copilot: { apiKeyEnv: 'K', baseURL: 'https://x' } }, unsetsOp).copilot.baseURL === 'https://x')
+check('没有 unsets 时行为与以前一致（不删任何字段）', (() => {
+  const op = parseProviderOp({ routeId: 'p', op: 'merge', value: { api: 'x' } })
+  return op.unsets === undefined && applyProviderOp({ p: { apiKeyEnv: 'K' } }, op).p.apiKeyEnv === 'K'
+})())
+check('unsets 是空数组时也不带这个键', parseProviderOp({ routeId: 'p', op: 'merge', value: {}, unsets: [] }).unsets === undefined)
+
+// ---- /provider/status 的 providerStore 片段：界面的「配置写入」那一行读它 ----
+const storePayload = providerStoreStatus(
+  { providers: {}, ownCount: 2, legacyCount: 3, builtinCount: 1, mode: 'own', legacySource: 'loader', warnings: ['w'] },
+  { via: 'config-editor', lastError: 'boom' },
+  OWN_ENTRY_ID,
+)
+check('providerStore 带上了界面要读的每个字段',
+  storePayload.mode === 'own' && storePayload.via === 'config-editor' && storePayload.legacyNs === LEGACY_NS
+  && storePayload.ownCount === 2 && storePayload.legacyCount === 3 && storePayload.builtinCount === 1
+  && storePayload.entryId === OWN_ENTRY_ID && storePayload.lastError === 'boom'
+  && JSON.stringify(storePayload.warnings) === '["w"]')
+check('还没写过时 via / lastError 是 null（不是 undefined，JSON 里要能看见「还没写过」）',
+  providerStoreStatus({ providers: {}, ownCount: 0, legacyCount: 0, builtinCount: 0, mode: 'builtin', legacySource: 'none', warnings: [] }, {}, 'x').via === null)
+
+// ---- 宿主必须真的把 providerStore 发出去（客户端加了读取、宿主漏了字段，两边各自测都测不出来）----
+const indexSource = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+check('宿主 /provider/status 里确实拼了 providerStore',
+  /providerStore:\s*\(?/.test(indexSource)
+  && indexSource.indexOf('providerStoreStatus(providerView(), writeState, ownEntryId)') !== -1)
+check('宿主把写策略记忆也带上（via 才有意义）', indexSource.indexOf('providerStoreStatus(providerView(), writeState, ownEntryId)') !== -1)
 
 // 内置默认表结构完整（deepseek 是插件声称「同一套存储」的那条）
 check('内置默认里有 deepseek 且带凭据名', BUILTIN_PROVIDERS.deepseek.apiKeyEnv === 'DEEPSEEK_API_KEY')
