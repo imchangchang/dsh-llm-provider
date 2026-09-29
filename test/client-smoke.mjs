@@ -222,6 +222,24 @@ const oauthEmpty = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source:
 rowsCheck('服务在但没 flow 时另说一种原因', oauthEmpty.some((r) => r.key === 'oauth-empty' && r.warn === true))
 rowsCheck('不给 oauth 段就不出行', healthy.every((r) => String(r.key).indexOf('oauth') !== 0))
 
+// ---- 配置写入现状（两代宿主的写入口不同，出问题先看这一行）----
+const storeRow = (store) => piAiBridgeRows({ active: true, piAiVersion: '0.86.0', source: '0.86.0' }, undefined, undefined, store)
+const editorStore = storeRow({ mode: 'own', ownCount: 3, legacyCount: 5, via: 'config-editor', lastError: null, warnings: [], legacyNs: 'llm-pi-ai' })
+const storeLine = editorStore.find((r) => r.key === 'store')
+rowsCheck('出配置写入那一行', storeLine !== undefined)
+rowsCheck('写出走的是哪条路（0.2.x → configEditor）', storeLine.value.indexOf('configEditor') !== -1)
+rowsCheck('写出来源与条数', String(storeLine.title).indexOf('本插件条目') !== -1 && String(storeLine.title).indexOf('自带条目 3') !== -1)
+rowsCheck('0.1.x 的形状也认（settings.mutate）',
+  storeRow({ mode: 'legacy', ownCount: 0, legacyCount: 5, via: 'settings-mutate' }).find((r) => r.key === 'store').value.indexOf('settings.mutate') !== -1)
+rowsCheck('还没写过时不硬说走了哪条',
+  storeRow({ mode: 'builtin', ownCount: 0, legacyCount: 0, via: null }).find((r) => r.key === 'store').value === '还没写过')
+rowsCheck('上次写失败要报警告行',
+  storeRow({ mode: 'legacy', ownCount: 0, legacyCount: 1, via: null, lastError: '两条路都不通' }).some((r) => r.key === 'store-err' && r.warn === true))
+rowsCheck('读来源的告警也列出来',
+  storeRow({ mode: 'builtin', ownCount: 0, legacyCount: 0, warnings: ['settings.get 读失败'] }).some((r) => String(r.key).indexOf('store-warn') === 0))
+rowsCheck('不给 providerStore 段就不出这行',
+  piAiBridgeRows({ active: true, piAiVersion: '0.86.0', source: '0.86.0' }, undefined).every((r) => r.key !== 'store'))
+
 // ---- 不带百分比的窗口（Copilot 的「不限量」）也要出 chip，不能整条消失 ----
 const unlimitedChips = headlineChips({
   id: 'github-copilot', displayName: 'GitHub Copilot', kind: 'quota', authConfigured: true,

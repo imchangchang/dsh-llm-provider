@@ -64,6 +64,21 @@ dsh web                   # 插件树变了，必须重启
 
 供应商从 `settings.yaml` 的 `llm-pi-ai.providers` 发现。这一节里没有路由时额度面板是空的——按上面那步在设置页加一条。key 由 dsh 的凭据服务按每条路由的 `apiKeyEnv` 解析。
 
+### 与 dsh 版本的兼容
+
+插件同时伺候两代宿主，**按运行时能力选路，不按版本号分支**：
+
+| 能力 | 0.1.x（如 0.1.6-alpha.2） | 0.2.x（0.2.0-rc.2 起） |
+|---|---|---|
+| 配置存在哪 | `settings.yaml` 的 `llm-pi-ai` 段 | profile patch 里**本插件条目的 config**（settings 命名空间 = 已加载条目的 id） |
+| 读 | `settings.get/section('llm-pi-ai')` | 老段改从 loader 的 profile patch 行读；界面写的那份在条目 config 里 |
+| 写 | `settings.mutate('llm-pi-ai', ops)` | `ctx.configEditor.edit(条目, change)`（写 profile patch 并让 Loader 重载） |
+| 官方 bundle 的 providers | 传入的 config **+ `settings.installSection` 叠上 `llm-pi-ai` 段** | **只认传入的 config**（`config.providers.get()`），不再读 `llm-pi-ai` 段 |
+
+合并优先级（低 → 高）：**内置默认**（DeepSeek 那条，在 `src/provider-config.ts` 的 `BUILTIN_PROVIDERS`）→ **老 `llm-pi-ai` 段** → **本插件条目的 config**。后者一旦有内容就整体接管：界面写下去的是整份合并结果，所以老段里的路由会被一次性搬进条目，之后删改都生效，也不会被老段里的同名路由压住。
+
+写配置的两条策略都留着，**按能力挑、失败自动换另一条并记住能走通的那条**（自愈）：宿主升级/降级、条目被禁用、profile patch 被 home patch 覆盖这些变化都不需要改配置。「pi-ai 桥接」标签页有一行「配置写入」写明当前走的哪条路、providers 来自哪里、有没有没清干净的告警。
+
 pi-ai 更新有两个触发路径：插件启动时后台查一次（6 小时节流，`DSH_PROVIDER_UPDATE=off` 可关），以及设置页上的「检查更新」按钮（`POST /provider/update`）。
 
 两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载——手动点「检查更新」也会先拿当前生效的那份比一次版本。pi-ai 换了版本要重启 dsh 才生效——桥接在进程启动时装载。
@@ -85,11 +100,11 @@ scripts/test-profile.sh stop   # 停掉
 node lib/adapters/run.js all            # 跑全部额度适配器（key 从环境变量或 ~/.dsh/.credentials.yaml 找）
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # 构建 + 十二个离线测试；自测与合入跑的就是这条
+npm test                                # 构建 + 十三个离线测试；自测与合入跑的就是这条
 npm run typecheck                       # tsc --noEmit（npm test 不含它）
 ```
 
-十二个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、目录链清理（摘链不碰链目标）、旧版本清理的保留规则、模型能力的多链路合并、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
+十三个测试分别盯：路由发现、凭据检查、patch 层、pi-ai 兼容性检查、目录链清理（摘链不碰链目标）、旧版本清理的保留规则、模型能力的多链路合并、provider 配置的两代宿主兼容与自愈、供应商预设清单、vendor 状态合并、OAuth 路由（含 authorization 服务的挂载与降级）、GitHub Copilot 额度解析、浏览器端接线。开发流程（主线不写代码、全部走 worktree）见 `AGENTS.md`。
 
 ## 实现
 
@@ -197,6 +212,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | `GET /provider/models` | 模型元数据，三条链路合并：route 声明的 `input` → pi-ai 目录 → 适配器自报（`listModels`/`resolveModelInfo`，只补目录里没有的 provider，带单调用超时与总预算）。60 秒缓存（`?fresh=1` 绕开）；详情卡与能力徽章用 |
 | `GET /provider/presets` | 可添加的供应商预设清单（含已配置标记） |
 | `POST /provider/refresh` | 单卡刷新额度（实查并更新全局快照） |
+| `POST /provider/mutate` | 写 provider 配置（`merge` / `unset` / `unsetFields`），宿主按 dsh 版本选写入口并自愈 |
 | `POST /provider/remove` | 删除供应商（清路由 + 清凭据） |
 | `POST /provider/test` | 用已存的 key 查一次某家的额度（只读，不动全局快照） |
 | `GET /provider/oauth/flows` | 列出 `ctx.authorization` 已注册的 flow（与 `/provider/presets` 的 `preset.oauth` 同源） |
@@ -225,7 +241,7 @@ npm run typecheck  # tsc --noEmit
 
 ## 边界
 
-- **不写宿主配置**。dsh 安装目录、`settings.yaml`、凭据一律只读。写只发生在两处：插件自己的 `vendor/`（下载 pi-ai、放桥接副本、写状态文件，其中一部分在加载期就写），以及用户在界面上的显式操作（添加/删除供应商）。启动期不写任何宿主配置。
+- **不写宿主配置**。dsh 安装目录、凭据一律只读。写只发生在两处：插件自己的 `vendor/`（下载 pi-ai、放桥接副本、写状态文件，其中一部分在加载期就写），以及用户在界面上的显式操作（添加/删除供应商、改模型清单、卡片上的字段修正）——这类写入经宿主自己的配置写入口（0.1.x 的 `settings.mutate` / 0.2.x 的 `configEditor.edit`），不是插件直接改文件。启动期不写任何宿主配置；读到的老 `llm-pi-ai` 段只是合并进内存视图，第一次界面写入时才随整份配置搬进插件条目。
 - **不改第三方包文件**。pi-ai 一个字节都不改，哪怕它的模型数据是静态快照、落后于上游——打补丁会让装下来的东西与 registry 的完整性校验对不上，不可复现。
 - **不改官方插件文件**。接管一律通过在 `cordis.patch.yml` 里禁用官方条目（`llm-pi-ai`、`llm-deepseek`、`ui-model-selection`、`ui-settings-models`），官方其余行为保持原样。本插件自己的模型座位带 `priority: -10`，那是同一座位上遮蔽占用者的机制。
 - **key 值不出宿主进程**。浏览器端只拿结论与元信息（前 3 + 后 4 的掩码）。
@@ -253,6 +269,7 @@ npm run typecheck  # tsc --noEmit
 
 如实说明（没验到的、没做的）：
 
+- **0.2.x 上老 `llm-pi-ai` 段会变成残留**。第一次在界面上写配置时，老段里的路由会被搬进插件条目，老段本身（profile patch 里那行 `llm-pi-ai`）删不掉——它的条目被本插件的 patch 禁用着，宿主不让写。之后这行只是历史，生效的是插件条目里那份；要清理得手改 profile patch（`~/.dsh/profiles/<profile>/cordis.patch.yml`）。
 - **桥接整体不可用时只有局部提示（全局告警排 0.3.x）**。候选全灭（目录坏了、权限问题、上游改导出名）时插件会退回「纯计费模式」，官方那四条条目仍被 patch 禁用，于是模型列表空掉——这时只有「pi-ai 桥接」标签页里一行错误行（`bridge.active === false`），composer 那边没有任何提示。要一眼看懂得再加一条全局告警，目前没做。
 
 - **多端点 / 多协议的 provider 没有实连验证过**。判定按官方回落链推的、离线断言也覆盖了，但 OpenRouter / Fireworks / opencode / opencode-go / Cloudflare / Bedrock 这几家没有可用的 key，没跑过真实发送（Copilot / DeepSeek 这类单端点是实连过的）。
@@ -307,11 +324,12 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 | `src/routes.ts` | 路由发现、官网链接、显示名兜底 |
 | `src/provider-presets.ts` | 添加供应商的预设清单（pi-ai 目录动态生成 + Custom Gateway） |
 | `src/oauth.ts` | OAuth 登录桥：补齐官方没挂的 `authorization` 服务，并把 flow 暴露给浏览器端（5 条 HTTP 路由 + SSE） |
+| `src/provider-config.ts` | provider 配置的读写层：两代宿主的多个来源合并、两条写策略的能力探测与自愈 |
 | `src/model-details.ts` | 模型详情与能力：读生效 pi-ai 包的 providers 数据文件，再合并 route 声明的 `input` 与适配器自报的模态（按 `provider + id` 索引） |
 | `src/pi-ai-names.ts` | 读 pi-ai 注册表里的名字（显示名的来源之一） |
 | `src/credential-check.ts` | 凭据检查 |
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
 | `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `model-editor`（模型清单编辑器）· `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
-| `test/*.mjs` | 十二个离线测试（不进 dsh、不起服务） |
+| `test/*.mjs` | 十三个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |

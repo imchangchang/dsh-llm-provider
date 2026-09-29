@@ -146,7 +146,7 @@ function piAiSourceHint(source: unknown): string {
  * @param oauth - 同上的 oauth 段（authorization 服务在不在、注册了几条 flow）。缺省不渲染这一行。
  * @returns `[{ key, text, value?, title?, warn? }]`；value 是右侧的次要文字。
  */
-export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown): BridgeRow[] {
+export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown, store?: unknown): BridgeRow[] {
   var rows: BridgeRow[] = []
   if (bridge === undefined || bridge === null) return rows
   var bridgeRecord = bridge as AnyRecord
@@ -205,6 +205,51 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
       })
     } else {
       rows.push({ key: 'oauth-ok', text: 'OAuth 登录可用', value: String(flows) + ' 个登录方式' })
+    }
+  }
+  // provider 配置的读写现状：0.1.x 写 settings 的 llm-pi-ai 段、0.2.x 写 profile patch 里
+  // 本插件的 config；两条路都试过才成功（自愈）也要说出来
+  if (store !== undefined && store !== null) {
+    var storeRecord = store as AnyRecord
+    var via = storeRecord['via']
+    var mode = String(storeRecord['mode'] === undefined ? '' : storeRecord['mode'])
+    var modeText = mode === 'own'
+      ? '本插件条目'
+      : mode === 'legacy'
+        ? '老 ' + String(storeRecord['legacyNs'] === undefined ? 'llm-pi-ai' : storeRecord['legacyNs']) + ' 段'
+        : '内置默认'
+    var viaText = via === 'config-editor'
+      ? 'configEditor（profile patch）'
+      : via === 'settings-mutate'
+        ? 'settings.mutate（settings 段）'
+        : '还没写过'
+    var counts = '自带条目 ' + String(storeRecord['ownCount']) + ' / 老段 ' + String(storeRecord['legacyCount'])
+    rows.push({
+      key: 'store',
+      text: '配置写入',
+      value: viaText,
+      title: '当前 providers 来自' + modeText + '（' + counts + '）。'
+        + '0.2.x 宿主只认插件条目里的 config，0.1.x 宿主读 settings 的 llm-pi-ai 段——'
+        + '两条路都会试，能走通的那条会记住。',
+    })
+    var storeWarnings = Array.isArray(storeRecord['warnings']) ? storeRecord['warnings'] : []
+    if (typeof storeRecord['lastError'] === 'string' && storeRecord['lastError'] !== '') {
+      rows.push({
+        key: 'store-err',
+        text: '上一次写配置失败',
+        value: '看原因',
+        title: String(storeRecord['lastError']),
+        warn: true,
+      })
+    }
+    for (var sw = 0; sw < storeWarnings.length; sw += 1) {
+      rows.push({
+        key: 'store-warn-' + sw,
+        text: '配置来源有告警',
+        value: '看原因',
+        title: String(storeWarnings[sw]),
+        warn: true,
+      })
     }
   }
   // 最近一次检查更新的结论
@@ -1591,8 +1636,9 @@ export function ProviderSettingsSection() {
   var update = status === null || status.update === undefined ? undefined : status.update
   var oauthStatus = status === null || status.oauth === undefined ? undefined : status.oauth
   var storage = status === null || status.storage === undefined ? undefined : status.storage
+  var providerStore = status === null || status.providerStore === undefined ? undefined : status.providerStore
   // 桥接明细：放在「pi-ai 桥接」二级标签页里展示。行的内容由 piAiBridgeRows 给（纯函数，离线可测）
-  var bridgeRows = piAiBridgeRows(bridge, update, oauthStatus)
+  var bridgeRows = piAiBridgeRows(bridge, update, oauthStatus, providerStore)
   // 磁盘占用行（issue #4）：不是「桥接状态」而是「它占了多少盘」，排在明细之后、动作按钮之前
   var storageRows = piAiStorageRows(storage)
   var bridgeLines = []
