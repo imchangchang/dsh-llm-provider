@@ -308,6 +308,15 @@ rowsCheck('老缓存（插件目录里那份）也算进缓存行',
 rowsCheck('拿不到 storage 段就不出占用行', piAiStorageRows(undefined).length === 0)
 rowsCheck('上游行文字', piAiUpstreamText({ latest: '0.86.0' }).indexOf('上游 0.86.0') === 0)
 
+// ---- 删除确认的代价说明（issue #3：整段 route + 凭据一起没，且不可撤销）----
+const { deleteConfirmText } = moduleExports
+const delText = deleteConfirmText({ id: 'opencode-go', apiKeyEnv: 'OPENCODE_GO_API_KEY' })
+rowsCheck('确认文案点名路由', delText.indexOf('路由 opencode-go') !== -1)
+rowsCheck('确认文案点名凭据', delText.indexOf('OPENCODE_GO_API_KEY') !== -1)
+rowsCheck('确认文案说明不可撤销', delText.indexOf('不可撤销') !== -1)
+rowsCheck('确认文案提到手写配置会消失', delText.indexOf('retryPolicy') !== -1)
+rowsCheck('没有凭据名时不硬凑', deleteConfirmText({ id: 'deepseek' }).indexOf('凭据') === -1)
+
 // ---- 无额度接口的卡片：状态点不能是黄灯、刷新按钮不该摆 ----
 rowsCheck('OAuth 已授权的无额度 provider 用绿灯',
   dotClass({ id: 'github-copilot', authConfigured: true, oauthAuthorized: true, kind: 'unknown-provider' }) === 'plan_dot plan_dot_ok')

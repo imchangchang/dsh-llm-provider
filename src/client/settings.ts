@@ -234,8 +234,22 @@ export function piAiUpstreamText(update: unknown): string {
   return '上游 ' + String(updateRecord.latest) + when
 }
 
-/** 字节数人性化：1.2 GB / 82 MB / 512 KB。 */
-export function formatBytes(value: unknown): string {
+/**
+ * 删除确认行的代价说明（issue #3）：说清删的是哪条路由、连不连凭据、什么不可恢复。
+ * 宿主侧 `/provider/remove` 做的是 `unset providers.<id>` 加 `credentials.unset(apiKeyEnv)`，
+ * 也就是整段 route 一起没——手写的 `models` / `compat.thinkingFormat` / `retryPolicy` 都在里面。
+ * @param account - 额度账户（也用同一套 route id）。
+ */
+export function deleteConfirmText(account: unknown): string {
+  var record = account === null || account === undefined ? {} : account as AnyRecord
+  var id = String(record['id'] === undefined ? '' : record['id'])
+  var keyEnv = typeof record['apiKeyEnv'] === 'string' ? record['apiKeyEnv'] : ''
+  return '将删除路由 ' + id
+    + (keyEnv === '' ? '' : ' 与其凭据 ' + keyEnv)
+    + '：整段配置（手写的模型清单 / compat / retryPolicy）一并消失，不可撤销。'
+}
+
+/** 字节数人性化：1.2 GB / 82 MB / 512 KB。 */export function formatBytes(value: unknown): string {
   var n = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(n) || n <= 0) return '0 MB'
   if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB'
@@ -2000,46 +2014,55 @@ export function ProviderSettingsSection() {
                       '↻',
                     ),
                 account.deletable === true
-                  ? (delConfirm[account.id] === true
-                      ? react.createElement(
-                          'span',
-                          { className: 'pv_delBox' },
-                          react.createElement(
-                            'button',
-                            { type: 'button', className: 'pv_delYes', onClick: function () { removeProvider(account) } },
-                            '确认删除',
-                          ),
-                          react.createElement(
-                            'button',
-                            {
-                              type: 'button',
-                              className: 'pv_delNo',
-                              onClick: function () {
-                                setDelConfirm(function (prev: AnyRecord) {
-                                  return withKey(prev, account.id, false)
-                                })
-                              },
-                            },
-                            '取消',
-                          ),
-                        )
-                      : react.createElement(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'pv_iconBtn',
-                            title: '删除这个 provider',
-                            onClick: function () {
-                              setDelConfirm(function (prev: AnyRecord) {
-                                return withKey(prev, account.id, true)
-                              })
-                            },
-                          },
-                          '✕',
-                        ))
+                  ? react.createElement(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'pv_iconBtn',
+                        title: '删除这个 provider（清掉路由与凭据，需要再确认一次）',
+                        onClick: function () {
+                          setDelConfirm(function (prev: AnyRecord) {
+                            return withKey(prev, account.id, true)
+                          })
+                        },
+                      },
+                      '✕',
+                    )
                   : null,
               ),
             ),
+            // 删除确认：**不与 ✕ 同位置**（连点两下第二下正好落在刚变成「确认删除」的那一格，
+            // 等于没有确认），改成卡片里单独一行，并把代价写清楚——整段 route 连带手写的
+            // models / compat / retryPolicy 一起没，凭据也一起清（issue #3）。
+            account.deletable === true && delConfirm[account.id] === true
+              ? react.createElement(
+                  'div',
+                  { className: 'pv_delConfirm', role: 'alert' },
+                  react.createElement(
+                    'span',
+                    { className: 'pv_delWarn' },
+                    deleteConfirmText(account),
+                  ),
+                  react.createElement(
+                    'button',
+                    { type: 'button', className: 'pv_delYes', onClick: function () { removeProvider(account) } },
+                    '确认删除',
+                  ),
+                  react.createElement(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'pv_delNo',
+                      onClick: function () {
+                        setDelConfirm(function (prev: AnyRecord) {
+                          return withKey(prev, account.id, false)
+                        })
+                      },
+                    },
+                    '取消',
+                  ),
+                )
+              : null,
             ),
             // 箭头列：只在「标题+余量」区域垂直居中（分割线上方），点击展开/收起
             react.createElement(

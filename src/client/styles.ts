@@ -193,6 +193,10 @@ var css =
   '.pv_delBox{display:inline-flex;gap:2px;align-items:center;padding:3px 5px;' +
   'border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12));border-radius:8px;' +
   'background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03))}' +
+  // 删除确认行：单独占一行（不占 ✕ 那一格，连点不会误删），红底把代价说清楚
+  '.pv_delConfirm{display:flex;align-items:center;gap:8px;margin-top:6px;padding:6px 8px;' +
+  'border:1px solid rgba(224,49,49,.35);border-radius:8px;background:rgba(224,49,49,.06)}' +
+  '.pv_delWarn{flex:1;font-size:12px;line-height:18px;color:#e03131}' +
   '.pv_delYes{border:0;background:0 0;cursor:pointer;font:inherit;font-size:12px;color:#e03131;' +
   'padding:3px 9px;border-radius:6px}' +
   '.pv_delYes:hover{background:rgba(224,49,49,.12)}' +

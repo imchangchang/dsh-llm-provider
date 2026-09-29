@@ -232,7 +232,7 @@ Dependencies are installed with `scripts/install-deps.sh`, not `npm install` dir
 - **Never modifies official plugins.** Takeover happens by disabling official entries in `cordis.patch.yml` (`llm-pi-ai`, `llm-deepseek`, `ui-model-selection`, `ui-settings-models`); everything else official is untouched. The plugin's own model seat registers with `priority: -10`, which is what would shadow an official occupant at the same slot.
 - **Key values never leave the host process.** The browser half receives conclusions and metadata only (a mask of the first 3 and last 4 characters).
 - **No browser session (cookies) is required.** OAuth runs a device-code flow: the plugin hands the verification URL and code to the UI, the human authorises on any device, and the credential stays in dsh's credential store — the browser half never sees a token.
-- **The web server has no authentication** (dsh's design; it binds to loopback by default). These routes assume loopback-only reachability: exposing the host on `0.0.0.0` exposes balances and credential names through `/plan/status`.
+- **The web server has no authentication** (dsh's design; it binds to loopback by default). These routes assume loopback-only reachability: exposing the host on `0.0.0.0` exposes balances and credential names through `/plan/status`. A production Desktop instance additionally requires a token at the host layer (403 without one), while an isolated instance started with `dsh web --port <port> --no-open` has no such layer — measured on the same port, `/plan/status`, `/provider/status` and `/provider/presets` answer 200 without a token, so "loopback only" is a weaker assumption under that startup mode.
 
 ## Effect on model requests
 

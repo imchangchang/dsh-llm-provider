@@ -229,7 +229,7 @@ npm run typecheck  # tsc --noEmit
 - **不改官方插件文件**。接管一律通过在 `cordis.patch.yml` 里禁用官方条目（`llm-pi-ai`、`llm-deepseek`、`ui-model-selection`、`ui-settings-models`），官方其余行为保持原样。本插件自己的模型座位带 `priority: -10`，那是同一座位上遮蔽占用者的机制。
 - **key 值不出宿主进程**。浏览器端只拿结论与元信息（前 3 + 后 4 的掩码）。
 - **不需要浏览器登录态（cookie / 已登录会话）**。OAuth 走 device-code：插件把验证页链接与串码交给界面，人在任意设备上完成授权，凭据由 dsh 的凭据服务保管（浏览器侧只拿得到链接与串码，拿不到 token）。
-- **webserver 没有鉴权层**（dsh 的设计如此，默认只绑 loopback）。自建路由不做额外校验的前提是「仅本机可达」：把宿主暴露到 `0.0.0.0`，`/plan/status` 会泄露余额与凭据名。
+- **webserver 没有鉴权层**（dsh 的设计如此，默认只绑 loopback）。自建路由不做额外校验的前提是「仅本机可达」：把宿主暴露到 `0.0.0.0`，`/plan/status` 会泄露余额与凭据名。Desktop 正式实例在宿主层还要求 token（无 token 一律 403），而 `dsh web --port <端口> --no-open` 起的隔离实例没有这一层——实测同一个端口上 `/plan/status`、`/provider/status`、`/provider/presets` 不带 token 就返回 200，所以「仅本机可达」这条前提在那种启动方式下更宽。
 
 ## 对模型请求的影响
 
