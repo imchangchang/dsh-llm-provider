@@ -15,6 +15,7 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { readdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
@@ -133,7 +134,9 @@ export async function installVersion(release: RegistryRelease, log: (line: strin
     log(`${version} 已就位，跳过下载`)
     return target
   }
-  rmSync(target, { force: true, recursive: true })
+  // 用 removeLinkOrDir 而不是裸 rmSync：这个目录万一被手工做成了软链/junction（拿本地
+  // checkout 试版本这类用法），Node 24.15+ 的递归删会把链目标的内容一起删掉（见 bridge.ts）
+  removeLinkOrDir(target, VERSIONS_DIR)
   mkdirSync(target, { recursive: true })
 
   const tgzPath = join(tmpdir(), `pi-ai-${version}-${Date.now()}.tgz`)
@@ -171,9 +174,7 @@ export async function installVersion(release: RegistryRelease, log: (line: strin
     ...(npm.shell ? { shell: true } : {}),
   })
   // 老版本装在插件目录里的缓存：装成功一次就顺手清掉（清不掉不影响更新结果）
-  try {
-    removeLinkOrDir(LEGACY_NPM_CACHE_DIR, vendorDir)
-  } catch { /* 权限问题留给「清理」按钮再报 */ }
+  removeCacheDirs(log)
   return target
 }
 
@@ -286,6 +287,46 @@ export function vendorUsage(): VendorUsage {
   }
 }
 
+/** {@link dirSize} 的异步版：`/provider/status` 走这条，别让递归 statSync 卡住宿主事件循环。 */
+async function dirSizeAsync(path: string): Promise<number> {
+  let entries
+  try {
+    entries = await readdir(path, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  let total = 0
+  for (const entry of entries) {
+    const child = join(path, entry.name)
+    if (entry.isDirectory()) total += await dirSizeAsync(child)
+    else if (entry.isFile()) {
+      try {
+        total += (await stat(child)).size
+      } catch { /* 文件刚没了：跳过 */ }
+    }
+  }
+  return total
+}
+
+/**
+ * {@link vendorUsage} 的非阻塞版（宿主里用这个）。
+ *
+ * 同一批目录，`vendor/` 实测两万多个文件，同步递归一次要 300 ms 上下——放在 HTTP handler 里
+ * 就是整个宿主停 300 ms。这里逐个 await，等待期间事件循环照常跑。
+ */
+export async function vendorUsageAsync(): Promise<VendorUsage> {
+  const downloads: { version: string, bytes: number }[] = []
+  for (const version of installedVersions()) {
+    downloads.push({ version, bytes: await dirSizeAsync(join(VERSIONS_DIR, version)) })
+  }
+  return {
+    vendorBytes: await dirSizeAsync(vendorDir),
+    downloads,
+    cacheBytes: await dirSizeAsync(NPM_CACHE_DIR),
+    legacyCacheBytes: await dirSizeAsync(LEGACY_NPM_CACHE_DIR),
+  }
+}
+
 /** 清理结果：删了哪些、留了哪些、释放了多少字节。 */
 export interface PruneResult {
   removed: { version: string, reason: string }[]
@@ -342,7 +383,7 @@ export function planPrune(
  *
  * @param keep - 比本机新的那些保留几份。
  */
-export function pruneVersions(keep = 1): PruneResult {
+export function pruneVersions(keep = 1, log?: (line: string) => void): PruneResult {
   const status = readBridgeStatus()
   const protectedVersions: string[] = []
   const active = activePiAiRoot()
@@ -351,7 +392,7 @@ export function pruneVersions(keep = 1): PruneResult {
     const versionsDir = resolve(VERSIONS_DIR)
     const resolved = resolve(active)
     if (resolved.startsWith(versionsDir + sep)) {
-      const version = resolved.slice(versionsDir.length + sep.length).split(/[\\/]/)[0]
+      const version = resolved.slice(versionsDir.length + sep.length).split(/[\/]/)[0]
       if (version !== undefined && version !== '') protectedVersions.push(version)
     }
   }
@@ -359,23 +400,80 @@ export function pruneVersions(keep = 1): PruneResult {
     const pending = readString(status['piAiVersion'])
     if (pending !== undefined && pending !== '') protectedVersions.push(pending)
   }
-  const plan = planPrune(installedVersions(), bestLocalVersion(), protectedVersions, keep)
-  const before = dirSize(VERSIONS_DIR) + dirSize(LEGACY_NPM_CACHE_DIR) + dirSize(NPM_CACHE_DIR)
+  return applyPrune({
+    versionsDir: VERSIONS_DIR,
+    cacheDirs: [LEGACY_NPM_CACHE_DIR, NPM_CACHE_DIR],
+    installed: installedVersions(),
+    bestLocal: bestLocalVersion(),
+    protectedVersions,
+    keep,
+    ...(log === undefined ? {} : { log }),
+  })
+}
+
+/** 一次清理的输入（路径都显式传进来，离线测试才能拿临时目录跑真删）。 */
+export interface PruneRequest {
+  /** 下载档所在目录。 */
+  versionsDir: string
+  /** 要一并清掉的 npm 缓存目录（纯缓存，删了只影响下次装依赖的速度）。 */
+  cacheDirs?: readonly string[]
+  /** 已就位的下载版本。 */
+  installed: readonly string[]
+  /** 本机非下载档里最高的版本号；没有则跳过「重复副本」这条规则。 */
+  bestLocal: string | undefined
+  /** 正在用 / 等重启生效的版本号（绝不删）。 */
+  protectedVersions: readonly string[]
+  /** 比本机新的那些保留几份。 */
+  keep?: number
+  /** 失败留痕（默认丢弃）。 */
+  log?: (line: string) => void
+}
+
+/**
+ * 执行一次清理：算（{@link planPrune}）→ 删 → 报释放了多少。
+ *
+ * 删目录是不可逆动作，所以规则与执行分开：这里只管照着计划删，路径全部由 {@link PruneRequest}
+ * 给，离线测试可以拿临时目录完整跑一遍（缓存删不掉这种 bug 就是靠这条路径测出来的——
+ * 缓存目录在系统临时目录里，不在 vendor/ 底下，用 vendor/ 当归档根会被拒绝）。
+ */
+export function applyPrune(request: PruneRequest): PruneResult {
+  const log = request.log ?? (() => {})
+  const versionsDir = request.versionsDir
+  const cacheDirs = request.cacheDirs ?? []
+  const plan = planPrune(request.installed, request.bestLocal, request.protectedVersions, request.keep ?? 1)
+  const sizeOf = (): number =>
+    dirSize(versionsDir) + cacheDirs.reduce((total, dir) => total + dirSize(dir), 0)
+  const before = sizeOf()
   for (const entry of plan.remove) {
     try {
-      removeLinkOrDir(join(VERSIONS_DIR, entry.version), VERSIONS_DIR)
+      removeLinkOrDir(join(versionsDir, entry.version), versionsDir)
     } catch (error) {
       entry.reason += `（删除失败：${error instanceof Error ? error.message : String(error)}）`
+      log(`删除 ${entry.version} 失败：${entry.reason}`)
     }
   }
-  // npm 缓存是纯缓存：删了只影响下次装依赖的速度
+  for (const cacheDir of cacheDirs) {
+    // 缓存的允许根是它自己的父目录：缓存可能整个在插件目录外（系统临时目录那份），
+    // 拿 vendor/ 当根会把「拒绝越界」抛出来、被静默吞掉，缓存永远清不掉
+    try {
+      removeLinkOrDir(cacheDir, dirname(cacheDir))
+    } catch (error) {
+      log(`清理缓存 ${cacheDir} 失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return { removed: plan.remove, kept: plan.keep, freedBytes: Math.max(0, before - sizeOf()) }
+}
+
+/** 删掉两个 npm 缓存目录（老的在 vendor/ 里、现在的在系统临时目录里）。 */
+function removeCacheDirs(log: (line: string) => void): void {
   for (const cacheDir of [LEGACY_NPM_CACHE_DIR, NPM_CACHE_DIR]) {
     try {
-      removeLinkOrDir(cacheDir, vendorDir)
-    } catch { /* 权限问题：不算清理失败 */ }
+      removeLinkOrDir(cacheDir, dirname(cacheDir))
+    } catch (error) {
+      // 清缓存失败不影响更新结果，但得留痕（不然「点了清理没反应」查不出原因）
+      log(`清理缓存 ${cacheDir} 失败：${error instanceof Error ? error.message : String(error)}`)
+    }
   }
-  const after = dirSize(VERSIONS_DIR) + dirSize(LEGACY_NPM_CACHE_DIR) + dirSize(NPM_CACHE_DIR)
-  return { removed: plan.remove, kept: plan.keep, freedBytes: Math.max(0, before - after) }
 }
 
 /** 本机已有的那份最好版本（dsh 自带 / 兜底依赖）——「重复副本」就是这么判的。 */
@@ -387,13 +485,27 @@ function bestLocalVersion(): string | undefined {
   return best
 }
 
-/** 本机两份非下载档（dsh 自带 / 兜底依赖）的版本号：读不出、目录不在的都跳过。 */
+/**
+ * 本机两份非下载档（dsh 自带 / 兜底依赖）里**真正能用**的版本号。
+ *
+ * 为什么必须体检过才算：这条版本号是「重复副本」的判定门槛。兜底依赖装了一半（依赖被删、
+ * 目录在但加载不了）却版本号很高时，用它当门槛会把一份**能用的**下载档判成重复副本删掉，
+ * 运行时反而退到更旧的 dsh 自带那份。体检只跑本机这两档（候选顺序仍由 loadBridge 逐个
+ * 体检决定，不需要在这里为所有下载档付体检开销）。
+ *
+ * @returns 版本号列表；读不出、目录不在、体检不过的都不算。
+ */
 function localCandidates(): string[] {
   const versions: string[] = []
+  const requirements = bridgeRequirements()
   for (const candidate of piAiCandidates()) {
     if (candidate.key !== 'dsh' && candidate.key !== 'dependency') continue
     if (!existsSync(join(candidate.root, 'package.json'))) continue
-    if (/^\d+(\.\d+)*$/.test(candidate.version)) versions.push(candidate.version)
+    if (!/^\d+(\.\d+)*$/.test(candidate.version)) continue
+    const probe = probePiAi(requirements, candidate.root, `prune-${candidate.key}`)
+    // 体检没跑成（unverified）不算数：门槛宁可低一点，也别拿一份没验证过的本机档去删下载档
+    if (!probe.ok || probe.unverified === true) continue
+    versions.push(candidate.version)
   }
   return versions
 }

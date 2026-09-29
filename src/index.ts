@@ -31,7 +31,7 @@ import {
   type DeclaredModelEntry,
   type ModelDetail,
 } from './model-details.js'
-import { checkAndUpdate, pruneVersions, startBackgroundCheck, vendorUsage } from './updater.js'
+import { checkAndUpdate, pruneVersions, startBackgroundCheck, vendorUsageAsync } from './updater.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
 import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
@@ -377,8 +377,29 @@ export function apply(ctx: PluginContext, config: unknown): void {
     'dsh-llm-provider: /plan/status route',
   )
 
-  // vendor/ 磁盘占用缓存：统计走全目录递归，而 /provider/status 会随设置页反复拉
-  let vendorUsageCache: { at: number, value: ReturnType<typeof vendorUsage> } | undefined
+  // vendor/ 磁盘占用缓存：统计要走完整个 vendor/（实测两万多个文件），不能放在请求路径上同步跑。
+  // 这里只读缓存值，过期就在后台重算（异步遍历），下一次请求拿到新数字。
+  let vendorUsageCache: { at: number, value: Awaited<ReturnType<typeof vendorUsageAsync>> } | undefined
+  let vendorUsagePending: Promise<Awaited<ReturnType<typeof vendorUsageAsync>> | undefined> | undefined
+  /** 拿一份占用：新鲜就直出，过期/没有就现算（await 不阻塞事件循环，只是这一个响应等一会儿）。 */
+  function vendorUsageFresh(): Promise<Awaited<ReturnType<typeof vendorUsageAsync>> | undefined> {
+    if (vendorUsageCache !== undefined && Date.now() - vendorUsageCache.at <= 60_000) {
+      return Promise.resolve(vendorUsageCache.value)
+    }
+    if (vendorUsagePending === undefined) {
+      vendorUsagePending = vendorUsageAsync()
+        .then((value) => {
+          vendorUsageCache = { at: Date.now(), value }
+          return value
+        })
+        .catch((error: unknown) => {
+          logger?.warn?.(`统计 vendor 占用失败：${messageOf(error)}`)
+          return undefined
+        })
+        .finally(() => { vendorUsagePending = undefined })
+    }
+    return vendorUsagePending
+  }
 
   ctx.effect(
     () => webServer.register({
@@ -386,10 +407,6 @@ export function apply(ctx: PluginContext, config: unknown): void {
       path: '/provider/status',
       handler: (_req, res) => {
         const { status: bridgeState, updater } = readVendorState()
-        // 磁盘占用：递归统计 vendor/ 不便宜（几十万个文件），60 秒缓存
-        if (vendorUsageCache === undefined || Date.now() - vendorUsageCache.at > 60_000) {
-          vendorUsageCache = { at: Date.now(), value: vendorUsage() }
-        }
         // 诊断：这一插件实际发现了哪些路由（含凭据名，不含值），排查配置问题时最有用
         const llm = service<LlmService>('llm')
         let declaredCount = -1
@@ -409,6 +426,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
               ...(route.models === undefined ? {} : { models: route.models }),
             }))
         } catch { /* 路由发现失败时留空 */ }
+        // 磁盘占用是唯一要异步的部分：其余诊断先算好，占用到了再一起发（不阻塞事件循环）
+        void vendorUsageFresh().then((usage) => {
         json(res, 200, {
           bridge: bridge.ok
             ? {
@@ -453,10 +472,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
             rejected: readRejected(bridgeState['latestRejected']),
           },
           // 磁盘占用（issue #4）：下载了多少份 pi-ai、npm 缓存多大，界面上能看见才有得清
-          storage: vendorUsageCache.value,
+          storage: usage,
           // 测试环境标识（scripts/test-profile.sh 启动时带 DSH_PROVIDER_TEST=1）：
           // 浏览器端看到后给标题/favicon 加「测」标，一眼区分测试实例
           testMode: process.env.DSH_PROVIDER_TEST === '1',
+        })
         })
       },
     }),
@@ -497,15 +517,18 @@ export function apply(ctx: PluginContext, config: unknown): void {
           res.end()
           return
         }
-        try {
-          const result = pruneVersions()
-          // 清理后的占用立刻回报，别让 60 秒缓存继续展示旧数字
-          vendorUsageCache = { at: Date.now(), value: vendorUsage() }
-          logger?.info?.(`[pi-ai updater] 清理完成：删 ${String(result.removed.length)} 份，释放 ${String(Math.round(result.freedBytes / 1024 / 1024))} MB`)
-          json(res, 200, { ok: true, ...result, usage: vendorUsageCache.value })
-        } catch (error) {
-          json(res, 200, { ok: false, error: messageOf(error), usage: vendorUsage() })
-        }
+        void (async () => {
+          try {
+            const result = pruneVersions(1, (line) => logger?.info?.(`[pi-ai updater] ${line}`))
+            // 清理后的占用立刻回报，别让 60 秒缓存继续展示旧数字
+            const usage = await vendorUsageAsync()
+            vendorUsageCache = { at: Date.now(), value: usage }
+            logger?.info?.(`[pi-ai updater] 清理完成：删 ${String(result.removed.length)} 份，释放 ${String(Math.round(result.freedBytes / 1024 / 1024))} MB`)
+            json(res, 200, { ok: true, ...result, usage })
+          } catch (error) {
+            json(res, 200, { ok: false, error: messageOf(error), usage: vendorUsageCache?.value })
+          }
+        })()
       },
     }),
     'dsh-llm-provider: /provider/prune route',
@@ -544,9 +567,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
     () => webServer.register({
       kind: 'exact',
       path: '/provider/models',
-      handler: (_req, res) => {
-        const fresh = modelDetailsCache !== undefined && Date.now() - modelDetailsCache.at <= 60_000
-        if (!fresh) {
+      handler: (req, res) => {
+        // ?fresh=1：绕开 60 秒缓存（刚写完模型清单，能力徽章要立刻跟着变）
+        const cacheFresh = modelDetailsCache !== undefined && Date.now() - modelDetailsCache.at <= 60_000
+          && !String(req.url ?? '').includes('fresh=1')
+        if (!cacheFresh) {
           // 同一个请求窗口里并发进来只跑一次（自报那段要 await 适配器）
           if (modelDetailsPending === undefined) {
             modelDetailsPending = buildModelDetails()

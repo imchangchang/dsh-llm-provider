@@ -242,6 +242,22 @@ rowsCheck('每月窗口 → 30d（不再被裸「每」吞进 7d）', shortWindo
 rowsCheck('月度限额 → 30d', shortWindowLabel('月度限额') === '30d')
 rowsCheck('30 天窗口 → 30d（kimi 的按天口径）', shortWindowLabel('30 天窗口') === '30d')
 rowsCheck('每天窗口不算 30d', shortWindowLabel('每天窗口') !== '30d')
+// 适配器的窗口名是拼出来的（kimi `${n} 天窗口`、GLM `${n} 小时窗口`）：时长要读进去，
+// 否则这些全落进「认不出」那一档，7 天窗口会被排到 30 天窗口后面（复查抓到的回归）
+rowsCheck('7 天窗口 → 7d 档、短名 7d', windowTier('7 天窗口') === '7d' && shortWindowLabel('7 天窗口') === '7d')
+rowsCheck('7 小时窗口归短窗档，但短名照抄时长（7h）', windowTier('7 小时窗口') === '5h' && shortWindowLabel('7 小时窗口') === '7h')
+rowsCheck('24 小时窗口不塞进周档，短名 24h', windowTier('24 小时窗口') === 'other' && shortWindowLabel('24 小时窗口') === '24h')
+rowsCheck('3 天窗口 → 7d 档', windowTier('3 天窗口') === '7d')
+rowsCheck('认不出的窗口名（unit= 那种）不误判', windowTier('窗口 unit=3 n=7') === 'other')
+const kimiChips = headlineChips({
+  id: 'kimi-coding', kind: 'quota', windows: [
+    { window: '5 小时窗口', percentLeft: 50 },
+    { window: '7 天窗口', percentLeft: 49 },
+    { window: '30 天窗口', percentLeft: 48 },
+  ],
+})
+rowsCheck('kimi 的 5h/7天/30天 按档排序、两条线',
+  kimiChips.map((c) => (c.sep === true ? '|' : c.label)).join(' ') === '5h | 7d | 30d')
 rowsCheck('Monthly → 30d', shortWindowLabel('Monthly window') === '30d')
 rowsCheck('Weekly → 7d', shortWindowLabel('Weekly window') === '7d')
 rowsCheck('认不出的窗口名保持原样（截 4 字）', shortWindowLabel('高级请求') === '高级请求')
@@ -355,33 +371,46 @@ rowsCheck('表单没填的字段不进 ops（原值保持）',
   addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => op.path[2] === 'apiKeyEnv'))
 
 // ---- 模型清单编辑器（issue #1：官方 Models 页禁用后，逐模型参数得有条界面上的路）----
-const { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts } = moduleExports
+const { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, buildDetailMap } = moduleExports
 const catalogFixture = [
   { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', contextWindow: 1000000 },
   { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision', contextWindow: 200000 },
 ]
-const detailFixture = {
-  'deepseek-v4-flash': { id: 'deepseek-v4-flash', contextWindow: 1000000, maxTokens: 32768, vision: false, video: false, reasoning: true, thinkingLevels: ['low', 'high'] },
-  'deepseek-v4-flash-vision-exp': { id: 'deepseek-v4-flash-vision-exp', contextWindow: 200000, maxTokens: 8192, vision: true, video: false, reasoning: false, thinkingLevels: [] },
-}
-const catalogRows = editorRowsOf(undefined, catalogFixture, detailFixture)
+// 详情表按 `provider + id` 建（真实的客户端就是这么拿的）：用裸 id 当 fixture 会把
+// 「同名模型跨 provider」这类问题掩盖掉（复查抓到过这一点）
+const detailFixture = buildDetailMap([
+  { id: 'deepseek-v4-flash', provider: 'deepseek', contextWindow: 1000000, maxTokens: 32768, vision: false, reasoning: true, thinkingLevels: ['low', 'high'], capabilitiesKnown: true },
+  { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', contextWindow: 200000, maxTokens: 8192, vision: true, reasoning: false, thinkingLevels: [], capabilitiesKnown: true },
+])
+const catalogRows = editorRowsOf(undefined, catalogFixture, detailFixture, 'deepseek')
 rowsCheck('没声明清单时铺开目录里的模型', catalogRows.length === 2 && catalogRows.every((r) => r.source === 'catalog' && r.enabled === true))
 rowsCheck('目录行的上下文从目录带出来', catalogRows[0].contextWindow === '1000000')
 rowsCheck('目录行的最大输出从详情带出来', catalogRows[0].maxTokens === '32768')
 rowsCheck('目录行的输入模态按视觉能力填', catalogRows[1].input.join(',') === 'text,image')
 rowsCheck('目录行的推理字段留空（表示沿用目录）', catalogRows[0].reasoning === '')
+rowsCheck('目录行标成「能力查到了」', catalogRows.every((r) => r.inputKnown === true))
+// 详情晚到/查不到时不能把占位的 ['text'] 当结论写进配置
+const unknownRows = editorRowsOf(undefined, catalogFixture, undefined, 'deepseek')
+rowsCheck('没有详情时目录行标成「能力未知」', unknownRows.every((r) => r.inputKnown === false))
+const unknownBuilt = editorToModels(unknownRows)
+rowsCheck('能力未知的目录行不写 input（免得盖掉目录里的视觉能力）',
+  unknownBuilt.models.every((m) => m.input === undefined))
+const knownBuilt = editorToModels(catalogRows)
+rowsCheck('能力查到的目录行照常写 input', knownBuilt.models[1].input.join(',') === 'text,image')
 
 const declaredFixture = [
   { id: 'deepseek-flash', name: '自定义 Flash', contextWindow: 128000, maxTokens: 4096, input: ['text', 'image'], reasoningEfforts: { low: 'low', high: 'max' }, compat: { thinkingFormat: 'deepseek' } },
   'plain-id',
 ]
-const declaredRows = editorRowsOf(declaredFixture, catalogFixture, detailFixture)
+const declaredRows = editorRowsOf(declaredFixture, catalogFixture, detailFixture, 'opencode-go')
 rowsCheck('声明了清单就以它为准', declaredRows.length === 2 && declaredRows.every((r) => r.source === 'declared'))
 rowsCheck('声明行的字段原样回显', declaredRows[0].id === 'deepseek-flash' && declaredRows[0].contextWindow === '128000' && declaredRows[0].thinkingFormat === 'deepseek')
 rowsCheck('reasoningEfforts 对象映射成文本记法', declaredRows[0].reasoning === 'low,high=max')
 rowsCheck('字符串条目也认（等价于只有 id）', declaredRows[1].id === 'plain-id')
 rowsCheck('声明行没写 input 时回落到目录那份', declaredRows[1].input.join(',') === 'text')
 rowsCheck('目录里没有的自定义 id 输入模态兜底 text', declaredRows[0].input.join(',') === 'text,image')
+rowsCheck('声明行不许出现 video（宿主 schema 只认 text/image）',
+  editorRowsOf([{ id: 'x', input: ['text', 'video'] }], [], undefined, 'r')[0].input.join(',') === 'text')
 
 const reasoningCases = [
   ['', undefined, undefined],
@@ -404,19 +433,21 @@ rowsCheck('反向：false → false', formatReasoningEfforts(false) === 'false')
 rowsCheck('反向：缺省 → 空', formatReasoningEfforts(undefined) === '')
 
 const built = editorToModels([
-  { key: 'a', id: 'deepseek-flash', name: 'Flash', contextWindow: '128000', maxTokens: '4096', input: ['text', 'image'], reasoning: 'low,high=max', thinkingFormat: 'deepseek', enabled: true, source: 'declared' },
-  { key: 'b', id: 'unchecked', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: '', thinkingFormat: '', enabled: false, source: 'catalog' },
+  { key: 'a', id: 'deepseek-flash', name: 'Flash', contextWindow: '128000', maxTokens: '4096', input: ['text', 'image'], inputKnown: true, inputTouched: false, reasoning: 'low,high=max', thinkingFormat: 'deepseek', enabled: true, source: 'declared' },
+  { key: 'b', id: 'unchecked', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: '', thinkingFormat: '', enabled: false, source: 'catalog' },
 ])
 rowsCheck('只写勾选的行', built.models.length === 1 && built.models[0].id === 'deepseek-flash')
 rowsCheck('写出的数字是数字', built.models[0].contextWindow === 128000 && built.models[0].maxTokens === 4096)
 rowsCheck('写出的 input 是数组', built.models[0].input.join(',') === 'text,image')
 rowsCheck('写出的 thinkingFormat 在 compat 里', built.models[0].compat.thinkingFormat === 'deepseek')
 rowsCheck('勾选行没有错误', built.errors.length === 0)
+rowsCheck('用户动过勾选就按用户的写（即使能力没查到）',
+  editorToModels([{ key: 'a', id: 'x', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: false, inputTouched: true, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' }]).models[0].input.join(',') === 'text')
 
 const badRows = editorToModels([
-  { key: 'a', id: '', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
-  { key: 'b', id: 'dup', name: '', contextWindow: 'x', maxTokens: '', input: ['text'], reasoning: 'nope', thinkingFormat: '', enabled: true, source: 'declared' },
-  { key: 'c', id: 'dup', name: '', contextWindow: '', maxTokens: '', input: ['text'], reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
+  { key: 'a', id: '', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
+  { key: 'b', id: 'dup', name: '', contextWindow: 'x', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: 'nope', thinkingFormat: '', enabled: true, source: 'declared' },
+  { key: 'c', id: 'dup', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },
 ])
 rowsCheck('空 id 报错', badRows.errors.some((e) => e.indexOf('模型 ID 是空的') !== -1))
 rowsCheck('非正整数报错', badRows.errors.some((e) => e.indexOf('正整数') !== -1))
@@ -448,7 +479,7 @@ rowsCheck('声明过清单时状态行说是自己声明的', declaredEditor.ind
 rowsCheck('声明行的字段出现在面板里', declaredEditor.indexOf('deepseek-flash') !== -1 && declaredEditor.indexOf('low,high=max') !== -1)
 
 // ---- 能力详情按 provider + id 建索引（issue #5：裸 id 会让同名模型串家）----
-const { buildDetailMap, detailOf, detailSourceLabel } = moduleExports
+const { detailOf, detailSourceLabel } = moduleExports
 const detailPayload = [
   { id: 'claude-opus-5', provider: 'anthropic', vision: true, source: 'catalog' },
   { id: 'claude-opus-5', provider: 'cloudflare-ai-gateway', vision: false, source: 'catalog' },

@@ -175,24 +175,51 @@ export type WindowTier = '5h' | '7d' | '30d' | 'other'
 export const WINDOW_TIER_ORDER: readonly WindowTier[] = ['5h', '7d', '30d', 'other']
 
 /**
+ * 窗口名里明写的时长：`7 小时窗口` → 7 小时，`30 天窗口` → 30 天。
+ *
+ * 适配器的窗口名是拼出来的（kimi 拼 `${duration} 天窗口`、GLM 拼 `${number} 小时窗口`），
+ * 只认字面「5 小时 / 每周 / 每月」会把这些全打进「认不出」那一档，排序与短名一起错。
+ * @param name - 适配器给的窗口展示名。
+ */
+export function windowDuration(name: unknown): { hours?: number, days?: number } {
+  var text = String(name ?? '')
+  // 中文词后面不能跟 \b：JS 里 \w 只含 ASCII，汉字是非单词字符，`小时\b` 永远匹配不上
+  var hours = /(\d+)\s*(?:小时|hours?\b|h\b)/i.exec(text)
+  if (hours !== null) return { hours: Number(hours[1]) }
+  var days = /(\d+)\s*(?:天|days?\b|d\b)/i.exec(text)
+  if (days !== null) return { days: Number(days[1]) }
+  return {}
+}
+
+/**
  * 窗口名 → 档位。**先窄后宽**：5 小时 → 月 → 周 → 认不出（保持出现顺序）。
  *
  * 「每月窗口」里带一个「每」字，早先那版拿裸 `每` 当周口径，于是月窗被显示成第二个 7d
- * （倒计时还能到 8d17h），issue #2 报的就是这个；所以月必须排在周前面判断，
- * 5 小时又必须排在月前面（`5 小时滚动窗口` 里没有「月」，但顺序写死更不容易被后续措辞绊倒）。
+ * （倒计时还能到 8d17h），issue #2 报的就是这个；所以 5 小时 → 月 → 周这个顺序不能反。
+ * 明写时长的（`7 天窗口` / `24 小时窗口`）按小时数分档：≤12 小时算短窗，>12 小时不硬塞进
+ * 周口径（那是「每天」级别的窗口，塞进去会显示成 7d）。
  * @param name - 适配器给的窗口展示名（中文为主，兼容英文关键词）。
  */
 export function windowTier(name: unknown): WindowTier {
   var text = String(name ?? '')
-  if (/\b5\s*小时|5\s*hour/i.test(text) || text.indexOf('5小时') !== -1) return '5h'
-  // 月窗与「30 天窗口」（kimi 的按天口径）是同一档；「每天窗口」不受影响（它没有 30 这个数字）
-  if (/月|month|30\s*天/i.test(text)) return '30d'
+  var duration = windowDuration(name)
+  if (duration.hours !== undefined) return duration.hours <= 12 ? '5h' : 'other'
+  if (duration.days !== undefined) {
+    if (duration.days <= 10) return '7d'
+    if (duration.days >= 25) return '30d'
+    return 'other'
+  }
+  if (/月|month/i.test(text)) return '30d'
   if (/周|week|订阅/i.test(text)) return '7d'
   return 'other'
 }
 
-/** 窗口短名（卡片头部摘要）：5 小时窗口→5h、每周/订阅周期→7d、每月窗口→30d（对齐 CC Switch 口径）。 */
+/** 窗口短名（卡片头部摘要）：明写时长的照抄（`7 小时窗口`→7h、`30 天窗口`→30d），
+ *  其余按口径给（周/订阅→7d、月→30d），认不出的截前 4 个字。 */
 export function shortWindowLabel(name: unknown): string {
+  var duration = windowDuration(name)
+  if (duration.hours !== undefined) return String(duration.hours) + 'h'
+  if (duration.days !== undefined) return String(duration.days) + 'd'
   var tier = windowTier(name)
   if (tier !== 'other') return tier
   var text = String(name ?? '')

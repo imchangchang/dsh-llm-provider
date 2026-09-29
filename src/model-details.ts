@@ -242,9 +242,15 @@ export async function applyAdapterCapabilities(
       if (modalities !== undefined) {
         applyModalities(detail, modalities)
       } else if (typeof llm.resolveModelInfo === 'function' && Date.now() < deadline) {
-        // listModels 没说模态：问一次精确的（适配器自己的 lookup）
+        // listModels 没说模态：问一次精确的（适配器自己的 lookup）。
+        // 官方这个签名收 signal，所以超时就真的取消掉，别把挂起的调用留在适配器里。
+        const controller = new AbortController()
         try {
-          const info = await withTimeout(llm.resolveModelInfo(id, modelId), callTimeoutMs)
+          const info = await withTimeout(
+            llm.resolveModelInfo(id, modelId, controller.signal),
+            callTimeoutMs,
+            () => { controller.abort() },
+          )
           const record = asRecord(info)
           const resolved = readModalities(record['inputModalities'])
           if (resolved !== undefined) applyModalities(detail, resolved)
@@ -275,14 +281,22 @@ function applyModalities(detail: ModelDetail, modalities: readonly string[]): vo
   detail.capabilitiesKnown = true
 }
 
-/** 给一个 promise 套超时（适配器卡住时不能拖死整个响应）。 */
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+/**
+ * 给一个 promise 套超时（适配器卡住时不能拖死整个响应）。
+ * @param promise - 适配器调用。
+ * @param ms - 超时毫秒数。
+ * @param onTimeout - 超时后的收尾（有 signal 的调用在这里 abort，别把挂起的调用留在适配器里）。
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout?: () => void): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('适配器调用超时')), ms)
+        timer = setTimeout(() => {
+          if (onTimeout !== undefined) onTimeout()
+          reject(new Error('适配器调用超时'))
+        }, ms)
       }),
     ])
   } finally {

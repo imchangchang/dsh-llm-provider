@@ -289,6 +289,8 @@ var css =
   'margin-top:0;padding-top:6px;display:flex;flex-direction:column}' +
   // ---- 模型清单编辑器（issue #1）----
   '.pv_me{border-top:.5px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));margin-top:8px;padding-top:8px}' +
+  '.pv_meNative{border-top:.5px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));margin-top:8px;padding-top:8px;' +
+  'font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}' +
   '.pv_meBar{display:flex;align-items:center;gap:8px}' +
   '.pv_meState{flex:1;min-width:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);' +
   'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +

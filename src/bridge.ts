@@ -405,20 +405,28 @@ export function piAiCandidates(): PiAiCandidate[] {
     ? undefined
     : { key: 'dsh', version: piAiVersionOf(dshRoot) ?? 'dsh 自带', root: dshRoot, link: true }
   const locals = [dependencyCandidate, ...(dshCandidate === undefined ? [] : [dshCandidate])]
-  // 版本号解析不出（'dsh 自带' 这种占位串）的不参与「本机最好那份」的比较。
+  return orderCandidates(downloads, locals)
+}
+
+/**
+ * 候选排序（纯函数，离线可测）：下载档里**不高于**本机最好那份的排到本机档之后。
+ *
+ * 同一版本优先复用宿主/兜底那份：省下一份 80 MB 级的重复副本，也免掉一次「换版本要重启」。
+ * 比本机新的照旧排最前——热更新的意义就是跑得比宿主新。本机两份之间的相对顺序不变
+ * （兜底依赖在前、dsh 自带在后，与文档里的来源表一致）。
+ *
+ * @param downloads - 下载档，调用方按新 → 旧给（本函数不做版本内排序）。
+ * @param locals - 本机档（兜底依赖 / dsh 自带），保持调用方给的顺序。
+ */
+export function orderCandidates(downloads: readonly PiAiCandidate[], locals: readonly PiAiCandidate[]): PiAiCandidate[] {
+  // 版本号解析不出（'dsh 自带' 这种占位串）的不参与「本机最好那份」的比较
   const bestLocal = locals
     .map((candidate) => candidate.version)
     .filter((version) => /^\d+(\.\d+)*$/.test(version))
     .reduce<string | undefined>((best, version) => (best === undefined || compareVersions(version, best) > 0 ? version : best), undefined)
-  // 下载档里**不高于**本机最好那份的排到本机档之后：同一版本优先复用宿主/兜底那份
-  // （省下 80 MB 级的重复副本，也免掉一次「换版本要重启」）。比本机新的照旧排最前——
-  // 热更新的意义就是跑得比宿主新。
-  const redundant = bestLocal === undefined
-    ? []
-    : downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) <= 0)
-  const fresh = bestLocal === undefined
-    ? downloads
-    : downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) > 0)
+  if (bestLocal === undefined) return [...downloads, ...locals]
+  const redundant = downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) <= 0)
+  const fresh = downloads.filter((candidate) => compareVersions(candidate.version, bestLocal) > 0)
   return [...fresh, ...locals, ...redundant]
 }
 
@@ -548,8 +556,12 @@ export function removeLinkOrDir(path: string, allowedRoot: string = vendorDir): 
   let info
   try {
     info = lstatSync(path)
-  } catch {
-    return // 本来就不存在：清链是幂等动作
+  } catch (error) {
+    // 只有「本来就不存在」才算幂等成功；EACCES/EPERM/EBUSY 要照抛——静默吞掉的话，
+    // 调用方接着 symlinkSync 会抛 EEXIST，被记成「兼容性检查没通过」，把一份本来可用的
+    // pi-ai 判死，原因还指错方向。
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return
+    throw error
   }
   if (info.isSymbolicLink() || !info.isDirectory()) {
     unlinkSync(path)
@@ -558,7 +570,7 @@ export function removeLinkOrDir(path: string, allowedRoot: string = vendorDir): 
   const resolved = resolve(path)
   const root = resolve(allowedRoot)
   if (resolved !== root && !resolved.startsWith(root + sep)) {
-    throw new Error(`拒绝递归删除 vendor 之外的目录：${resolved}`)
+    throw new Error(`拒绝递归删除 ${root} 之外的目录：${resolved}`)
   }
   rmSync(resolved, { force: true, recursive: true })
 }

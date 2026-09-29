@@ -152,7 +152,8 @@ export function addRouteOps(routeId: string, profile: AnyRecord, exists: boolean
   return ops
 }
 
-/** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */function piAiSourceLabel(source: unknown): string {
+/** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
+function piAiSourceLabel(source: unknown): string {
   if (source === 'dependency') return '兜底依赖'
   if (source === 'dsh') return 'dsh 自带'
   return '已下载'
@@ -277,7 +278,8 @@ export function deleteConfirmText(account: unknown): string {
     + '：整段配置（手写的模型清单 / compat / retryPolicy）一并消失，不可撤销。'
 }
 
-/** 字节数人性化：1.2 GB / 82 MB / 512 KB。 */export function formatBytes(value: unknown): string {
+/** 字节数人性化：1.2 GB / 82 MB / 512 KB。 */
+export function formatBytes(value: unknown): string {
   var n = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(n) || n <= 0) return '0 MB'
   if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB'
@@ -1276,6 +1278,10 @@ export function ProviderSettingsSection() {
   var setPresets = presetsState[1]
   var catTickState = react.useState(0)
   var setCatTick = catTickState[1]
+  // 模型清单保存后 +1：详情表要重新拉（而且要绕开宿主那 60 秒缓存），徽章/详情卡立刻跟着变
+  var detailsTickState = react.useState(0)
+  var detailsTick = detailsTickState[0]
+  var setDetailsTick = detailsTickState[1]
   var delState = react.useState({})
   var delConfirm = delState[0]
   var setDelConfirm = delState[1]
@@ -1397,7 +1403,7 @@ export function ProviderSettingsSection() {
   react.useEffect(
     function () {
       var cancelled = false
-      loadModelDetailMap()
+      loadModelDetailMap(detailsTick > 0)
         .then(function (map) {
           if (!cancelled) setDetailsById(map)
         })
@@ -1406,7 +1412,7 @@ export function ProviderSettingsSection() {
         cancelled = true
       }
     },
-    [],
+    [detailsTick],
   )
 
   // 刷新单个 provider 的余量（卡片上的 ↻ 按钮）：宿主实查并回传新账户，本地替换。
@@ -1692,15 +1698,18 @@ export function ProviderSettingsSection() {
   for (var gi = 0; gi < catalogGroups.length; gi += 1) {
     modelsByProvider[catalogGroups[gi].id] = catalogGroups[gi].models
   }
-  // 每条路由自己声明的模型清单（没声明就没有这个键 = 跟随 pi-ai 目录）：模型清单编辑器用它回显
+  // 每条路由自己声明的模型清单（没声明就没有这个键 = 跟随 pi-ai 目录）：模型清单编辑器用它回显。
+  // 同时记下哪些是 llm-pi-ai 路由：清单只能写进 settings 的 llm-pi-ai 段，原生路由（llm-deepseek
+  // 这类）渲染编辑器只会让用户白编辑一场（保存必然被宿主拒掉）。
   var declaredByRoute: Record<string, unknown> = {}
+  var piAiRoutes: Record<string, boolean> = {}
   var statusRecord = status === null || status === undefined ? undefined : status as AnyRecord
   var statusRoutes = statusRecord !== undefined && Array.isArray(statusRecord['routes']) ? statusRecord['routes'] as unknown[] : []
   for (var ri = 0; ri < statusRoutes.length; ri += 1) {
     var routeEntry = statusRoutes[ri] as AnyRecord
-    if (typeof routeEntry['id'] === 'string' && routeEntry['models'] !== undefined) {
-      declaredByRoute[routeEntry['id'] as string] = routeEntry['models']
-    }
+    if (typeof routeEntry['id'] !== 'string') continue
+    if (routeEntry['source'] === 'llm-pi-ai') piAiRoutes[routeEntry['id']] = true
+    if (routeEntry['models'] !== undefined) declaredByRoute[routeEntry['id']] = routeEntry['models']
   }
   var cards = []
   for (var i = 0; i < accounts.length; i += 1) {
@@ -1988,15 +1997,26 @@ export function ProviderSettingsSection() {
             // 列表区：分割线上边缘贯穿模型框
             mBoxRows.push(react.createElement('div', { className: 'pv_mList', key: 'm-list' }, mListRows))
             // 模型清单编辑器（issue #1）：官方 Models 页被禁用后，逐模型参数只能手改 settings.yaml，
-            // 这里给一条界面上的路：勾选/替换清单、改字段、写回 llm-pi-ai.providers.<id>.models
-            mBoxRows.push(react.createElement(ModelListEditor, {
-              key: 'm-editor',
-              routeId: account.id,
-              declared: declared,
-              catalog: allModels === undefined ? [] : allModels,
-              detailsById: detailsById,
-              onSaved: onProviderAdded,
-            }))
+            // 这里给一条界面上的路：勾选/替换清单、改字段、写回 llm-pi-ai.providers.<id>.models。
+            // 只给 llm-pi-ai 路由：原生路由（deepseek-official 这类）不在这个设置段里，写了也不生效。
+            mBoxRows.push(piAiRoutes[account.id] === true
+              ? react.createElement(ModelListEditor, {
+                  key: 'm-editor',
+                  routeId: account.id,
+                  declared: declared,
+                  catalog: allModels === undefined ? [] : allModels,
+                  detailsById: detailsById,
+                  onSaved: function () {
+                    onProviderAdded()
+                    // 清单改了，能力详情也跟着变：重拉一次并绕开宿主缓存
+                    setDetailsTick(function (prev: number) { return prev + 1 })
+                  },
+                })
+              : react.createElement(
+                  'div',
+                  { className: 'pv_line pv_meNative', key: 'm-editor' },
+                  '这条是内置原生路由：模型清单不写在这套设置里，编辑清单只对 llm-pi-ai 路由有效',
+                ))
           }
           bodyRows.push(react.createElement('div', { className: 'pv_mBox', key: 'mbox' }, mBoxRows))
         }
@@ -2209,8 +2229,11 @@ export function ProviderSettingsSection() {
               return undefined
             },
             // 这条 route 是不是已经在配置里：已存在时只逐字段写（保住手写的 models / compat /
-            // retryPolicy），不存在才整条新建
+            // retryPolicy），不存在才整条新建。
+            // 三个来源都要查——只认额度快照时，/plan/status 拉不到（或自建路由不在预设列表里）
+            // 就会退回整条 set，把用户手写的配置一次抹掉（issue #1 那条提醒的原始形态）。
             existsOf: function (routeId: string) {
+              if (piAiRoutes[routeId] === true) return true
               for (var ei = 0; ei < accounts.length; ei += 1) {
                 if (accounts[ei].id === routeId) return true
               }

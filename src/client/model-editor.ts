@@ -13,7 +13,7 @@
  * contextWindow 不是正整数）会让整条路由解析失败——那家 provider 会直接不可用，所以宁可不让保存。
  */
 import react from 'react'
-import { apiCall } from './data.js'
+import { apiCall, detailOf } from './data.js'
 import { formatContext } from './format.js'
 import type { AnyRecord } from '../types.js'
 import type { CatalogModel, ModelDetail, ModelRow } from './types.js'
@@ -36,8 +36,14 @@ export const THINKING_FORMATS = [
   'ant-ling',
 ] as const
 
-/** 输入模态（pi-ai 的 `input` 字段取值）。 */
-export const INPUT_MODALITIES = ['text', 'image', 'video'] as const
+/**
+ * 输入模态：**只有宿主 schema 认的这两种**。
+ *
+ * 官方 `llm-pi-ai` 的配置 schema 是 `input: z.array(z.union(['text','image']))`，写 `video`
+ * 会让整笔 `settings/mutate` 在解析阶段就失败。pi-ai 目录里的 `video` 能力照样读、照样出徽章
+ * （那是只读展示），但不写回配置。
+ */
+export const INPUT_MODALITIES = ['text', 'image'] as const
 
 var rowSeq = 0
 
@@ -121,6 +127,7 @@ export function editorRowsOf(
   declared: unknown,
   catalog: readonly CatalogModel[],
   detailsById?: Record<string, ModelDetail> | null,
+  provider?: string,
 ): ModelRow[] {
   var rows: ModelRow[] = []
   if (Array.isArray(declared) && declared.length > 0) {
@@ -128,7 +135,10 @@ export function editorRowsOf(
       var raw = declared[i]
       var entry: AnyRecord = typeof raw === 'string' ? { id: raw } : (raw === null || typeof raw !== 'object' ? {} : raw as AnyRecord)
       var compat = entry['compat'] === null || typeof entry['compat'] !== 'object' ? {} : entry['compat'] as AnyRecord
-      var declaredInput = strings(entry['input'])
+      var declaredInput = strings(entry['input']).filter((item) => (INPUT_MODALITIES as readonly string[]).indexOf(item) >= 0)
+      // 详情按 provider + id 查：同名模型跨 provider 很常见，裸 id 会串家（issue #5）
+      var declaredDetail = detailOf(detailsById, provider === undefined ? '' : provider, entry['id'])
+      var declaredKnown = declaredInput.length > 0 || (declaredDetail !== undefined && declaredDetail.capabilitiesKnown === true)
       rowSeq += 1
       rows.push({
         key: 'declared-' + String(rowSeq),
@@ -137,7 +147,11 @@ export function editorRowsOf(
         contextWindow: numberText(entry['contextWindow']),
         maxTokens: numberText(entry['maxTokens']),
         // 清单没写 input 时，实际生效的是目录里那份（resolveEntry 的 `?? base?.input`）
-        input: declaredInput.length > 0 ? declaredInput : inheritedInput(entry['id'], detailsById),
+        input: declaredInput.length > 0 ? declaredInput : (declaredKnown ? modalityList(declaredDetail) : ['text']),
+        // 这条行的 input 是不是「查到的」：没查到就不该在保存时把它写成显式声明——
+        // 那等于拿一个占位的 ['text'] 盖掉 pi-ai 目录里的视觉能力
+        inputKnown: declaredKnown,
+        inputTouched: false,
         reasoning: formatReasoningEfforts(entry['reasoningEfforts']),
         thinkingFormat: textOf(compat['thinkingFormat']),
         enabled: true,
@@ -148,7 +162,8 @@ export function editorRowsOf(
   }
   for (var c = 0; c < catalog.length; c += 1) {
     var model = catalog[c]
-    var detail = detailsById === null || detailsById === undefined ? undefined : detailsById[model.id]
+    var detail = detailOf(detailsById, provider === undefined ? '' : provider, model.id)
+    var known = detail !== undefined && detail.capabilitiesKnown === true
     rowSeq += 1
     rows.push({
       key: 'catalog-' + String(rowSeq),
@@ -156,7 +171,9 @@ export function editorRowsOf(
       name: textOf(model.name),
       contextWindow: numberText(model.contextWindow),
       maxTokens: detail === undefined ? '' : numberText(detail.maxTokens),
-      input: detail === undefined ? ['text'] : modalityList(detail),
+      input: known ? modalityList(detail) : ['text'],
+      inputKnown: known,
+      inputTouched: false,
       reasoning: '',
       thinkingFormat: '',
       enabled: true,
@@ -166,20 +183,11 @@ export function editorRowsOf(
   return rows
 }
 
-/** 目录详情 → 输入模态列表。 */
-function modalityList(detail: ModelDetail): string[] {
+/** 目录详情 → 输入模态列表（只列 schema 认的那两种；video 只用于只读徽章）。 */
+function modalityList(detail: ModelDetail | undefined): string[] {
   var list = ['text']
-  if (detail.vision === true) list.push('image')
-  if (detail.video === true) list.push('video')
+  if (detail !== undefined && detail.vision === true) list.push('image')
   return list
-}
-
-/** 清单没写 input 时，目录里这条模型的 input（拿不到就给 ['text']）。 */
-function inheritedInput(id: unknown, detailsById?: Record<string, ModelDetail> | null): string[] {
-  if (typeof id !== 'string' || detailsById === null || detailsById === undefined) return ['text']
-  var detail = detailsById[id]
-  if (detail === undefined) return ['text']
-  return modalityList(detail)
 }
 
 /** 编辑器行 → 写进配置的 models 数组，并在写之前把宿主会拒绝的错误挑出来。 */
@@ -215,8 +223,10 @@ export function editorToModels(rows: readonly ModelRow[]): { models: AnyRecord[]
     } else if (maxTokens !== undefined) {
       entry['maxTokens'] = maxTokens
     }
+    // input 只在「能力查到了」或「用户在界面上动过」时写：否则一个占位的 ['text'] 会被
+    // 官方 `declaredInput(entry.input) ?? base?.input` 当成声明，把目录里的视觉能力盖掉
     var input = row.input.filter((item: string) => (INPUT_MODALITIES as readonly string[]).indexOf(item) >= 0)
-    if (input.length > 0) entry['input'] = input
+    if (row.inputKnown === true || row.inputTouched === true) entry['input'] = input.length > 0 ? input : ['text']
     var reasoning = parseReasoningEfforts(row.reasoning)
     if (reasoning.error !== undefined) errors.push(where + '：' + reasoning.error)
     else if (reasoning.value !== undefined) entry['reasoningEfforts'] = reasoning.value
@@ -282,7 +292,7 @@ export function ModelListEditor(props: ModelListEditorProps) {
   var setOpen = openState[1]
   // react 是 any（见 src/react.d.ts）：显式 cast 出 tuple，回调里才不至于隐式 any
   var rowsState = react.useState(
-    editorRowsOf(props.declared, props.catalog === undefined ? [] : props.catalog, props.detailsById),
+    editorRowsOf(props.declared, props.catalog === undefined ? [] : props.catalog, props.detailsById, props.routeId),
   ) as [ModelRow[], (next: ModelRow[] | ((prev: ModelRow[]) => ModelRow[])) => void]
   var rows = rowsState[0]
   var setRows = rowsState[1]
@@ -292,15 +302,20 @@ export function ModelListEditor(props: ModelListEditorProps) {
   var busyState = react.useState(false)
   var busy = busyState[0] === true
   var setBusy = busyState[1]
-  // 宿主那份清单变了（保存后刷新回来）就重置草稿：不然面板里留着的是上一版内容。
-  // 依赖用序列化签名——每次渲染都新对象，直接依赖 props.declared 会每帧重置。
+  // 宿主那份清单、或目录/详情晚到（/provider/models 要等适配器自报，最坏几秒）时重置草稿：
+  // 不然第一帧的空详情会被当成「能力就是 text」，一保存就把 route 的视觉能力钉死。
+  // 依赖用 declared 的序列化签名（每次渲染都是新对象，直接依赖会每帧重置）。
+  // 用户已经动过的草稿不重置（`dirtyRef`），免得编辑到一半被刷新冲掉。
+  var dirtyRef = react.useRef(false)
   var declaredSignature = JSON.stringify(props.declared === undefined ? null : props.declared)
   react.useEffect(function () {
-    setRows(editorRowsOf(props.declared, props.catalog === undefined ? [] : props.catalog, props.detailsById))
-  }, [declaredSignature])
+    if (dirtyRef.current === true) return
+    setRows(editorRowsOf(props.declared, props.catalog === undefined ? [] : props.catalog, props.detailsById, props.routeId))
+  }, [declaredSignature, props.catalog, props.detailsById])
 
-  /** 改一行里的某个字段。 */
+  /** 改一行里的某个字段（一改就标成「草稿」，晚到的目录/详情不再覆盖它）。 */
   function patchRow(key: string, patch: Partial<ModelRow>) {
+    dirtyRef.current = true
     setRows(function (prev: ModelRow[]) {
       var next: ModelRow[] = []
       for (var i = 0; i < prev.length; i += 1) {
@@ -331,6 +346,8 @@ export function ModelListEditor(props: ModelListEditorProps) {
       : [{ op: 'set', path: ['providers', props.routeId, 'models'], value: planned.models }]
     apiCall('settings/mutate', { ns: 'llm-pi-ai', ops }, '保存模型清单失败')
       .then(function () {
+        // 存完就不是草稿了：宿主那份清单回来时照常重置（也能接住宿主做的规范化）
+        dirtyRef.current = false
         setNote(planned.models.length === 0
           ? '已恢复「跟随目录」：这条路由不再声明清单，模型目录说了算'
           : '已保存 ' + String(planned.models.length) + ' 个模型到 settings.yaml')
@@ -412,7 +429,7 @@ export function ModelListEditor(props: ModelListEditorProps) {
                 var at = next.indexOf(modality)
                 if (at >= 0) next.splice(at, 1)
                 else next.push(modality)
-                patchRow(row.key, { input: next })
+                patchRow(row.key, { input: next, inputTouched: true })
               },
             }),
             modality === 'text' ? '文本' : modality === 'image' ? '图片' : '视频',
@@ -449,6 +466,7 @@ export function ModelListEditor(props: ModelListEditorProps) {
           className: 'pv_iconBtn',
           title: '从清单里去掉这一行',
           onClick: function () {
+            dirtyRef.current = true
             setRows(function (prev: ModelRow[]) {
               return prev.filter((item) => item.key !== row.key)
             })
@@ -469,6 +487,7 @@ export function ModelListEditor(props: ModelListEditorProps) {
         className: 'pv_action',
         onClick: function () {
           rowSeq += 1
+          dirtyRef.current = true
           setRows(function (prev: ModelRow[]) {
             var next = prev.slice()
             next.push({
@@ -478,6 +497,8 @@ export function ModelListEditor(props: ModelListEditorProps) {
               contextWindow: '',
               maxTokens: '',
               input: ['text'],
+              inputKnown: false,
+              inputTouched: true,
               reasoning: '',
               thinkingFormat: '',
               enabled: true,
@@ -509,7 +530,8 @@ export function ModelListEditor(props: ModelListEditorProps) {
         className: 'pv_action',
         disabled: busy,
         onClick: function () {
-          setRows(editorRowsOf(props.declared, props.catalog === undefined ? [] : props.catalog, props.detailsById))
+          dirtyRef.current = false
+          setRows(editorRowsOf(props.declared, props.catalog === undefined ? [] : props.catalog, props.detailsById, props.routeId))
           setNote('已经还原成打开时的内容')
         },
       },
@@ -526,7 +548,8 @@ export function ModelListEditor(props: ModelListEditorProps) {
         disabled: busy,
         title: '删掉这条路由的 models 字段，回到「整份 pi-ai 目录」',
         onClick: function () {
-          setRows(editorRowsOf(undefined, props.catalog === undefined ? [] : props.catalog, props.detailsById))
+          dirtyRef.current = true
+          setRows(editorRowsOf(undefined, props.catalog === undefined ? [] : props.catalog, props.detailsById, props.routeId))
           setNote('已切到「跟随目录」草稿：保存后生效')
         },
       },

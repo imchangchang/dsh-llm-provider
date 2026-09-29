@@ -90,9 +90,13 @@ export function loadProviderStatus() {
 /** 桥接状态拿不到时的占位：设置页据此渲染错误行，界面不至于空着。 */
 export var STATUS_UNAVAILABLE = { bridge: { active: false, error: '宿主端状态不可用' } }
 
-/** 模型详情（生效 pi-ai 包的全量元数据），按 `provider + id` 建索引：悬浮详情卡与能力徽章共用。 */
-export function loadModelDetailMap(): Promise<Record<string, ModelDetail>> {
-  return getJson('/provider/models').then(function (payload) {
+/**
+ * 模型详情（生效 pi-ai 包 + route 声明 + 适配器自报），按 `provider + id` 建索引：
+ * 悬浮详情卡与能力徽章共用。
+ * @param fresh - true 时绕开宿主那 60 秒缓存（刚改完模型清单，徽章要立刻跟着变）。
+ */
+export function loadModelDetailMap(fresh?: boolean): Promise<Record<string, ModelDetail>> {
+  return getJson('/provider/models' + (fresh === true ? '?fresh=1' : '')).then(function (payload) {
     return buildDetailMap(payload === null || payload === undefined ? undefined : (payload as AnyRecord).models)
   })
 }

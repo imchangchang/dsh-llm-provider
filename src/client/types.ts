@@ -39,8 +39,12 @@ export interface ModelRow {
   name: string
   contextWindow: string
   maxTokens: string
-  /** 输入模态：text / image / video。 */
+  /** 输入模态：text / image（宿主 schema 只认这两种）。 */
   input: string[]
+  /** 这条行的 input 是不是查到的（目录/声明/自报）；没查到就不写回配置（免得拿占位值盖掉真能力）。 */
+  inputKnown: boolean
+  /** 用户在界面上动过这个勾选（动过就按用户的意思写）。 */
+  inputTouched: boolean
   /** `reasoningEfforts` 的文本记法：'' 不声明、'false' 不推理、'low,high=max'。 */
   reasoning: string
   /** `compat.thinkingFormat`；'' 表示不声明。 */
