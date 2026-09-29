@@ -173,8 +173,13 @@ export async function installVersion(release: RegistryRelease, log: (line: strin
     timeout: 300_000,
     ...(npm.shell ? { shell: true } : {}),
   })
-  // 老版本装在插件目录里的缓存：装成功一次就顺手清掉（清不掉不影响更新结果）
-  removeCacheDirs(log)
+  // 只清**老版本留在插件目录里**的那份缓存（issue #4 的 178 MB）：系统临时目录那份是这次
+  // 安装刚写进去的，删了下次就全冷下载——它由「清理」按钮与保留策略负责，不在这里动
+  try {
+    removeLinkOrDir(LEGACY_NPM_CACHE_DIR, dirname(LEGACY_NPM_CACHE_DIR))
+  } catch (error) {
+    log(`清理老 npm 缓存失败：${error instanceof Error ? error.message : String(error)}`)
+  }
   return target
 }
 
@@ -232,7 +237,7 @@ export async function checkAndUpdate(
       log(`${release.version} 未通过验证，已跳过（不会切过去）：${String(reason)}`)
     }
     // 装完顺手清理：不会再被选中的重复副本 + 旧版本（保留规则见 pruneVersions）
-    const pruned = pruneVersions()
+    const pruned = pruneVersions(1, log)
     if (pruned.removed.length > 0) {
       log(`清理旧版本：${pruned.removed.map((entry) => `${entry.version}（${entry.reason}）`).join('、')}`)
     }
@@ -327,11 +332,13 @@ export async function vendorUsageAsync(): Promise<VendorUsage> {
   }
 }
 
-/** 清理结果：删了哪些、留了哪些、释放了多少字节。 */
+/** 清理结果：删了哪些、留了哪些、释放了多少字节、有没有没清掉的。 */
 export interface PruneResult {
   removed: { version: string, reason: string }[]
   kept: string[]
   freedBytes: number
+  /** 没删掉的（版本或缓存）：失败原因写在这里，界面要看得见，不能只进日志。 */
+  warnings?: string[]
 }
 
 /**
@@ -392,7 +399,7 @@ export function pruneVersions(keep = 1, log?: (line: string) => void): PruneResu
     const versionsDir = resolve(VERSIONS_DIR)
     const resolved = resolve(active)
     if (resolved.startsWith(versionsDir + sep)) {
-      const version = resolved.slice(versionsDir.length + sep.length).split(/[\/]/)[0]
+      const version = resolved.slice(versionsDir.length + sep.length).split(/[\\/]/)[0]
       if (version !== undefined && version !== '') protectedVersions.push(version)
     }
   }
@@ -411,6 +418,40 @@ export function pruneVersions(keep = 1, log?: (line: string) => void): PruneResu
   })
 }
 
+/** 本机已有的那份最好版本（dsh 自带 / 兜底依赖）——「重复副本」就是这么判的。 */
+function bestLocalVersion(): string | undefined {
+  let best: string | undefined
+  for (const candidate of localCandidates()) {
+    if (best === undefined || compareVersions(candidate, best) > 0) best = candidate
+  }
+  return best
+}
+
+/**
+ * 本机两份非下载档（dsh 自带 / 兜底依赖）里**真正能用**的版本号。
+ *
+ * 为什么必须体检过才算：这条版本号是「重复副本」的判定门槛。兜底依赖装了一半（依赖被删、
+ * 目录在但加载不了）却版本号很高时，用它当门槛会把一份**能用的**下载档判成重复副本删掉，
+ * 运行时反而退到更旧的 dsh 自带那份。体检只跑本机这两档（候选顺序仍由 loadBridge 逐个
+ * 体检决定，不需要在这里为所有下载档付体检开销），结果靠 ESM 缓存，重复调用几乎不花时间。
+ *
+ * @returns 版本号列表；读不出、目录不在、体检不过的都不算。
+ */
+function localCandidates(): string[] {
+  const versions: string[] = []
+  const requirements = bridgeRequirements()
+  for (const candidate of piAiCandidates()) {
+    if (candidate.key !== 'dsh' && candidate.key !== 'dependency') continue
+    if (!existsSync(join(candidate.root, 'package.json'))) continue
+    if (!/^\d+(\.\d+)*$/.test(candidate.version)) continue
+    const probe = probePiAi(requirements, candidate.root, `prune-${candidate.key}`)
+    // 体检没跑成（unverified）不算数：门槛宁可低一点，也别拿一份没验证过的本机档去删下载档
+    if (!probe.ok || probe.unverified === true) continue
+    versions.push(candidate.version)
+  }
+  return versions
+}
+
 /** 一次清理的输入（路径都显式传进来，离线测试才能拿临时目录跑真删）。 */
 export interface PruneRequest {
   /** 下载档所在目录。 */
@@ -419,7 +460,7 @@ export interface PruneRequest {
   cacheDirs?: readonly string[]
   /** 已就位的下载版本。 */
   installed: readonly string[]
-  /** 本机非下载档里最高的版本号；没有则跳过「重复副本」这条规则。 */
+  /** 本机非下载档里最高的版本号；没有（读不出/体检不过）则跳过「重复副本」这条规则（偏保守：不误删）。 */
   bestLocal: string | undefined
   /** 正在用 / 等重启生效的版本号（绝不删）。 */
   protectedVersions: readonly string[]
@@ -452,62 +493,24 @@ export function applyPrune(request: PruneRequest): PruneResult {
       log(`删除 ${entry.version} 失败：${entry.reason}`)
     }
   }
+  const warnings: string[] = []
   for (const cacheDir of cacheDirs) {
     // 缓存的允许根是它自己的父目录：缓存可能整个在插件目录外（系统临时目录那份），
     // 拿 vendor/ 当根会把「拒绝越界」抛出来、被静默吞掉，缓存永远清不掉
     try {
       removeLinkOrDir(cacheDir, dirname(cacheDir))
     } catch (error) {
-      log(`清理缓存 ${cacheDir} 失败：${error instanceof Error ? error.message : String(error)}`)
+      const message = `清理缓存 ${cacheDir} 失败：${error instanceof Error ? error.message : String(error)}`
+      warnings.push(message)
+      log(message)
     }
   }
-  return { removed: plan.remove, kept: plan.keep, freedBytes: Math.max(0, before - sizeOf()) }
-}
-
-/** 删掉两个 npm 缓存目录（老的在 vendor/ 里、现在的在系统临时目录里）。 */
-function removeCacheDirs(log: (line: string) => void): void {
-  for (const cacheDir of [LEGACY_NPM_CACHE_DIR, NPM_CACHE_DIR]) {
-    try {
-      removeLinkOrDir(cacheDir, dirname(cacheDir))
-    } catch (error) {
-      // 清缓存失败不影响更新结果，但得留痕（不然「点了清理没反应」查不出原因）
-      log(`清理缓存 ${cacheDir} 失败：${error instanceof Error ? error.message : String(error)}`)
-    }
+  return {
+    removed: plan.remove,
+    kept: plan.keep,
+    freedBytes: Math.max(0, before - sizeOf()),
+    ...(warnings.length === 0 ? {} : { warnings }),
   }
-}
-
-/** 本机已有的那份最好版本（dsh 自带 / 兜底依赖）——「重复副本」就是这么判的。 */
-function bestLocalVersion(): string | undefined {
-  let best: string | undefined
-  for (const candidate of localCandidates()) {
-    if (best === undefined || compareVersions(candidate, best) > 0) best = candidate
-  }
-  return best
-}
-
-/**
- * 本机两份非下载档（dsh 自带 / 兜底依赖）里**真正能用**的版本号。
- *
- * 为什么必须体检过才算：这条版本号是「重复副本」的判定门槛。兜底依赖装了一半（依赖被删、
- * 目录在但加载不了）却版本号很高时，用它当门槛会把一份**能用的**下载档判成重复副本删掉，
- * 运行时反而退到更旧的 dsh 自带那份。体检只跑本机这两档（候选顺序仍由 loadBridge 逐个
- * 体检决定，不需要在这里为所有下载档付体检开销）。
- *
- * @returns 版本号列表；读不出、目录不在、体检不过的都不算。
- */
-function localCandidates(): string[] {
-  const versions: string[] = []
-  const requirements = bridgeRequirements()
-  for (const candidate of piAiCandidates()) {
-    if (candidate.key !== 'dsh' && candidate.key !== 'dependency') continue
-    if (!existsSync(join(candidate.root, 'package.json'))) continue
-    if (!/^\d+(\.\d+)*$/.test(candidate.version)) continue
-    const probe = probePiAi(requirements, candidate.root, `prune-${candidate.key}`)
-    // 体检没跑成（unverified）不算数：门槛宁可低一点，也别拿一份没验证过的本机档去删下载档
-    if (!probe.ok || probe.unverified === true) continue
-    versions.push(candidate.version)
-  }
-  return versions
 }
 
 /**

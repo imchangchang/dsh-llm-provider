@@ -147,7 +147,15 @@ export function addRouteOps(routeId: string, profile: AnyRecord, exists: boolean
   var ops: AnyRecord[] = []
   var keys = Object.keys(profile)
   for (var i = 0; i < keys.length; i += 1) {
+    // undefined 值的键不发（JSON 会把它丢掉，发出去等于一次没写进去的 set）
+    if (profile[keys[i]] === undefined) continue
     ops.push({ op: 'set', path: ['providers', id, keys[i]], value: profile[keys[i]] })
+  }
+  // 这次走 OAuth（表单没产出 apiKeyEnv）：已有路由上那条旧的要删掉——官方适配器的
+  // resolveApiKey 只要看到 apiKeyEnv 就只认那个 ref，留着等于把 OAuth 堵死
+  // （0.2.0-alpha.3 修的正是这一类）。新路由走整对象 set，本来就不会写这个字段。
+  if (profile['apiKeyEnv'] === undefined) {
+    ops.push({ op: 'unset', path: ['providers', id, 'apiKeyEnv'] })
   }
   return ops
 }
@@ -609,7 +617,11 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     }
     var typedKey = form.key.trim()
     var routeId = form.routeId.trim()
-    var exists = props.existsOf === undefined ? false : props.existsOf(routeId) === true
+    // 路由表没拿到时按「已在配置里」处理：逐字段写对两种情形都成立（不存在时逐字段写同样能
+    // 建出这条路由），而整对象 set 一旦猜错就把用户手写的 models / compat / retryPolicy 抹掉
+    var exists = props.routesKnown === false
+      ? true
+      : (props.existsOf === undefined ? false : props.existsOf(routeId) === true)
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
       // 已存在的路由逐字段写（见 addRouteOps）：整对象 set 会把它手写的 models / compat /
@@ -1579,9 +1591,13 @@ export function ProviderSettingsSection() {
           setNote('清理失败：' + String((result && result.error) || '未知错误'))
         } else {
           var count = Array.isArray(result.removed) ? result.removed.length : 0
-          setNote(count > 0
+          // 没清掉的（缓存权限这类）也要说出来：只进宿主日志等于用户点了没反应
+          var warnings = Array.isArray(result.warnings) && result.warnings.length > 0
+            ? '；' + result.warnings.join('；')
+            : ''
+          setNote((count > 0
             ? '已删除 ' + String(count) + ' 份旧版本，释放 ' + formatBytes(result.freedBytes)
-            : '没有可清理的版本（释放 ' + formatBytes(result.freedBytes) + '）')
+            : '没有可清理的版本（释放 ' + formatBytes(result.freedBytes) + '）') + warnings)
         }
         refresh(true)
       })
@@ -1704,6 +1720,8 @@ export function ProviderSettingsSection() {
   var declaredByRoute: Record<string, unknown> = {}
   var piAiRoutes: Record<string, boolean> = {}
   var statusRecord = status === null || status === undefined ? undefined : status as AnyRecord
+  // 路由表拿到了吗（没拿到就不对「这条是什么路由」「这条路由在不在」下结论）
+  var statusLoaded = statusRecord !== undefined && Array.isArray(statusRecord['routes'])
   var statusRoutes = statusRecord !== undefined && Array.isArray(statusRecord['routes']) ? statusRecord['routes'] as unknown[] : []
   for (var ri = 0; ri < statusRoutes.length; ri += 1) {
     var routeEntry = statusRoutes[ri] as AnyRecord
@@ -2012,11 +2030,15 @@ export function ProviderSettingsSection() {
                     setDetailsTick(function (prev: number) { return prev + 1 })
                   },
                 })
-              : react.createElement(
-                  'div',
-                  { className: 'pv_line pv_meNative', key: 'm-editor' },
-                  '这条是内置原生路由：模型清单不写在这套设置里，编辑清单只对 llm-pi-ai 路由有效',
-                ))
+              : statusLoaded !== true
+                // 路由表还没回来（/provider/status 失败或首次加载中）：不猜是哪种路由，
+                // 免得给一条 llm-pi-ai 路由挂上「这是内置原生路由」的错话
+                ? null
+                : react.createElement(
+                    'div',
+                    { className: 'pv_line pv_meNative', key: 'm-editor' },
+                    '这条是内置原生路由：模型清单不写在这套设置里，编辑清单只对 llm-pi-ai 路由有效',
+                  ))
           }
           bodyRows.push(react.createElement('div', { className: 'pv_mBox', key: 'mbox' }, mBoxRows))
         }
@@ -2232,6 +2254,7 @@ export function ProviderSettingsSection() {
             // retryPolicy），不存在才整条新建。
             // 三个来源都要查——只认额度快照时，/plan/status 拉不到（或自建路由不在预设列表里）
             // 就会退回整条 set，把用户手写的配置一次抹掉（issue #1 那条提醒的原始形态）。
+            routesKnown: statusLoaded,
             existsOf: function (routeId: string) {
               if (piAiRoutes[routeId] === true) return true
               for (var ei = 0; ei < accounts.length; ei += 1) {

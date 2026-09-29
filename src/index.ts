@@ -377,8 +377,9 @@ export function apply(ctx: PluginContext, config: unknown): void {
     'dsh-llm-provider: /plan/status route',
   )
 
-  // vendor/ 磁盘占用缓存：统计要走完整个 vendor/（实测两万多个文件），不能放在请求路径上同步跑。
-  // 这里只读缓存值，过期就在后台重算（异步遍历），下一次请求拿到新数字。
+  // vendor/ 磁盘占用缓存：统计要走完整个 vendor/（主工作区实测 336 MB、两万多个文件；同步递归
+  // 一次 ~113 ms），所以不能同步跑——走 fs/promises 的异步遍历，等待期间事件循环照常。
+  // 60 秒内的缓存直接命中；过期或没有就现算（这个响应会多等一会儿，但不阻塞宿主）。
   let vendorUsageCache: { at: number, value: Awaited<ReturnType<typeof vendorUsageAsync>> } | undefined
   let vendorUsagePending: Promise<Awaited<ReturnType<typeof vendorUsageAsync>> | undefined> | undefined
   /** 拿一份占用：新鲜就直出，过期/没有就现算（await 不阻塞事件循环，只是这一个响应等一会儿）。 */
@@ -526,7 +527,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
             logger?.info?.(`[pi-ai updater] 清理完成：删 ${String(result.removed.length)} 份，释放 ${String(Math.round(result.freedBytes / 1024 / 1024))} MB`)
             json(res, 200, { ok: true, ...result, usage })
           } catch (error) {
-            json(res, 200, { ok: false, error: messageOf(error), usage: vendorUsageCache?.value })
+            json(res, 200, { ok: false, error: messageOf(error), usage: vendorUsageCache?.value ?? null })
           }
         })()
       },

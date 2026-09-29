@@ -367,6 +367,14 @@ rowsCheck('表单里的字段真的写进去了', after.providers['opencode-go']
 let clobbered = applySet(existingSection, { op: 'set', path: ['providers', 'opencode-go'], value: { baseURL: 'https://x', apiKeyEnv: 'K' } })
 rowsCheck('对照：整对象 set 会抹掉 models（老写法的毛病）', clobbered.providers['opencode-go'].models === undefined)
 rowsCheck('空路由 id 不产生操作', addRouteOps('  ', { baseURL: 'x' }, false).length === 0)
+// OAuth 路径：已有路由上那条旧的 apiKeyEnv 必须删掉（官方适配器只认它，留着就把 OAuth 堵死）
+const oauthOps = addRouteOps('anthropic', {}, true).filter((op) => op.path[2] === 'apiKeyEnv')
+rowsCheck('OAuth 重建已有路由时 unset apiKeyEnv', oauthOps.length === 1 && oauthOps[0].op === 'unset')
+rowsCheck('走密钥路径时不 unset apiKeyEnv',
+  addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => !(op.op === 'unset' && op.path[2] === 'apiKeyEnv')))
+rowsCheck('新路由不带 unset（整对象 set 本来就不写这个字段）',
+  addRouteOps('deepseek', { apiKeyEnv: 'K' }, false).length === 1)
+rowsCheck('undefined 值的键不发 set', addRouteOps('deepseek', { apiKeyEnv: undefined, baseURL: 'https://x' }, true).length === 2)
 rowsCheck('表单没填的字段不进 ops（原值保持）',
   addRouteOps('deepseek', { apiKeyEnv: 'DEEPSEEK_API_KEY' }, true).every((op) => op.path[2] === 'apiKeyEnv'))
 
@@ -443,6 +451,10 @@ rowsCheck('写出的 thinkingFormat 在 compat 里', built.models[0].compat.thin
 rowsCheck('勾选行没有错误', built.errors.length === 0)
 rowsCheck('用户动过勾选就按用户的写（即使能力没查到）',
   editorToModels([{ key: 'a', id: 'x', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: false, inputTouched: true, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' }]).models[0].input.join(',') === 'text')
+// 两种模态都取消：宿主把空数组当「沿用目录」，不能静默写一个 ['text'] 把视觉能力钉死
+const noneInput = editorToModels([{ key: 'a', id: 'x', name: '', contextWindow: '', maxTokens: '', input: [], inputKnown: true, inputTouched: true, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' }])
+rowsCheck('模态一个都不选时报错而不是写 text', noneInput.errors.some((e) => e.indexOf('输入模态') !== -1))
+rowsCheck('报错时不产出 input 字段', noneInput.models[0].input === undefined)
 
 const badRows = editorToModels([
   { key: 'a', id: '', name: '', contextWindow: '', maxTokens: '', input: ['text'], inputKnown: true, inputTouched: false, reasoning: '', thinkingFormat: '', enabled: true, source: 'declared' },

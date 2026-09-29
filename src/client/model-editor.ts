@@ -226,7 +226,13 @@ export function editorToModels(rows: readonly ModelRow[]): { models: AnyRecord[]
     // input 只在「能力查到了」或「用户在界面上动过」时写：否则一个占位的 ['text'] 会被
     // 官方 `declaredInput(entry.input) ?? base?.input` 当成声明，把目录里的视觉能力盖掉
     var input = row.input.filter((item: string) => (INPUT_MODALITIES as readonly string[]).indexOf(item) >= 0)
-    if (row.inputKnown === true || row.inputTouched === true) entry['input'] = input.length > 0 ? input : ['text']
+    if (row.inputTouched === true && input.length === 0) {
+      // 宿主把「空数组」和「没写」当同一回事（都表示沿用目录），所以这里没有「一种都不要」的表达：
+      // 与其静默写一个 ['text'] 把视觉模型钉成纯文本，不如让用户改用「恢复跟随目录」
+      errors.push(where + ' 的输入模态至少选一种（两种都不要 = 沿用目录，请用「恢复跟随目录」或「还原」）')
+    } else if (row.inputKnown === true || row.inputTouched === true) {
+      entry['input'] = input
+    }
     var reasoning = parseReasoningEfforts(row.reasoning)
     if (reasoning.error !== undefined) errors.push(where + '：' + reasoning.error)
     else if (reasoning.value !== undefined) entry['reasoningEfforts'] = reasoning.value

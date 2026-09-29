@@ -259,6 +259,11 @@ export interface AddProviderPanelProps {
    * 用户手写的 `models` / `compat.thinkingFormat` / `retryPolicy` 一起抹掉（issue #1）。
    */
   existsOf?: (routeId: string) => boolean
+  /**
+   * `/provider/status` 的路由表拿到了没有。false 时「这条路由在不在」无从判断，
+   * 一律按「已在配置里」走逐字段写（猜错也只多写几个字段，不会整段覆盖）。
+   */
+  routesKnown?: boolean
 }
 
 /** 座位注册表：inject(name, factory) + register(描述符, 组件)。 */
