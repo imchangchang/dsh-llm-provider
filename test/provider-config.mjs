@@ -15,6 +15,7 @@ import {
   OWN_ENTRY_ID,
   applyProviderOp,
   configWithProviders,
+  mergeLayers,
   parseProviderOp,
   providersOf,
   providerStoreStatus,
@@ -81,14 +82,26 @@ check('0.2.x：entries() 返回 iterable 也认（不是数组）', (() => {
   return readProviderConfig({ loader: iterable }).legacyCount === 2
 })())
 
-// 自己条目 config 非空 → 整体接管（写下去的是整份，老段被搬过之后就它说话）
+// 自己条目 config 非空 → 整体接管（写下去的是整份，老段被搬过之后就它说话）。
+// 这是 0.2.x 的语义：老段所在的条目被 patch 禁着、界面写不进去，所以条目一有内容就整体接管。
+// 0.1.x（settings 宿主）不是这样：老段可写、两层叠着，见下面的 settings 宿主用例。
 const ownView = readProviderConfig({
-  settings: { get: () => ({ providers: legacyProviders }) },
+  loader: { entries: () => [legacyRowEntry] },
   ownConfig: { providers: { 'opencode-go': { apiKeyEnv: 'OPENCODE' } } },
 })
 check('自己条目非空时整体接管', ownView.mode === 'own' && ownView.providers['opencode-go'].apiKeyEnv === 'OPENCODE')
 check('接管后不再带上老段里的路由（那份已经写进条目里了）', ownView.providers['kimi-coding'] === undefined)
-check('内置默认仍在（除非条目自己写了同 id）', ownView.providers.deepseek.displayName === 'DeepSeek')
+// 条目接管之后内置默认不再额外加回来：不然用户删掉内置的 deepseek 下次读又冒出来。
+// 首次界面写入会把整份合并结果（含内置默认）写进条目，所以正常使用不会丢默认路由。
+check('条目接管后不再额外加回内置默认（删掉 deepseek 才删得掉）', ownView.providers.deepseek === undefined)
+check('接管前（条目为空）内置默认照样在', readProviderConfig({ loader: { entries: () => [includeEntry] } }).providers.deepseek.displayName === 'DeepSeek')
+check('删掉内置 deepseek 后不会再出现（0.2.x 条目接管）', (() => {
+  const view = readProviderConfig({
+    loader: { entries: () => [includeEntry] },
+    ownConfig: { providers: { 'kimi-coding': { apiKeyEnv: 'K' } } },
+  })
+  return view.providers.deepseek === undefined && view.providers['kimi-coding'] !== undefined && view.builtinCount === 0
+})())
 
 // 0.2.x 的 schemastery 代理：providers 是带 .get() 的访问器
 const proxied = readProviderConfig({
@@ -112,7 +125,7 @@ check('没有老段来源时也不报失败（0.1.x 的 settings 就是没这两
 
 // 条目接管之后，老段里后来手加的路由不会被读：要出 warning（别静默失效）
 const orphaned = readProviderConfig({
-  settings: { get: () => ({ providers: { a: {}, b: {}, c: {} } }) },
+  loader: { entries: () => [{ options: { id: LEGACY_NS, config: { providers: { a: {}, b: {}, c: {} } } } }] },
   ownConfig: { providers: { a: {} } },
 })
 check('老段里的孤儿路由出 warning', orphaned.warnings.some((w) => w.indexOf('有 2 行已被插件条目覆盖') !== -1))
@@ -121,23 +134,87 @@ check('孤儿路由不进生效集合（条目为准）', orphaned.providers.b =
 // 刚被界面删掉的那些不算孤儿：0.2.x 上老段那一行删不掉（条目被 patch 禁着、寻不到址），
 // 用户前脚删完就看到「老段里还有 2 条」会以为没删掉
 const justDeleted = readProviderConfig({
-  settings: { get: () => ({ providers: { a: {}, b: {}, c: {} } }) },
+  loader: { entries: () => [{ options: { id: LEGACY_NS, config: { providers: { a: {}, b: {}, c: {} } } } }] },
   ownConfig: { providers: { a: {} } },
   deletedIds: new Set(['b', 'c']),
 })
-check('刚删掉的 route id 不再算孤儿（不弹假告警）', justDeleted.warnings.every((w) => w.indexOf('已被插件条目覆盖') === -1))
+check('刚删掉的 route id 不再算孤儿（不弹假告警）：有对照才有意义',
+  justDeleted.warnings.every((w) => w.indexOf('已被插件条目覆盖') === -1)
+  && justDeleted.providers.b === undefined
+  && readProviderConfig({
+    loader: { entries: () => [{ options: { id: LEGACY_NS, config: { providers: { a: {}, b: {}, c: {} } } } }] },
+    ownConfig: { providers: { a: {} } },
+  }).warnings.some((w) => w.indexOf('有 2 行已被插件条目覆盖') !== -1))
 check('没删过的照样报出来', (() => {
-  const view = readProviderConfig({
-    settings: { get: () => ({ providers: { a: {}, b: {} } }) },
-    ownConfig: { providers: { a: {} } },
-    deletedIds: new Set(['b']),
-  })
-  const viewOther = readProviderConfig({
-    settings: { get: () => ({ providers: { a: {}, b: {} } }) },
-    ownConfig: { providers: { a: {} } },
-  })
+  const rows = () => [{ options: { id: LEGACY_NS, config: { providers: { a: {}, b: {} } } } }]
+  const view = readProviderConfig({ loader: { entries: rows }, ownConfig: { providers: { a: {} } }, deletedIds: new Set(['b']) })
+  const viewOther = readProviderConfig({ loader: { entries: rows }, ownConfig: { providers: { a: {} } } })
   return view.warnings.every((w) => w.indexOf('覆盖') === -1) && viewOther.warnings.some((w) => w.indexOf('覆盖') !== -1)
 })())
+
+// ---- 0.1.x（settings 宿主）：两层叠着，base 不能带着用户那批路由 ----
+// 官方 bundle 会把我们交出去的 config 当 settings 的 composition base：dsh-settings 的解析是
+// `schema(mergeLayers(base, section))`，而 mergeLayers 是递归合并——base 里有的键一定活下来。
+// 0.1.6 实测：把用户那批路由塞进 base 之后，用户段里 unset 掉 apiKeyEnv 也不管用（base 那份还在，
+// 官方适配器照旧抛 MISSING_CREDENTIAL）；删掉整条路由，刷新后又从 base 冒回来。
+// 注意两端都包着 `providers`：settings 的 section 是**命名空间那一段**（Config 的形状是
+// `{ providers: … }`），不是裸的 providers 记录——0.1.6 的 settings.yaml 里就是 `llm-pi-ai: { providers: … }`
+const settingsHost = (section, resolved) => ({
+  settings: {
+    section: (ns) => (ns === LEGACY_NS ? { providers: section } : undefined),
+    get: () => ({ providers: resolved }),
+  },
+})
+const layered = readProviderConfig({
+  ...settingsHost({ 'kimi-coding': { apiKeyEnv: 'KIMI_CODING_API_KEY' } }, { providers: { 'kimi-coding': { apiKeyEnv: 'KIMI_CODING_API_KEY' } } }),
+  ownConfig: { providers: { copilot: { models: [{ id: 'gpt-5.4' }] } } },
+})
+check('0.1.x：交出去的 base 只放内置默认 + 条目 config（不含用户那批路由）',
+  layered.bridgeProviders.deepseek !== undefined && layered.bridgeProviders.copilot !== undefined
+  && layered.bridgeProviders['kimi-coding'] === undefined)
+check('0.1.x：生效集合 = base 叠上用户层（两处都有）',
+  layered.providers['kimi-coding'].apiKeyEnv === 'KIMI_CODING_API_KEY' && layered.providers.copilot.models.length === 1)
+check('0.1.x：两层都有同一条路由时逐字段合并（不是整条替换）', (() => {
+  const view = readProviderConfig({
+    ...settingsHost({ copilot: { apiKeyEnv: 'COPILOT_KEY' } }, {}),
+    ownConfig: { providers: { copilot: { models: [{ id: 'gpt-5.4' }] } } },
+  })
+  return view.providers.copilot.apiKeyEnv === 'COPILOT_KEY' && view.providers.copilot.models.length === 1
+})())
+check('0.1.x：用户层删掉的路由不会从 base 复活（section 空就是空，不退回 get）', (() => {
+  // section 为空、get() 还带着（base 里那份）路由：这正是「删了没反应」的形态
+  const view = readProviderConfig(settingsHost({}, { 'kimi-coding': { apiKeyEnv: 'KIMI_CODING_API_KEY' } }))
+  return view.providers['kimi-coding'] === undefined && view.legacyCount === 0 && view.legacySource === 'settings'
+})())
+check('0.1.x：读的是 section（用户层原文），不是 get() 的解析值',
+  readProviderConfig(settingsHost({ a: { apiKeyEnv: 'A' } }, { providers: { b: { apiKeyEnv: 'B' } } })).providers.b === undefined)
+check('0.1.x：只有 get 可读时说清「读到的是含 base 的合并值」', (() => {
+  const view = readProviderConfig({ settings: { get: () => ({ providers: { a: {} } }) } })
+  return view.warnings.some((w) => w.indexOf('composition base') !== -1)
+})())
+check('0.1.x：settings 宿主上不报「老段已被条目覆盖」（两层叠着，没有接管）', (() => {
+  const view = readProviderConfig({
+    ...settingsHost({ b: {} }, { providers: { b: {} } }),
+    ownConfig: { providers: { a: {} } },
+  })
+  return view.warnings.every((w) => w.indexOf('已被插件条目覆盖') === -1)
+})())
+check('0.2.x（loader 宿主）：交出去的就是完整合并结果（官方只读 .get()，交少了那批路由全丢）', (() => {
+  const view = readProviderConfig({ loader: { entries: () => [legacyRowEntry] }, ownConfig: {} })
+  return JSON.stringify(view.bridgeProviders) === JSON.stringify(view.providers)
+})())
+
+// mergeLayers 本身：与 dsh-settings 同语义
+check('mergeLayers 逐层递归、上层赢', (() => {
+  const merged = mergeLayers({ a: { x: 1, y: 2 }, b: 1 }, { a: { y: 3 } })
+  return merged.a.x === 1 && merged.a.y === 3 && merged.b === 1
+})())
+check('mergeLayers 遇到标量/数组整体取上层', mergeLayers({ k: 'old' }, { k: 'new' }).k === 'new'
+  && JSON.stringify(mergeLayers({ k: [1, 2] }, { k: [3] }).k) === '[3]')
+check('mergeLayers 跳过 undefined（稀疏 patch 不擦掉下层）', mergeLayers({ k: 'keep' }, { k: undefined }).k === 'keep')
+check('mergeLayers 上层缺席就留下层', mergeLayers({ k: 1 }, undefined).k === 1)
+check('mergeLayers 两层都缺席就返回 undefined（与宿主一致，调用方自己兜）',
+  mergeLayers(undefined, undefined) === undefined && mergeLayers(undefined, { a: 1 }).a === 1)
 
 // loader 在场却一条条目都列不出来：树没建好、或我们的读法又错了。宁可算「没读到」，
 // 也不要当成「读到了、老段是空的」——那样护栏放行整份覆盖，会把用户已有路由删光
@@ -187,8 +264,14 @@ check('merge 能新建路由', applyProviderOp({}, { op: 'merge', routeId: 'new-
 check('unset 摘掉整条', applyProviderOp(existing, { op: 'unset', routeId: 'opencode-go' })['opencode-go'] === undefined)
 const afterUnset = applyProviderOp(existing, { op: 'unsetFields', routeId: 'opencode-go', fields: ['apiKeyEnv', 'baseURL'] })
 check('unsetFields 只删指名字段', afterUnset['opencode-go'].apiKeyEnv === undefined && afterUnset['opencode-go'].models.length === 1)
-check('unsetFields 删空整条时顺手摘掉这一条（空 route 不是合法配置）',
-  applyProviderOp({ only: { api: 'x' } }, { op: 'unsetFields', routeId: 'only', fields: ['api'] }).only === undefined)
+// 删空要留着这条（`{}` 是合法 profile，也是 OAuth-only 路由的形态）：整条删除是 `unset` 的事。
+// 这条以前摘掉整条，界面上「改用 OAuth 认证」（只删 apiKeyEnv）会让 provider 直接消失。
+check('unsetFields 删空后仍留着这条路由（是 {}，不是 undefined）',
+  applyProviderOp({ only: { api: 'x' } }, { op: 'unsetFields', routeId: 'only', fields: ['api'] }).only !== undefined)
+check('删空后的值是空对象（凭据在 OAuth 记录里，配置里没有字段）',
+  Object.keys(applyProviderOp({ only: { apiKeyEnv: 'X' } }, { op: 'unsetFields', routeId: 'only', fields: ['apiKeyEnv'] }).only).length === 0)
+check('整条删除只认 unset op',
+  applyProviderOp({ only: { apiKeyEnv: 'X' } }, { op: 'unset', routeId: 'only' }).only === undefined)
 
 // ---- 解析客户端请求 ----
 check('解析 merge', parseProviderOp({ routeId: 'a', op: 'merge', value: { api: 'x' } })?.op === 'merge')
@@ -237,7 +320,7 @@ const fallbackResult = await writeProviderRoutes({
   ownConfig: {},
 }, { op: 'merge', routeId: 'moonshotai-cn', value: { apiKeyEnv: 'M' } }, healState)
 check('configEditor 失败自动换 settings.mutate', fallbackResult.via === 'settings-mutate' && healState.via === 'settings-mutate')
-check('自愈的警告留痕（说清为什么换路）', fallbackResult.warnings.some((w) => w.indexOf('configEditor.edit 失败') === 0))
+check('自愈的警告留痕（说清为什么换路）', fallbackResult.warnings.some((w) => w.indexOf('configEditor.edit：') === 0))
 check('换路后写的是老命名空间 + 逐字段 op（不覆盖同路由其它键）',
   fallbackCalls[0].ns === LEGACY_NS
   && fallbackCalls[0].ops.length === 1
@@ -259,6 +342,18 @@ await writeProviderRoutes({
 }, { op: 'unset', routeId: 'x' }, { via: 'settings-mutate' })
 check('记忆的策略失败后换另一条并改记忆', healAgain.join(',') === 'settings,editor')
 
+// 两条都不通：报错里要带两边的失败原因。**包括「这个宿主上没有这条服务」**——
+// 这两条都不进 warnings（版本差异），但要是不进错误文案，错误就只剩「两条路都不通：」了
+let unavailableBoth = ''
+try {
+  await writeProviderRoutes({ ownConfig: {} }, { op: 'unset', routeId: 'x' }, {})
+} catch (error) {
+  unavailableBoth = error.message
+}
+check('两条服务都不在时错误文案里也有原因',
+  unavailableBoth.indexOf('两条路都不通') !== -1 && unavailableBoth.indexOf('configEditor.edit') !== -1
+  && unavailableBoth.indexOf('settings.mutate') !== -1 && !unavailableBoth.endsWith('：'))
+
 // 两条都不通：报错里要带两边的失败原因
 let bothFailed = ''
 try {
@@ -271,6 +366,24 @@ try {
 }
 check('两条路都失败时报错并列出原因',
   bothFailed.indexOf('两条路都不通') !== -1 && bothFailed.indexOf('rejected') !== -1)
+
+// 「这条写路径这个宿主上没有」不算失败告警：0.1.x 没有 configEditor，每次首次写都报一条
+// 「configEditor.edit 失败」会让「配置写入」那行永远挂着假告警
+const noEditorWarnings = (await writeProviderRoutes({
+  settings: { mutate: async () => {} },
+  ownConfig: {},
+}, { op: 'unset', routeId: 'x' }, {})).warnings
+check('服务缺席（0.1.x 没有 configEditor）不产生告警', noEditorWarnings.length === 0)
+
+// 按能力挑顺序：有 configEditor.edit 就先试它（0.2.x 只有它行得通），
+// 记忆优先仍然成立（上面几条已覆盖）
+const capabilityOrder = []
+await writeProviderRoutes({
+  configEditor: { entries: () => [{ options: { id: OWN_ENTRY_ID } }], edit: async () => { capabilityOrder.push('editor') } },
+  settings: { mutate: async () => { capabilityOrder.push('settings') } },
+  ownConfig: {},
+}, { op: 'unset', routeId: 'x' }, {})
+check('两条都在时先走 configEditor（0.2.x 的形状）', capabilityOrder.join(',') === 'editor')
 
 // 0.1.x：没有 configEditor 时直接用 settings.mutate
 const onlySettings = []
@@ -314,7 +427,8 @@ let cloneError = ''
 try {
   const cloned = structuredClone(shimConfig)
   check('能过宿主的 structuredClone', cloned.providers.a.api === 'x')
-  check('克隆后 get 还在（克隆的是值，不是访问器）', typeof cloned.providers.get !== 'function' || cloned.providers.get().a.api === 'x')
+  // 克隆的是值：不可枚举的访问器不会被克隆（宿主那边拿到的就是一份普通数据，正合预期）
+  check('克隆后没有 get 访问器（克隆的是值，不是方法）', cloned.providers.get === undefined)
 } catch (error) {
   cloneError = error.message
 }
@@ -332,6 +446,38 @@ check('内容变了就给新对象，能看见新路由', secondRead.b !== undef
 check('内容没变时复用同一个对象（官方那套 identity 记忆化不被打破）',
   liveShim.providers.get() === secondRead && liveShim.providers.get() === liveShim.providers.get())
 check('第一次读的就是当时的内容', firstRead.b === undefined)
+
+// 非 JSON 值也要比得出来：以前用 JSON.stringify 当指纹，Map/Set/RegExp 一律写成 {}，
+// 内容变了却判成没变，get() 就永远返回旧值
+let mapLive = { p: { m: new Map([['a', 1]]) } }
+const mapShim = configWithProviders({}, () => mapLive)
+const firstMap = mapShim.providers.get()
+mapLive = { p: { m: new Map([['b', 2]]) } }
+check('Map 内容变了也算变了（不再被 JSON 指纹吞掉）', mapShim.providers.get() !== firstMap)
+let regexpLive = { p: { r: /a/g } }
+const regexpShim = configWithProviders({}, () => regexpLive)
+const firstRegexp = regexpShim.providers.get()
+regexpLive = { p: { r: /b/g } }
+check('RegExp 换了也算变了', regexpShim.providers.get() !== firstRegexp)
+check('同一个 Map 实例算没变（引用相同直接复用对象）', (() => {
+  const same = { p: { m: new Map([['a', 1]]) } }
+  const shim = configWithProviders({}, () => same)
+  return shim.providers.get() === shim.providers.get()
+})())
+check('只在 undefined 字段上不同的两份配置不会被当成同一份', (() => {
+  let live = { p: { a: undefined } }
+  const shim = configWithProviders({}, () => live)
+  const first = shim.providers.get()
+  live = { p: { a: 'x' } }
+  return shim.providers.get() !== first
+})())
+check('循环引用不会把比较追死', (() => {
+  const cyclic = {}
+  cyclic.self = cyclic
+  const shim = configWithProviders({}, () => ({ p: cyclic }))
+  const first = shim.providers.get()
+  return shim.providers.get() === first
+})())
 
 // ---- merge 的 unsets：省略一个字段不等于删掉它 ----
 const unsetsOp = parseProviderOp({ routeId: 'copilot', op: 'merge', value: { api: 'openai-responses' }, unsets: ['apiKeyEnv'] })
@@ -366,7 +512,9 @@ const indexSource = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
 check('宿主 /provider/status 里确实拼了 providerStore',
   /providerStore:\s*\(?/.test(indexSource)
   && indexSource.indexOf('providerStoreStatus(providerView(), writeState, ownEntryId)') !== -1)
-check('宿主把写策略记忆也带上（via 才有意义）', indexSource.indexOf('providerStoreStatus(providerView(), writeState, ownEntryId)') !== -1)
+// 交出去的那份必须是 bridgeProviders（0.1.x 当 composition base 用，交错整批路由会丢/复活）
+check('宿主把 bridgeProviders 交给官方 bundle，而不是整份 providers',
+  indexSource.indexOf('configWithProviders(config, () => providerView().bridgeProviders)') !== -1)
 
 // 内置默认表结构完整（deepseek 是插件声称「同一套存储」的那条）
 check('内置默认里有 deepseek 且带凭据名', BUILTIN_PROVIDERS.deepseek.apiKeyEnv === 'DEEPSEEK_API_KEY')

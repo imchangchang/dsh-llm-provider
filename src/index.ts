@@ -173,8 +173,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // （`config.providers.get()`），不再去读 `llm-pi-ai` 段——不传就等于用户那批路由全丢。
     const view = providerView()
     // 传「取活值」的函数而不是快照：0.2.x 的 config 变更是 volatile 快路径，不重挂插件，
-    // 快照会让官方 bundle 永远停在挂载那一刻（见 configWithProviders 的注释）
-    bridge.plugin.apply(ctx, configWithProviders(config, () => providerView().providers))
+    // 快照会让官方 bundle 永远停在挂载那一刻（见 configWithProviders 的注释）。
+    // 交出去的是 bridgeProviders：0.1.x 上官方把这份 config 当 settings 的 composition base
+    // 注册，而 base 里的键在 mergeLayers 下一定活下来——放用户那批路由进去，用户在设置里删掉的
+    // 路由就会被复活，所以 0.1.x 只交内置默认与条目 config；0.2.x 官方只读 .get()，必须交完整
+    // 合并结果（写少了等于用户那批路由全丢）。见 bridgeProviders 的注释。
+    bridge.plugin.apply(ctx, configWithProviders(config, () => providerView().bridgeProviders))
     logger?.info?.(`llm bridge active on pi-ai ${bridge.piAiVersion}；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
     for (const warning of view.warnings) logger?.warn?.(warning)
   } else {
