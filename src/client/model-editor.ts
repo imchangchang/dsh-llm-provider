@@ -333,7 +333,7 @@ export function ModelListEditor(props: ModelListEditorProps) {
       .then(function () {
         setNote(planned.models.length === 0
           ? '已恢复「跟随目录」：这条路由不再声明清单，模型目录说了算'
-          : '已保存 ' + String(planned.models.length) + ' 个模型（重启前生效）')
+          : '已保存 ' + String(planned.models.length) + ' 个模型到 settings.yaml')
         if (typeof props.onSaved === 'function') props.onSaved()
       })
       .catch(function (cause: unknown) {
