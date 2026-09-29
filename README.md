@@ -35,6 +35,11 @@ dsh web     # restart required: the plugin tree changed
 
 Add `@<version>` to the package name to install one specific version.
 
+Requires dsh 0.1.6-alpha.1 or newer, including the 0.2 line. The plugin declares
+`@deepseek-ai/dsh-authorization` as an optional peer, and dsh 0.2 checks that range
+against the running dsh version at install/boot — a plugin whose range excludes the
+runtime is refused with an incompatibility error.
+
 To work on this repository, link the checkout into the profile instead:
 
 ```sh

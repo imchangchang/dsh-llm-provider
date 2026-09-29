@@ -33,6 +33,10 @@ dsh web     # 插件树变了，必须重启
 
 包名后加 `@<版本>` 就是装指定版本。
 
+需要 dsh 0.1.6-alpha.1 及以上（含 0.2 线）。插件把 `@deepseek-ai/dsh-authorization`
+声明为可选 peer；dsh 0.2 起会在安装/启动时拿这个范围跟运行的 dsh 版本校验，
+范围不含当前运行时的插件会被直接拒绝并报不兼容。
+
 改本仓库代码时，把 checkout 链接进 profile：
 
 ```sh
