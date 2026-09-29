@@ -278,6 +278,8 @@ Release cadence: **0.2.x carries fixes only**; the two items marked "0.3.x" are 
 
 Honest notes (not verified / not implemented):
 
+- **On 0.1.x the built-in default route (DeepSeek) cannot be deleted.** It sits in the composition base we hand the host, and the user layer above a base cannot express "delete" (`mergeLayers` only merges, so any key in the base survives); removing it from the writable legacy section still leaves it in the resolved value. Keeping that default also makes the default model (deepseek) work out of the box, so it is left as is. 0.2.x does not have this problem: after the entry takes over, the built-in defaults are no longer added back.
+
 - **Multi-endpoint and multi-protocol providers have no live verification.** The decision logic follows the official fallback chain and offline assertions cover it, but no key was available for OpenRouter / Fireworks / opencode / opencode-go / Cloudflare / Bedrock, so no real request was ever sent through them (single-endpoint ones like Copilot and DeepSeek were exercised live).
 - **The available-model list is a login-time snapshot.** pi-ai records `availableModelIds` when an OAuth sign-in completes and the model list is filtered by it; entitlement changes (a newly opened model, an upgraded plan) only show up after signing in again.
 - **Switching an existing OAuth route back to an API key**: the add form offers both paths, but the card has no "switch back to a key" action — that requires deleting and re-adding the route.
