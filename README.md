@@ -82,7 +82,11 @@ One plugin serves both host generations, choosing its path from **runtime capabi
 
 Merge order (low → high): **built-in defaults** (the DeepSeek route, in `BUILTIN_PROVIDERS` in `src/provider-config.ts`) → **legacy `llm-pi-ai` section** → **this plugin's entry config**. Once the last one has content it takes over completely: the UI writes the whole merged set, so routes from the legacy section are migrated into the entry on the first write, after which edits and deletions work and no same-id route in the legacy section can shadow them.
 
-Both write strategies stay in place and are **chosen by capability, with an automatic switch to the other one and a memory of which works** (self-healing): host upgrades or downgrades, a disabled entry, or a profile patch overridden by a home patch need no configuration change. A "configuration writes" row in the pi-ai bridge tab names the path in use, where providers came from, and any warning that did not clear.
+Both write strategies stay in place and are **chosen by capability, with an automatic switch to the other one and a memory of which works** (self-healing): host upgrades or downgrades, a disabled entry, or a profile patch overridden by a home patch need no configuration change. A "configuration writes" row in the pi-ai bridge tab names the path in use, where providers came from, and any warning that did not clear. A path that simply does not exist on this host (0.1.x has no `configEditor`; on 0.2.x `settings.mutate` cannot write the old namespace) is not reported as a warning — that is a version difference, not a failure.
+
+What gets written is a **field-by-field merge**: omitting a field does not delete it. Deletions have to be stated explicitly (the `unsets` field of a `merge` op over HTTP, the fix actions on a card in the UI) — clearing `apiKeyEnv` after an OAuth sign-in goes through this path, because leaving that ref in place makes the official adapter resolve only it and throw `MISSING_CREDENTIAL`, which kills the sign-in that just succeeded.
+
+The providers handed to the official bundle are a **live accessor**: on 0.2.x a change to our entry's config takes Loader's volatile fast path and does not remount the plugin, so a snapshot taken at mount time would leave the official side (`config.providers.get()`) on the old value — configuration written in the UI would only apply after a dsh restart. Every read therefore merges again, and reuses the same object only when the content is unchanged (compared by a content fingerprint), so the official identity-based memoisation still works.
 
 pi-ai updates are triggered two ways: once in the background at plugin startup (throttled to 6 hours, `DSH_PROVIDER_UPDATE=off` disables it) and by the 「检查更新」 button on the provider page (`POST /provider/update`).
 
@@ -218,7 +222,7 @@ The host compares keys while resolving them for each provider and warns in the U
 | `GET /provider/presets` | provider presets available for adding (with configured flags) |
 | `POST /provider/refresh` | refresh one card's quota (live query, updates the global snapshot) |
 | `POST /provider/discover` | draft model discovery (the "add provider" test button); tries the namespace for the dsh version (`llm-pi-ai` on 0.1.x, the plugin entry id on 0.2.x) and self-heals |
-| `POST /provider/mutate` | write provider configuration (`merge` / `unset` / `unsetFields`); the host picks the write path for the dsh version and self-heals |
+| `POST /provider/mutate` | write provider configuration (`merge` / `unset` / `unsetFields`); the host picks the write path for the dsh version and self-heals. `merge` merges field by field, so **omitting a field does not delete it** — list it in `unsets` instead (that is how `apiKeyEnv` is cleared after an OAuth sign-in) |
 | `POST /provider/remove` | remove a provider (route and credential) |
 | `POST /provider/test` | query one provider's quota with the stored key (read-only, does not update the snapshot) |
 | `GET /provider/oauth/flows` | list the flows registered on `ctx.authorization` (same source as `preset.oauth` on `/provider/presets`) |
