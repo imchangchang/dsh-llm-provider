@@ -37,6 +37,7 @@ import {
   OWN_ENTRY_ID,
   configWithProviders,
   parseProviderOp,
+  providerStoreStatus,
   readProviderConfig,
   writeProviderRoutes,
   type ProviderConfigDeps,
@@ -140,6 +141,14 @@ export function apply(ctx: PluginContext, config: unknown): void {
   /** 模型发现的命名空间记忆（0.1.x 是 llm-pi-ai，0.2.x 是本插件条目 id）。 */
   const discoveryState: DiscoveryState = {}
   /**
+   * 本进程里界面删掉过的 route id。
+   *
+   * 0.2.x 上老 `llm-pi-ai` 段那一行删不掉（那个条目被 patch 禁着，settings.mutate 寻不到址），
+   * 于是每次读都会把刚删的那条当成「老段里的孤儿」。用户前脚删完、后脚就看到这条告警，
+   * 会以为没删掉。记下来交给读者排除，进程重启后自然清空。
+   */
+  const deletedIds = new Set<string>()
+  /**
    * provider 配置的读写依赖。每次调用现取服务：0.2.x 上插件会随配置写入被重载，
    * 服务实例可能已经换了一轮，缓存住会指向旧 fiber。
    */
@@ -150,6 +159,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       loader: service<LoaderService>('loader'),
       ownConfig: config,
       entryId: ownEntryId,
+      deletedIds,
     }
   }
   /** 当前合并后的 providers（两代宿主各自的落点 + 内置默认）。 */
@@ -162,7 +172,9 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // providers 必须由我们合并后传进去：0.2.x 的官方 bundle 只认传入的 config
     // （`config.providers.get()`），不再去读 `llm-pi-ai` 段——不传就等于用户那批路由全丢。
     const view = providerView()
-    bridge.plugin.apply(ctx, configWithProviders(config, view.providers))
+    // 传「取活值」的函数而不是快照：0.2.x 的 config 变更是 volatile 快路径，不重挂插件，
+    // 快照会让官方 bundle 永远停在挂载那一刻（见 configWithProviders 的注释）
+    bridge.plugin.apply(ctx, configWithProviders(config, () => providerView().providers))
     logger?.info?.(`llm bridge active on pi-ai ${bridge.piAiVersion}；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
     for (const warning of view.warnings) logger?.warn?.(warning)
   } else {
@@ -501,6 +513,16 @@ export function apply(ctx: PluginContext, config: unknown): void {
             : { active: false, error: bridge.error },
           llmDirectorySize: declaredCount,
           routes,
+          // providers 的落点与写路径（界面「pi-ai 桥接 → 配置写入」那行读它）。
+          // 必须真的发出来：客户端早就加了读取，但这里的 payload 一直没有这个字段，
+          // 那行就永远不渲染——渲染函数自己的测试造假对象，测不出来这种断线。
+          providerStore: ((): AnyRecord | undefined => {
+            try {
+              return providerStoreStatus(providerView(), writeState, ownEntryId)
+            } catch {
+              return undefined
+            }
+          })(),
           // OAuth 体检：authorization 服务在不在、注册了几条 flow。原版 dsh 不挂这个服务
           // （见 oauth.ts 的 ensureAuthorizationService），所以「界面没有 OAuth 入口」这件事
           // 得能一眼看出是哪一步没成：服务没挂上（available:false）还是挂了但没人注册 flow
@@ -796,6 +818,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
                 return
               }
               const result = await writeProviderRoutes(providerDeps(), op, writeState)
+              if (op.op === 'unset') deletedIds.add(op.routeId)
               logger?.info?.(`写 provider 配置：${op.op} ${op.routeId}（经 ${result.via}）`)
               // 路由/额度面板吃的是同一份 providers，写完立刻让快照失效
               invalidatePlanSnapshot()
@@ -821,6 +844,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
           return
         }
         const result = await writeProviderRoutes(providerDeps(), { op: 'unset', routeId: route.id }, writeState)
+        deletedIds.add(route.id)
         let keyCleared = true
         try {
           const credentials = service<CredentialsService>('credentials')

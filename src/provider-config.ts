@@ -48,7 +48,20 @@ export const BUILTIN_PROVIDERS: ProviderRecord = {
 
 /** 写操作：改哪条路由、怎么改。 */
 export type ProviderOp =
-  | { op: 'merge', routeId: string, value: AnyRecord }
+  | {
+    op: 'merge'
+    routeId: string
+    value: AnyRecord
+    /**
+     * 合并完之后要从这条路由上删掉的字段名。
+     *
+     * 「set 整个对象」时代省略一个字段就等于删掉它；现在是逐字段合并，省略没有任何效果。
+     * OAuth 那条路踩过这个坑：授权成功后不再写 `apiKeyEnv`，可老配置里那个 ref 还在，
+     * 官方适配器看到 `apiKeyEnv` 就只认它，取不到值直接抛 MISSING_CREDENTIAL。
+     * 所以「要删」必须显式说出来。
+     */
+    unsets?: readonly string[]
+  }
   | { op: 'unset', routeId: string }
   | { op: 'unsetFields', routeId: string, fields: readonly string[] }
 
@@ -87,6 +100,13 @@ export interface ProviderConfigDeps {
   entryId?: string
   /** 内置默认（默认 {@link BUILTIN_PROVIDERS}）。 */
   builtins?: ProviderRecord
+  /**
+   * 本次会话里被界面删掉的 route id。
+   *
+   * 删除在 0.2.x 上写的是「整份合并结果」，老段里那一行删不掉（条目被 patch 禁着），
+   * 于是每次读都会把它算成「孤儿」。用户刚删完就看到那条告警会以为没删掉，所以这里排掉。
+   */
+  deletedIds?: ReadonlySet<string>
 }
 
 const isPlainRecord = (value: unknown): value is AnyRecord =>
@@ -149,6 +169,13 @@ function legacyFromLoader(loader: LoaderService | undefined, warnings: string[])
     warnings.push(message)
     return { providers: {}, read: false, error: message }
   }
+  if (entries.length === 0) {
+    // loader 在场却一条条目都没有：树还没建好，或我们的读法又错了。算「可疑」而不是
+    // 「读到了但没有」，护栏才拦得住整份覆盖（否则会把用户已有路由删光）
+    const message = 'loader.entries() 没列出任何条目'
+    warnings.push(message)
+    return { providers: {}, read: false, error: message }
+  }
   // 能列出条目就算「读到了」：里面没有 llm-pi-ai 那行说明本来就没有老段，没什么可丢的
   for (const entry of entries) {
     const options = asRecord(asRecord(entry)['options'])
@@ -191,9 +218,9 @@ export function readProviderConfig(deps: ProviderConfigDeps): ProviderConfigView
   const providers: ProviderRecord = { ...builtins, ...base }
   // 条目接管之后，老段里新加/手改的路由不会再被读（生效的是条目那份）：说出来，别静默失效
   if (ownCount > 0 && legacyCount > 0) {
-    const orphans = Object.keys(legacy).filter((id) => own[id] === undefined)
+    const orphans = Object.keys(legacy).filter((id) => own[id] === undefined && deps.deletedIds?.has(id) !== true)
     if (orphans.length > 0) {
-      warnings.push(`老 ${LEGACY_NS} 段里还有 ${String(orphans.length)} 条路由不在本插件条目里（${orphans.slice(0, 5).join('、')}${orphans.length > 5 ? '…' : ''}）：界面写入以条目为准，这些不会生效`)
+      warnings.push(`老 ${LEGACY_NS} 段里有 ${String(orphans.length)} 行已被插件条目覆盖（${orphans.slice(0, 5).join('、')}${orphans.length > 5 ? '…' : ''}）：界面以条目为准，这些行不再生效（要清理就手改 profile patch）`)
     }
   }
   return {
@@ -222,7 +249,9 @@ export function applyProviderOp(providers: ProviderRecord, op: ProviderOp): Prov
   }
   const existing = isPlainRecord(next[op.routeId]) ? (next[op.routeId] as AnyRecord) : undefined
   if (op.op === 'merge') {
-    next[op.routeId] = { ...(existing ?? {}), ...op.value }
+    const merged: AnyRecord = { ...(existing ?? {}), ...op.value }
+    for (const field of op.unsets ?? []) delete merged[field]
+    next[op.routeId] = merged
     return next
   }
   const merged: AnyRecord = { ...(existing ?? {}) }
@@ -230,6 +259,35 @@ export function applyProviderOp(providers: ProviderRecord, op: ProviderOp): Prov
   if (Object.keys(merged).length === 0) delete next[op.routeId]
   else next[op.routeId] = merged
   return next
+}
+
+/**
+ * `/provider/status` 里的 `providerStore` 片段（纯函数，离线可测）。
+ *
+ * 界面的「pi-ai 桥接 → 配置写入」那一行读它。抽出来是因为这里出过一次岔子：客户端加了读取、
+ * 宿主 payload 却没这个字段，界面那行永远不渲染，而渲染函数的测试自己造了对象，测不出来。
+ *
+ * @param view - {@link readProviderConfig} 的结果。
+ * @param state - 写策略记忆。
+ * @param entryId - 本插件条目 id。
+ */
+export function providerStoreStatus(
+  view: ProviderConfigView,
+  state: ProviderWriteState,
+  entryId: string,
+): AnyRecord {
+  return {
+    mode: view.mode,
+    ownCount: view.ownCount,
+    legacyCount: view.legacyCount,
+    builtinCount: view.builtinCount,
+    legacySource: view.legacySource,
+    via: state.via ?? null,
+    lastError: state.lastError ?? null,
+    entryId,
+    legacyNs: LEGACY_NS,
+    warnings: view.warnings,
+  }
 }
 
 /**
@@ -252,10 +310,21 @@ export function parseProviderOp(input: unknown): ProviderOp | undefined {
   }
   if (op === 'merge') {
     if (!isPlainRecord(record['value'])) return undefined
-    return { op: 'merge', routeId, value: record['value'] }
+    const unsets = Array.isArray(record['unsets'])
+      ? record['unsets'].filter((field): field is string => typeof field === 'string' && field !== '')
+      : undefined
+    return unsets === undefined || unsets.length === 0
+      ? { op: 'merge', routeId, value: record['value'] }
+      : { op: 'merge', routeId, value: record['value'], unsets }
   }
   return undefined
 }
+
+/**
+ * 「这条写路径在这个宿主上不存在」——不是故障，是版本差异（0.1.x 没有 configEditor、
+ * 0.2.x 的 settings 写不进老命名空间）。不塞进 warnings，免得界面上天天挂着假告警。
+ */
+class ProviderWriteUnavailable extends Error {}
 
 /** 写成功后记住走的哪条路（自愈：下次先用它，失败再换另一条）。 */
 export interface ProviderWriteState {
@@ -294,9 +363,14 @@ export async function writeProviderRoutes(
   const view = readProviderConfig(deps)
   const providers = applyProviderOp(view.providers, op)
   const warnings: string[] = [...view.warnings]
-  const strategies: ('config-editor' | 'settings-mutate')[] = state.via === 'settings-mutate'
-    ? ['settings-mutate', 'config-editor']
-    : ['config-editor', 'settings-mutate']
+  // 按能力挑默认顺序：有 configEditor 就先试它（0.2.x 只有它行得通），没有就直接用 settings.mutate。
+  // 记忆优先：上次哪条成功先试它，失败再换——宿主升降级、条目失效都能自愈。
+  const capable: ('config-editor' | 'settings-mutate')[] = typeof deps.configEditor?.edit === 'function'
+    ? ['config-editor', 'settings-mutate']
+    : ['settings-mutate', 'config-editor']
+  const strategies = state.via === undefined
+    ? capable
+    : [state.via, ...capable.filter((item) => item !== state.via)]
   let lastError: unknown
   for (const strategy of strategies) {
     try {
@@ -314,7 +388,11 @@ export async function writeProviderRoutes(
       return { via: strategy, providers, warnings }
     } catch (error) {
       lastError = error
-      warnings.push(`${strategy === 'config-editor' ? 'configEditor.edit' : 'settings.mutate'} 失败：${messageOf(error)}`)
+      // 服务压根不在（0.1.x 没有 configEditor / 0.2.x 的 settings 写不了）不算「失败告警」——
+      // 那是版本差异，不是故障；只有真的调用出错才值得报给用户
+      if (!(error instanceof ProviderWriteUnavailable)) {
+        warnings.push(`${strategy === 'config-editor' ? 'configEditor.edit' : 'settings.mutate'} 失败：${messageOf(error)}`)
+      }
     }
   }
   state.lastError = messageOf(lastError)
@@ -325,7 +403,7 @@ export async function writeProviderRoutes(
 async function writeViaConfigEditor(deps: ProviderConfigDeps, providers: ProviderRecord): Promise<void> {
   const editor = deps.configEditor
   if (editor === undefined || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
-    throw new Error('宿主没有 configEditor 服务（0.1.x 的形状）')
+    throw new ProviderWriteUnavailable('宿主没有 configEditor 服务（0.1.x 的形状）')
   }
   const entryId = deps.entryId ?? OWN_ENTRY_ID
   const entry = editor.entries().find((row) => entryIdOf(row) === entryId)
@@ -340,7 +418,7 @@ async function writeViaConfigEditor(deps: ProviderConfigDeps, providers: Provide
 async function writeViaSettings(deps: ProviderConfigDeps, op: ProviderOp): Promise<void> {
   const settings = deps.settings
   if (settings === undefined || typeof settings.mutate !== 'function') {
-    throw new Error('宿主没有可写的 settings 服务')
+    throw new ProviderWriteUnavailable('宿主没有可写的 settings 服务')
   }
   const path = ['providers', op.routeId]
   if (op.op === 'unset') {
@@ -352,40 +430,102 @@ async function writeViaSettings(deps: ProviderConfigDeps, op: ProviderOp): Promi
     await settings.mutate(LEGACY_NS, op.fields.map((field) => ({ op: 'unset' as const, path: [...path, field] })))
     return
   }
-  const ops = Object.keys(op.value)
+  const ops: { op: 'set' | 'unset', path: string[], value?: unknown }[] = Object.keys(op.value)
     .filter((key) => op.value[key] !== undefined)
     .map((key) => ({ op: 'set' as const, path: [...path, key], value: op.value[key] }))
+  // 逐字段合并下「省略不等于删」，要删的字段得翻成 unset 一起发过去（OAuth 清 apiKeyEnv 走这条）。
+  // 漏掉它的话 0.2.x 正常、0.1.x 上那个 ref 还在，两条路的行为就不一致了。
+  for (const field of op.unsets ?? []) ops.push({ op: 'unset', path: [...path, field] })
   if (ops.length === 0) return
   await settings.mutate(LEGACY_NS, ops)
 }
 
 /**
- * 把合并后的 providers 塞进要交给官方 bundle 的 config。
+ * 把合并后的 providers 塞进要交给官方 bundle 的 config（**活值**，不是快照）。
  *
- * 两代 bundle 的读法不同：0.1.x 用 `Object.entries(config.providers ?? {})`（普通对象），
- * 0.2.x 用 `config.providers.get()`（schemastery 访问器）。所以这里放一个两者都认的对象：
- * 可枚举的路由键 + 一个不可枚举的 `get()`。外层用 Proxy 透传其它键（retryPolicy 这些
- * 官方代码同样会读），不破坏原 config 的代理行为。
+ * 两代 bundle 的读法不同，这个对象两边都伺候：
+ *   - 0.1.x：`Object.entries(config.providers ?? {})` —— 要普通对象、且有可枚举的路由键；
+ *     它还会把这份 config 当 settings 段的 base 交给 `installSection`，宿主会对它做
+ *     `structuredClone`（dsh-settings 的 describe），所以**不能是 Proxy**（实测 DataCloneError）。
+ *   - 0.2.x：`config.providers.get()` —— 要一个访问器。
  *
- * @param config - 本插件 apply 拿到的 config。
- * @param providers - {@link readProviderConfig} 的合并结果。
+ * 为什么 `get()` 必须读活值：0.2.x 上我们条目的 config 变更走 Loader 的 volatile 快路径，
+ * **不会重挂插件**（`equalExceptVolatile` 判真 → 只就地更新 resolved config 的 ref）。
+ * 如果这里给一份 apply 时的快照，官方 bundle 的 `config.providers.get()` 就永远停在挂载那一刻，
+ * `profiles()` 因 identity 不变吃 memo、适配器/模型发现/目录全不更新——界面写了配置要重启 dsh 才生效。
+ * 所以每次读都问一遍 `liveProviders()`；读回来的内容与上次相同就复用同一个对象（按内容指纹比），
+ * 这样官方那套 identity 记忆化仍然有效，内容真变了才给新对象。
+ *
+ * @param config - 本插件 apply 拿到的 config（0.2.x 是 schemastery 代理，0.1.x 是普通对象）。
+ * @param liveProviders - 取当前合并结果（每次读都会调用一遍，必须是「现在这一刻」的值）。
  */
-export function configWithProviders(config: unknown, providers: ProviderRecord): AnyRecord {
-  const shim: AnyRecord = { ...providers }
-  Object.defineProperty(shim, 'get', { value: () => providers, enumerable: false })
-  if (!isPlainRecord(config)) return { providers: shim }
-  return new Proxy(config, {
-    get(target, key, receiver) {
-      if (key === 'providers') return shim
-      return Reflect.get(target, key, receiver) as unknown
+export function configWithProviders(config: unknown, liveProviders: () => ProviderRecord): AnyRecord {
+  const snapshot = liveProviders()
+  // 枚举键是 apply 那一刻的快照：0.1.x 的官方 bundle 用 `Object.entries(config.providers)` 读，
+  // 而宿主对这份 config 做 structuredClone（Proxy 会抛 DataCloneError），所以这里只能是普通对象。
+  const shim: AnyRecord = { ...snapshot }
+  let lastMerged = snapshot
+  let lastSignature = signatureOf(snapshot)
+  Object.defineProperty(shim, 'get', {
+    // 不可枚举：0.1.x 的 Object.entries 不会把它当成一条路由，structuredClone 也不碰它
+    value: () => {
+      // 每次都重读一遍。**不能**按「宿主那份 providers 的 identity」决定要不要重读：我们自己的
+      // 条目 config 变更时（volatile 快路径，插件不重挂）宿主那份未必换过对象，那样判成「没变」
+      // 就永远返回挂载那一刻的旧值——界面写了配置要重启 dsh 才生效，正是这个形态。
+      // 重读代价是几次对象拼装 + 遍历 loader 条目，可以接受。
+      const next = liveProviders()
+      const signature = signatureOf(next)
+      // 内容没变就复用同一个对象：官方那套 identity 记忆化才认为「配置没动」，不会白算
+      if (signature !== undefined && signature === lastSignature) return lastMerged
+      lastMerged = next
+      lastSignature = signature
+      return lastMerged
     },
+    enumerable: false,
   })
+  if (!isPlainRecord(config)) return { providers: shim }
+  return { ...config, providers: shim }
 }
 
 /** 从 loader 条目里取 options.id（形状不认识就给 undefined）。 */
 function entryIdOf(row: unknown): string | undefined {
   const options = asRecord(asRecord(row)['options'])
   return readString(options['id'])
+}
+
+/** 给 {@link signatureOf} 里出现过的函数编号（同一个函数要拿到同一个号）。 */
+const functionIds = new WeakMap<object, number>()
+/** WeakMap 没有 size，自己数。 */
+let functionIdCount = 0
+
+/** 取（必要时分配）某个函数的编号。 */
+function functionIdOf(fn: object): number {
+  const existing = functionIds.get(fn)
+  if (existing !== undefined) return existing
+  functionIdCount += 1
+  functionIds.set(fn, functionIdCount)
+  return functionIdCount
+}
+
+/**
+ * 配置内容指纹（{@link configWithProviders} 用它判断「内容变了没有」）。
+ *
+ * `undefined` 这类值 JSON 会丢掉，两份只在 `undefined` 字段上不同的配置就会被判成一样——
+ * 用一个不会出现在配置里的哨兵替掉它。算不出来（循环引用之类）就给 `undefined`，调用方
+ * 按「变了」处理：宁可多算一次，也不能留住旧值。
+ */
+function signatureOf(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value, (_key, item: unknown) => {
+      // JSON 会丢掉 undefined，两个只在 undefined 字段上不同的配置会被判成一样 → 换哨兵
+      if (item === undefined) return '\u0000undefined'
+      // 函数同理（配置里基本不该出现，出现了也不能让两个不同的函数算成同一个）
+      if (typeof item === 'function') return `\u0000function:${String(functionIdOf(item as object))}`
+      return item
+    })
+  } catch {
+    return undefined
+  }
 }
 
 function messageOf(error: unknown): string {

@@ -125,6 +125,37 @@ export function routeProfileOf(
   return profile
 }
 
+/**
+ * 这次写路由时要顺带清掉的字段（与 {@link routeProfileOf} 同源）。
+ *
+ * 写配置现在是逐字段合并，不是整对象覆盖：省略某个字段没有任何效果。OAuth 授权成功后
+ * 我们不再写 `apiKeyEnv`，可用户之前用密钥跑过、配置里那个 ref 还在，官方适配器看到它
+ * 就只认它，取不到值直接抛 MISSING_CREDENTIAL——必须显式删。
+ *
+ * @param oauthAuthorized - 这次是否确实走完了 OAuth 登录。
+ * @returns 交给宿主 `/provider/mutate` 的 `unsets`。
+ */
+export function routeClearedFields(oauthAuthorized: boolean): string[] {
+  return oauthAuthorized ? ['apiKeyEnv'] : []
+}
+
+/**
+ * 组装写路由的请求体（纯函数，离线可测）。
+ *
+ * 单独抽出来是为了让测试能真的把「界面发出的这个包」喂给宿主的解析函数——
+ * 两边对不上（字段名改了、少带了 unsets）是这类跨端接线的典型坏法，
+ * 各自测自己那一半都测不出来。
+ *
+ * @param routeId - 路由 id。
+ * @param value - 要合并进去的字段。
+ * @param unsets - 顺带要删掉的字段名（空数组就不带这个键）。
+ */
+export function mergeRequestOf(routeId: string, value: AnyRecord, unsets: string[]): AnyRecord {
+  var body: AnyRecord = { routeId: routeId, op: 'merge', value: value }
+  if (unsets.length > 0) body.unsets = unsets
+  return body
+}
+
 /** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
 function piAiSourceLabel(source: unknown): string {
   if (source === 'dependency') return '兜底依赖'
@@ -635,7 +666,8 @@ function AddProviderPanel(props: AddProviderPanelProps) {
     var routeId = form.routeId.trim()
     // 配置怎么写由宿主决定（0.1.x 写 settings 的 llm-pi-ai 段，0.2.x 写 profile patch 里本插件
     // 条目的 config）；merge 是逐字段合并，手写的 models / compat / retryPolicy 一个字不动。
-    postJson('/provider/mutate', { routeId: routeId, op: 'merge', value: profile })
+    var cleared = routeClearedFields(oauthAuthorized && useKeyInstead !== true)
+    postJson('/provider/mutate', mergeRequestOf(routeId, profile, cleared))
       .then(function (result: AnyRecord) {
         if (result === null || result === undefined || result.ok !== true) {
           throw new Error(String((result && result.error) || '写配置失败'))

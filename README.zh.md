@@ -79,7 +79,11 @@ dsh web                   # 插件树变了，必须重启
 
 合并优先级（低 → 高）：**内置默认**（DeepSeek 那条，在 `src/provider-config.ts` 的 `BUILTIN_PROVIDERS`）→ **老 `llm-pi-ai` 段** → **本插件条目的 config**。后者一旦有内容就整体接管：界面写下去的是整份合并结果，所以老段里的路由会被一次性搬进条目，之后删改都生效，也不会被老段里的同名路由压住。
 
-写配置的两条策略都留着，**按能力挑、失败自动换另一条并记住能走通的那条**（自愈）：宿主升级/降级、条目被禁用、profile patch 被 home patch 覆盖这些变化都不需要改配置。「pi-ai 桥接」标签页有一行「配置写入」写明当前走的哪条路、providers 来自哪里、有没有没清干净的告警。
+写配置的两条策略都留着，**按能力挑、失败自动换另一条并记住能走通的那条**（自愈）：宿主升级/降级、条目被禁用、profile patch 被 home patch 覆盖这些变化都不需要改配置。「pi-ai 桥接」标签页有一行「配置写入」写明当前走的哪条路、providers 来自哪里、有没有没清干净的告警。这条写路径只是没装（0.1.x 没有 `configEditor`、0.2.x 的 `settings.mutate` 写不了老命名空间）时不报告警——那是版本差异，不是故障。
+
+写下去的合并是**逐字段合并**：省略某个字段不等于删掉它。要删得显式说出来（HTTP 接口里是 `merge` 的 `unsets`，界面上是卡片里的修正动作）——OAuth 授权成功后清掉配置里的 `apiKeyEnv` 就走这条，那个 ref 留着会让官方适配器只认它，取不到值直接报 `MISSING_CREDENTIAL`，等于把刚走完的登录堵死。
+
+交给官方 bundle 的 providers 是**活值访问器**：0.2.x 上我们条目 config 的变更走 Loader 的 volatile 快路径，插件不会重挂，如果传的是挂载那一刻的快照，官方那边（`config.providers.get()`）就永远停在旧值——界面写完配置得重启 dsh 才生效。所以每次读都重新合并一遍，内容没变（按内容指纹比）才复用同一个对象，官方那套 identity 记忆化照样有效。
 
 pi-ai 更新有两个触发路径：插件启动时后台查一次（6 小时节流，`DSH_PROVIDER_UPDATE=off` 可关），以及设置页上的「检查更新」按钮（`POST /provider/update`）。
 
@@ -215,7 +219,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | `GET /provider/presets` | 可添加的供应商预设清单（含已配置标记） |
 | `POST /provider/refresh` | 单卡刷新额度（实查并更新全局快照） |
 | `POST /provider/discover` | 草稿探测模型清单（「添加供应商 → 测试」）；按 dsh 版本试命名空间（0.1.x 的 `llm-pi-ai` / 0.2.x 的插件条目 id）并自愈 |
-| `POST /provider/mutate` | 写 provider 配置（`merge` / `unset` / `unsetFields`），宿主按 dsh 版本选写入口并自愈 |
+| `POST /provider/mutate` | 写 provider 配置（`merge` / `unset` / `unsetFields`），宿主按 dsh 版本选写入口并自愈。`merge` 是逐字段合并，**省略某个字段不等于删掉它**——要删得在 `unsets` 里列出来（OAuth 授权后清 `apiKeyEnv` 就走这条） |
 | `POST /provider/remove` | 删除供应商（清路由 + 清凭据） |
 | `POST /provider/test` | 用已存的 key 查一次某家的额度（只读，不动全局快照） |
 | `GET /provider/oauth/flows` | 列出 `ctx.authorization` 已注册的 flow（与 `/provider/presets` 的 `preset.oauth` 同源） |
