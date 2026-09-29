@@ -217,11 +217,15 @@ export interface AddProviderPanelProps {
   onAdded?: () => void
   /**
    * 这条路由在配置里钉着的地址（用户自己写的企业版端点之类），没钉返回 undefined。
-   *
-   * 二次添加（给已有路由补密钥）走的是整对象 `settings/mutate` set，表单里地址栏是空的，
-   * 不管一下就会把用户写的地址静默抹掉。
    */
   addressOf?: (routeId: string) => string | undefined
+  /**
+   * 这条路由是不是已经在配置里。
+   *
+   * 已存在时「添加」只能逐字段写：dsh-settings 的 `set` 是整对象覆盖，对已有 route 用它会把
+   * 用户手写的 `models` / `compat.thinkingFormat` / `retryPolicy` 一起抹掉（issue #1）。
+   */
+  existsOf?: (routeId: string) => boolean
 }
 
 /** 座位注册表：inject(name, factory) + register(描述符, 组件)。 */

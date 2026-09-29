@@ -123,8 +123,34 @@ export function routeProfileOf(
   return profile
 }
 
-/** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
-function piAiSourceLabel(source: unknown): string {
+/**
+ * 「添加供应商」要写的设置操作（纯函数，离线可测）。
+ *
+ * 为什么已存在的路由不能再用整对象 `set`：dsh-settings 的 `applyPathOp` 对 `set` 是
+ * `{...section, [head]: op.value}`——对一条已经在配置里的 route 点「确认添加」，会把它手写的
+ * `models`、`compat.thinkingFormat`、`retryPolicy`、`reasoningEfforts` 一起抹掉，只剩表单里的
+ * 那几个字段（issue #1 的「顺带一个提醒」）。所以：
+ *   - 路由不存在 → 一次 `set` 写整条（新建语义，本来就是这套字段）；
+ *   - 路由已存在 → 逐字段 `set`，只覆盖表单管的键，`models` 这些一个字不动。
+ * 表单没填的键不进 `profile`，因此不产生操作，原值保持。
+ *
+ * @param routeId - 表单里的路由 id。
+ * @param profile - 表单产出的字段（见 routeProfileOf）。
+ * @param exists - 这条路由当前是否已在配置里。
+ */
+export function addRouteOps(routeId: string, profile: AnyRecord, exists: boolean): AnyRecord[] {
+  var id = routeId.trim()
+  if (id === '') return []
+  if (exists !== true) return [{ op: 'set', path: ['providers', id], value: profile }]
+  var ops: AnyRecord[] = []
+  var keys = Object.keys(profile)
+  for (var i = 0; i < keys.length; i += 1) {
+    ops.push({ op: 'set', path: ['providers', id, keys[i]], value: profile[keys[i]] })
+  }
+  return ops
+}
+
+/** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */function piAiSourceLabel(source: unknown): string {
   if (source === 'dependency') return '兜底依赖'
   if (source === 'dsh') return 'dsh 自带'
   return '已下载'
@@ -561,9 +587,13 @@ function AddProviderPanel(props: AddProviderPanelProps) {
       profile.baseURL = existingAddress
     }
     var typedKey = form.key.trim()
+    var routeId = form.routeId.trim()
+    var exists = props.existsOf === undefined ? false : props.existsOf(routeId) === true
     apiCall('settings/mutate', {
       ns: 'llm-pi-ai',
-      ops: [{ op: 'set', path: ['providers', form.routeId.trim()], value: profile }],
+      // 已存在的路由逐字段写（见 addRouteOps）：整对象 set 会把它手写的 models / compat /
+      // retryPolicy 一起抹掉
+      ops: addRouteOps(routeId, profile, exists),
     })
       .then(function () {
         // 只有手填了密钥才写凭据：OAuth 登录已经把凭据提交到凭据记录里（key 是
@@ -2127,6 +2157,17 @@ export function ProviderSettingsSection() {
                 return addressFromCatalog(routeId, address) ? undefined : address
               }
               return undefined
+            },
+            // 这条 route 是不是已经在配置里：已存在时只逐字段写（保住手写的 models / compat /
+            // retryPolicy），不存在才整条新建
+            existsOf: function (routeId: string) {
+              for (var ei = 0; ei < accounts.length; ei += 1) {
+                if (accounts[ei].id === routeId) return true
+              }
+              for (var pi2 = 0; pi2 < presets.length; pi2 += 1) {
+                if (presets[pi2].id === routeId && presets[pi2].configured === true) return true
+              }
+              return false
             },
           }),
           cards,
