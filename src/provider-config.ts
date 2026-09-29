@@ -430,9 +430,12 @@ async function writeViaSettings(deps: ProviderConfigDeps, op: ProviderOp): Promi
     await settings.mutate(LEGACY_NS, op.fields.map((field) => ({ op: 'unset' as const, path: [...path, field] })))
     return
   }
-  const ops = Object.keys(op.value)
+  const ops: { op: 'set' | 'unset', path: string[], value?: unknown }[] = Object.keys(op.value)
     .filter((key) => op.value[key] !== undefined)
     .map((key) => ({ op: 'set' as const, path: [...path, key], value: op.value[key] }))
+  // 逐字段合并下「省略不等于删」，要删的字段得翻成 unset 一起发过去（OAuth 清 apiKeyEnv 走这条）。
+  // 漏掉它的话 0.2.x 正常、0.1.x 上那个 ref 还在，两条路的行为就不一致了。
+  for (const field of op.unsets ?? []) ops.push({ op: 'unset', path: [...path, field] })
   if (ops.length === 0) return
   await settings.mutate(LEGACY_NS, ops)
 }

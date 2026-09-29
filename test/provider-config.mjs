@@ -281,6 +281,25 @@ const write01 = await writeProviderRoutes({
 check('0.1.x：没有 configEditor 时走 settings.mutate', write01.via === 'settings-mutate')
 check('unsetFields 在老命名空间里逐字段 unset', onlySettings[0].ops[0].op === 'unset' && onlySettings[0].ops[0].path.join('.') === 'providers.kimi-coding.apiKeyEnv')
 
+// 0.1.x 那条路也要真删：merge + unsets 得翻成一条 unset 发过去，
+// 否则 0.2.x 正常、0.1.x 上 apiKeyEnv 还在，同一个界面动作在两代宿主上行为不一致
+const setOps = []
+await writeProviderRoutes({
+  settings: { mutate: async (ns, ops) => { setOps.push(...ops) } },
+  ownConfig: {},
+}, { op: 'merge', routeId: 'copilot', value: { api: 'openai-responses' }, unsets: ['apiKeyEnv'] }, {})
+check('0.1.x：merge 的 unsets 也翻成 unset 发过去',
+  setOps.some((item) => item.op === 'unset' && item.path.join('.') === 'providers.copilot.apiKeyEnv'))
+check('0.1.x：要写的字段照样 set', setOps.some((item) => item.op === 'set' && item.path.join('.') === 'providers.copilot.api'))
+// value 为空、只有 unsets 时：不能因为「没有 set 可发」就整条跳过
+const onlyUnset = []
+await writeProviderRoutes({
+  settings: { mutate: async (ns, ops) => { onlyUnset.push(...ops) } },
+  ownConfig: {},
+}, { op: 'merge', routeId: 'copilot', value: {}, unsets: ['apiKeyEnv'] }, {})
+check('0.1.x：只删不写时也发得出去',
+  onlyUnset.length === 1 && onlyUnset[0].op === 'unset' && onlyUnset[0].path.join('.') === 'providers.copilot.apiKeyEnv')
+
 // ---- 交给官方 bundle 的 config：两代读法都要认 ----
 const shimConfig = configWithProviders({ retryPolicy: { maxRetries: 1 } }, () => ({ a: { api: 'x' } }))
 check('0.1.x 读法（普通对象展开）能拿到路由', Object.keys(shimConfig.providers).join(',') === 'a')
