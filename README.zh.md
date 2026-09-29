@@ -71,9 +71,11 @@ dsh web                   # 插件树变了，必须重启
 | 能力 | 0.1.x（如 0.1.6-alpha.2） | 0.2.x（0.2.0-rc.2 起） |
 |---|---|---|
 | 配置存在哪 | `settings.yaml` 的 `llm-pi-ai` 段 | profile patch 里**本插件条目的 config**（settings 命名空间 = 已加载条目的 id） |
-| 读 | `settings.get/section('llm-pi-ai')` | 老段改从 loader 的 profile patch 行读；界面写的那份在条目 config 里 |
+| 读 | `settings.get/section('llm-pi-ai')` | 老段从 loader 的**条目列表**里 id 为 `llm-pi-ai` 那一行读（`options.config`；注意不是 include 条目自己的 `{path,patches}`）；界面写的那份在条目 config 里 |
 | 写 | `settings.mutate('llm-pi-ai', ops)` | `ctx.configEditor.edit(条目, change)`（写 profile patch 并让 Loader 重载） |
 | 官方 bundle 的 providers | 传入的 config **+ `settings.installSection` 叠上 `llm-pi-ai` 段** | **只认传入的 config**（`config.providers.get()`），不再读 `llm-pi-ai` 段 |
+
+**关闭（不是卸载）本插件时，官方那四条会自己恢复**：patch 里的 `disabled` 写成 `!!js` 表达式（「仅当本插件的条目在场且启用时才禁用官方行」），Loader 每次求值，所以插件开关一拨就跟着变，不会出现「插件关了、官方也被禁着、一个模型都没有」的死角；表达式异常时一律不禁用（宁可官方插件可用）。
 
 合并优先级（低 → 高）：**内置默认**（DeepSeek 那条，在 `src/provider-config.ts` 的 `BUILTIN_PROVIDERS`）→ **老 `llm-pi-ai` 段** → **本插件条目的 config**。后者一旦有内容就整体接管：界面写下去的是整份合并结果，所以老段里的路由会被一次性搬进条目，之后删改都生效，也不会被老段里的同名路由压住。
 

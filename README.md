@@ -74,9 +74,11 @@ One plugin serves both host generations, choosing its path from **runtime capabi
 | Capability | 0.1.x (e.g. 0.1.6-alpha.2) | 0.2.x (0.2.0-rc.2 onward) |
 |---|---|---|
 | Where configuration lives | the `llm-pi-ai` section of `settings.yaml` | the **plugin's own entry config** in the profile patch (a settings namespace is the id of a loaded entry) |
-| Read | `settings.get/section('llm-pi-ai')` | the legacy section is read from the loader's profile-patch row; UI writes live in the entry config |
+| Read | `settings.get/section('llm-pi-ai')` | the legacy section is read from the **loader entry list** (the row whose id is `llm-pi-ai`, via `options.config`; not the include entry's own `{path, patches}`); UI writes live in the entry config |
 | Write | `settings.mutate('llm-pi-ai', ops)` | `ctx.configEditor.edit(entry, change)` (writes the profile patch and lets Loader reload) |
 | Providers the official bundle sees | the config passed in **plus `settings.installSection` layering the `llm-pi-ai` section on top** | **only the config passed in** (`config.providers.get()`); it no longer reads the `llm-pi-ai` section |
+
+**Disabling the plugin (rather than uninstalling it) brings the four official entries back**: the `disabled` flags in the patch are `!!js` expressions ("disable the official row only while this plugin's entry is present and enabled"), evaluated by the Loader on every check, so flipping the plugin toggle propagates. There is no "plugin off, official disabled, no models at all" dead end; when the expression fails it never disables the official row (official plugins stay usable).
 
 Merge order (low → high): **built-in defaults** (the DeepSeek route, in `BUILTIN_PROVIDERS` in `src/provider-config.ts`) → **legacy `llm-pi-ai` section** → **this plugin's entry config**. Once the last one has content it takes over completely: the UI writes the whole merged set, so routes from the legacy section are migrated into the entry on the first write, after which edits and deletions work and no same-id route in the legacy section can shadow them.
 

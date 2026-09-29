@@ -41,23 +41,38 @@ const sectionView = readProviderConfig({
 })
 check('0.1.x：get 拿不到退回 section', sectionView.providers['moonshotai-cn'].apiKeyEnv === 'MOONSHOT')
 
-// 0.2.x 形状：settings 没有 get/section，老段留在 loader 的根 include 补丁行里
+// 0.2.x 形状：settings 没有 get/section，老段 = loader 条目列表里 id 为 llm-pi-ai 的那一行
+// （每行一个 Entry，`options.id` / `options.config`）。注意 include 条目自己的 config 是
+// `{path, patches}`，**不是**行列表——曾经照它读，结果永远读不到东西。
 const includeEntry = {
   id: 'include',
-  config: [
-    { id: 'ui-settings-general', config: { x: 1 } },
-    { id: LEGACY_NS, name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers: legacyProviders } },
-    { insert: [{ id: OWN_ENTRY_ID, name: '@dsh-one/dsh-llm-provider', config: {} }] },
-  ],
+  options: { id: 'include', name: '@deepseek-ai/cordis-plugin-include', config: { path: 'cordis.yml', patches: [] } },
+}
+const legacyRowEntry = {
+  id: LEGACY_NS,
+  options: { id: LEGACY_NS, name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers: legacyProviders } },
+}
+const ownRowEntry = {
+  id: OWN_ENTRY_ID,
+  options: { id: OWN_ENTRY_ID, name: '@dsh-one/dsh-llm-provider', config: {} },
 }
 const loaderOnly = readProviderConfig({
   settings: { mutate: async () => {} },
-  loader: { entries: () => [includeEntry] },
+  loader: { entries: () => [includeEntry, legacyRowEntry, ownRowEntry] },
 })
-check('0.2.x：老段从 include 补丁行里读出来', loaderOnly.mode === 'legacy' && loaderOnly.legacyCount === 2)
-check('0.2.x：嵌套 insert 里的行也能找到（找的是 id 不是层级）', (() => {
-  const nested = { id: 'include', config: [{ insert: [{ id: LEGACY_NS, config: { providers: { solo: {} } } }] }] }
-  return readProviderConfig({ loader: { entries: () => [nested] } }).providers.solo !== undefined
+check('0.2.x：老段从 loader 条目里的 llm-pi-ai 行读出来', loaderOnly.mode === 'legacy' && loaderOnly.legacyCount === 2)
+check('0.2.x：不会把 include 自己的 config（{path,patches}）当成行列表', loaderOnly.providers.path === undefined)
+check('0.2.x：行被 disable 也照样读（配置还在，只是没挂载）', (() => {
+  const disabledRow = { options: { id: LEGACY_NS, disabled: true, config: { providers: { solo: {} } } } }
+  return readProviderConfig({ loader: { entries: () => [disabledRow] } }).providers.solo !== undefined
+})())
+check('0.2.x：loader 没有这一行时算「读到了但没有」', (() => {
+  const view = readProviderConfig({ loader: { entries: () => [includeEntry, ownRowEntry] } })
+  return view.legacySource === 'loader' && view.legacyCount === 0 && view.legacyError === undefined
+})())
+check('0.2.x：entries() 返回 iterable 也认（不是数组）', (() => {
+  const iterable = { entries: () => new Set([legacyRowEntry]).values() }
+  return readProviderConfig({ loader: iterable }).legacyCount === 2
 })())
 
 // 自己条目 config 非空 → 整体接管（写下去的是整份，老段被搬过之后就它说话）
@@ -161,7 +176,7 @@ const configEditor = {
 const deps02 = {
   settings: { mutate: async () => { throw new Error('0.2.x 的 settings.mutate 应该没被用到') } },
   configEditor,
-  loader: { entries: () => [includeEntry] },
+  loader: { entries: () => [includeEntry, legacyRowEntry, ownRowEntry] },
   ownConfig: {},
 }
 const state = {}
