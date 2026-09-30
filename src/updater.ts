@@ -245,7 +245,13 @@ export async function checkAndUpdate(
     result.error = error instanceof Error ? error.message : String(error)
     log(`更新失败：${result.error}`)
   } finally {
-    writeState({ lastCheck: result.checkedAt })
+    // 磁盘不可写（EACCES/ENOSPC）时不能让状态文件把结果弄丢：writeState 是同步文件写，
+    // 抛出去会让 promise reject，把「本来要报的原因」变成未处理 rejection
+    try {
+      writeState({ lastCheck: result.checkedAt })
+    } catch (error) {
+      log(`更新状态文件没写进去（不影响本次结果）：${error instanceof Error ? error.message : String(error)}`)
+    }
   }
   return result
 }
@@ -526,4 +532,5 @@ export function startBackgroundCheck(logger: Logger | undefined, activeVersion: 
   const last = readString(readState()['lastCheck'])
   if (last !== undefined && Date.now() - Date.parse(last) < AUTO_CHECK_INTERVAL_MS) return
   void checkAndUpdate((line) => logger?.info?.(`[pi-ai updater] ${line}`), activeVersion)
+    .catch(() => undefined)
 }

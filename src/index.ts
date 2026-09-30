@@ -193,12 +193,20 @@ export function apply(ctx: PluginContext, config: unknown): void {
   function shimConfig(): AnyRecord {
     return configWithProviders(config, () => providerView().bridgeProviders)
   }
-  /** 把一份 bridge 模块挂成一个可销毁的子 fiber。 */
-  function mountBridgePlugin(plugin: BridgePluginModule): void {
-    const host = ctx as unknown as { plugin: (callback: (child: unknown) => void) => { dispose?: () => unknown } }
-    bridgeFiber = host.plugin((child) => {
+  /** 把一份 bridge 模块挂成一个可销毁的子 fiber；返回 thenable——**调用方必须 await**。
+   *
+   * cordis 两代（0.2.x 的 4.0.4 与 0.1.x 的 1.0.3）都把插件回调推迟到微任务里执行，回调抛的错
+   * 不进调用方的 try/catch，而是吞进 `fiber._error`，只有 await fiber 才 rethrow（独立复核用
+   * asar 里的 cordis 4.0.4 实测过）。所以只 try/catch 包不住 apply 期的错——「already declared /
+   * DUPLICATE_ADAPTER」这类碰撞会静默过去、状态页还误报可用。要拿到真正的失败就得 await。
+   */
+  function mountBridgePlugin(plugin: BridgePluginModule): Promise<unknown> {
+    const host = ctx as unknown as { plugin: (callback: (child: unknown) => void) => unknown }
+    const fiber = host.plugin((child) => {
       plugin.apply(child as unknown as typeof ctx, shimConfig())
     })
+    bridgeFiber = fiber as { dispose?: () => unknown }
+    return Promise.resolve(fiber as Promise<unknown>)
   }
   /** 日志本身抛错不该拖垮启动（Desktop 的 boot 会 fail-loud，未处理异常直接退进程）。 */
   const logSafely = (level: 'info' | 'warn' | 'error', message: string): void => {
@@ -220,9 +228,10 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // 注册，而 base 里的键在 mergeLayers 下一定活下来——放用户那批路由进去，用户在设置里删掉的
     // 路由就会被复活，所以 0.1.x 只交内置默认与条目 config；0.2.x 官方只读 .get()，必须交完整
     // 合并结果（写少了等于用户那批路由全丢）。见 bridgeProviders 的注释。
-    const mountBridge = (): void => {
+    const mountBridge = async (): Promise<void> => {
       try {
-        mountBridgePlugin(bridge.plugin)
+        // await 是必要的：只有它才能把 fiber 里吞掉的 apply 期错误 rethrow 出来
+        await mountBridgePlugin(bridge.plugin)
         bridgeMountError = undefined
         bridgeMounted = true
         logSafely('info', `llm bridge active on pi-ai ${bridge.piAiVersion}；胶水层 ${LEGACY_NS} bundle ${bridge.bundleVersion ?? '未知'}（来自 ${bridge.bundleTree}）；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
@@ -231,6 +240,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         // 官方行没关干净（见 official-rows.ts）、或上游改了什么，都会在这里抛。只降级：
         // 插件其余部分照常工作，原因由 /provider/status 报到界面上
         bridgeMountError = messageOf(error)
+        bridgeMounted = false
         logSafely('error', `llm bridge 挂载失败：${bridgeMountError}`)
       }
     }
@@ -241,7 +251,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // `LlmError: configurable provider "..." is already declared`，整个插件条目激活失败。
     const loader = service<LoaderService>('loader')
     const takeover = disableOfficialRows(loaderEntries(loader))
-    if (takeover.closed.length === 0) mountBridge()
+    if (takeover.closed.length === 0) void mountBridge()
     else {
       if (takeover.running.length > 0) {
         logSafely('warn', `官方行 ${takeover.running.join('、')} 还挂着（bundle patch 的守卫在首次挂载时看不到本插件的条目），先在本进程里关掉再挂桥接`)
@@ -311,7 +321,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     }
     bridgeFiber = undefined
     try {
-      mountBridgePlugin(next.plugin)
+      await mountBridgePlugin(next.plugin)
       liveBridge = next
       bridgeMountError = undefined
       bridgeMounted = true
@@ -321,7 +331,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       const message = messageOf(error)
       // 旧模块的 pi-ai 绑定还是旧那份（模块按 URL 缓存、绑定不变），挂回去就回滚了
       try {
-        mountBridgePlugin(previous)
+        await mountBridgePlugin(previous)
         bridgeMountError = undefined
         bridgeMounted = true
         logSafely('warn', `切换 pi-ai 失败，已回滚到原来的那份：${message}`)
@@ -795,8 +805,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
   /** 默认模型与当前目录对不上的警示（懒算一次，界面上「pi-ai 桥接」里要显示）。 */
   let defaultModelWarningText: string | undefined
   /** 30 秒内复用同一份详情，避免每次轮询都去问适配器。 */
-  function ensureModelDetails(): Promise<ModelDetail[]> {
-    if (modelDetailsCache !== undefined && Date.now() - modelDetailsCache.at <= 30_000) {
+  function ensureModelDetails(force = false): Promise<ModelDetail[]> {
+    if (!force && modelDetailsCache !== undefined && Date.now() - modelDetailsCache.at <= 30_000) {
       return Promise.resolve(modelDetailsCache.value)
     }
     modelDetailsPending ??= buildModelDetails()
@@ -862,7 +872,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
           && !String(req.url ?? '').includes('fresh=1')
         if (!cacheFresh) {
           // 同一个请求窗口里并发进来只跑一次（自报那段要 await 适配器）
-          void ensureModelDetails().then(
+          // fresh=1 时连内层 30 秒缓存也跳过：刚写完模型清单，徽章要立刻跟着变
+          void ensureModelDetails(String(req.url ?? '').includes('fresh=1')).then(
             (value) => { json(res, 200, { models: value, fetchedAt: new Date().toISOString() }) },
             () => { json(res, 200, { models: [], fetchedAt: new Date().toISOString() }) },
           )
