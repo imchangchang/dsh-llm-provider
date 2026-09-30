@@ -131,6 +131,8 @@ export interface ConfigEditorService {
 /** Loader 服务：0.2.x 上从根 include 条目读 profile patch 的原始行（老 `llm-pi-ai` 段在那）。 */
 export interface LoaderService {
   entries?: () => unknown[]
+  /** 等这棵树的挂载/注销任务落定（Loader 的 `await()`）。 */
+  await?: () => Promise<unknown>
 }
 
 export interface CredentialsService {

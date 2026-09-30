@@ -80,6 +80,8 @@ One plugin serves both host generations, choosing its path from **runtime capabi
 
 **Disabling the plugin (rather than uninstalling it) brings the four official entries back**: the `disabled` flags in the patch are `!!js` expressions ("disable the official row only while this plugin's entry is present and enabled"), evaluated by the Loader on every check, so flipping the plugin toggle propagates. There is no "plugin off, official disabled, no models at all" dead end; when the expression fails it never disables the official row (official plugins stay usable).
 
+**On the very first mount that expression cannot see this plugin's entry**: the Loader evaluates each row's `disabled` synchronously in list order, and our row is appended last by the bundle patch's `insert`. So on a cold start the guard answers "did not find myself" → the official rows mount anyway → mounting our bridge then hits "same provider declared twice" (`LlmError: configurable provider "..." is already declared`) and the whole plugin entry fails to activate (observed on Desktop 0.2.0-rc.2). This plugin therefore disables those four rows itself at startup (`src/official-rows.ts`, in-process only, nothing is written back) and mounts the bridge once they are disposed; after any reload the patch guard works normally. If the bridge still cannot be mounted, the plugin itself stays active and the reason shows up in the pi-ai bridge tab instead of the whole plugin going dark.
+
 The two host generations merge differently, because they differ in *which layer is writable*:
 
 - **0.1.x**: the legacy `llm-pi-ai` section is the writable user layer, and the official bundle reads `mergeLayers(composition base, user section)`. We follow the same rule: built-in defaults and the entry config form the base, the user section is layered on top, merged **field by field, recursively**. What the UI shows is therefore what actually takes effect, and a route the user deletes in the UI does not come back from the base. (That was a real trap: handing over the whole merged set as the base made `mergeLayers` keep every key in it forever — after unsetting `apiKeyEnv` the official adapter still threw `MISSING_CREDENTIAL`, and a deleted route reappeared on the next read.)
@@ -114,7 +116,7 @@ The test instance uses a separate profile, so instances can run side by side: `P
 node lib/adapters/run.js all            # run every quota adapter (keys from env or ~/.dsh/.credentials.yaml)
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # build + 14 offline tests; this is what finishing and merging run
+npm test                                # build + 15 offline tests; this is what finishing and merging run
 npm run typecheck                       # tsc --noEmit (npm test does not include it)
 ```
 
@@ -349,5 +351,5 @@ Boundaries:
 | `src/adapters/*.ts` | quota adapters (one file per provider, plus registry and CLI runner) |
 | `src/client/*.ts` | browser half: `index` (entry, slot registration) · `model-seat` · `settings` · `model-editor` (model list editor) · `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch layer: disable official entries, insert this plugin, declare the DeepSeek route |
-| `test/*.mjs` | 14 offline tests (no dsh, no services) |
+| `test/*.mjs` | 15 offline tests (no dsh, no services) |
 | `scripts/*.sh` | worktree workflow, test instance, dependency install |

@@ -77,6 +77,8 @@ dsh web                   # 插件树变了，必须重启
 
 **关闭（不是卸载）本插件时，官方那四条会自己恢复**：patch 里的 `disabled` 写成 `!!js` 表达式（「仅当本插件的条目在场且启用时才禁用官方行」），Loader 每次求值，所以插件开关一拨就跟着变，不会出现「插件关了、官方也被禁着、一个模型都没有」的死角；表达式异常时一律不禁用（宁可官方插件可用）。
 
+**首次挂载时那个表达式看不到本插件的条目**：Loader 按条目列表顺序同步求值每一行的 `disabled`，而本插件的行是 bundle patch 用 `insert` 追加的、排在最后。于是首启时守卫返回「没找到自己」→ 官方行照旧挂载 → 本插件挂桥接时撞「同一个 provider 注册两次」（`LlmError: configurable provider "..." is already declared`），整个插件条目激活失败（Desktop 0.2.0-rc.2 上实测过这个形态）。所以本插件启动时自己还会再关一次那四行（`src/official-rows.ts`，只在本进程里关、不写回任何文件），等它们注销完再挂桥接；重载之后 patch 的守卫就能正常生效。桥接万一还是挂不上，插件本身照常激活，原因显示在「pi-ai 桥接」标签页里，而不是整块失活。
+
 两代宿主的合并方式不一样，因为「哪一层能写」不一样：
 
 - **0.1.x**：老 `llm-pi-ai` 段就是可写的用户层，官方读的是 `mergeLayers(composition base, 用户段)`。我们也照这个语义算：内置默认与条目 config 当 base，用户段叠在上面，**逐字段递归合并**。于是界面显示的 provider 等于真正生效的那份；用户在界面上删掉的路由不会从 base 复活（这是踩过的坑：把整份合并结果当 base 交出去，`mergeLayers` 会让 base 里的键永远活下来，`unset apiKeyEnv` 之后官方适配器照旧抛 `MISSING_CREDENTIAL`，删掉整条路由刷新又回来）。
@@ -111,7 +113,7 @@ scripts/test-profile.sh stop   # 停掉
 node lib/adapters/run.js all            # 跑全部额度适配器（key 从环境变量或 ~/.dsh/.credentials.yaml 找）
 node lib/adapters/run.js kimi-coding --key sk-xx
 
-npm test                                # 构建 + 十四个离线测试；自测与合入跑的就是这条
+npm test                                # 构建 + 十五个离线测试；自测与合入跑的就是这条
 npm run typecheck                       # tsc --noEmit（npm test 不含它）
 ```
 
@@ -345,5 +347,5 @@ dsh 的 `dsh-authorization` seam 自己负责 prompt 协议、`AuthInteraction` 
 | `src/adapters/*.ts` | 额度适配器（一家一个文件 + 注册表 + CLI 跑测器） |
 | `src/client/*.ts` | 浏览器端：`index`（入口/座位注册）· `model-seat` · `settings` · `model-editor`（模型清单编辑器）· `command` · `data` · `format` · `styles` · `i18n` · `icons` · `diag` · `types` |
 | `cordis.patch.yml` | bundle patch 层：禁用官方条目、插入本插件、声明 DeepSeek 路由 |
-| `test/*.mjs` | 十四个离线测试（不进 dsh、不起服务） |
+| `test/*.mjs` | 十五个离线测试（不进 dsh、不起服务） |
 | `scripts/*.sh` | worktree 开发流程、测试实例、装依赖 |
