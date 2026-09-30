@@ -294,13 +294,23 @@ export function apply(ctx: PluginContext, config: unknown): void {
    */
   async function swapBridge(): Promise<{ ok: boolean, version?: string, error?: string }> {
     if (!bridge.ok) return { ok: false, error: '桥接当前不可用（插件启动时就没挂上）' }
-    const previous = bridge.plugin
+    // 回滚要挂回**当前正跑着的那份**（可能是之前切换过的），不是插件启动时那份
+    const previous = liveBridge?.plugin ?? bridge.plugin
     const next = await reloadBridge()
     if (!next.ok) return { ok: false, error: next.error }
+    const fiber = bridgeFiber
+    if (fiber !== undefined && typeof fiber.dispose === 'function') {
+      try {
+        await Promise.resolve(fiber.dispose())
+      } catch (error) {
+        // 卸不掉旧的就保持现状：它还挂着，去挂新的只会让注册撞双份。
+        bridgeFiber = fiber
+        logSafely('warn', `卸不掉旧桥接，保持现状：${messageOf(error)}`)
+        return { ok: false, error: `卸不掉旧的桥接挂载：${messageOf(error)}` }
+      }
+    }
+    bridgeFiber = undefined
     try {
-      const fiber = bridgeFiber
-      bridgeFiber = undefined
-      if (fiber !== undefined && typeof fiber.dispose === 'function') await Promise.resolve(fiber.dispose())
       mountBridgePlugin(next.plugin)
       liveBridge = next
       bridgeMountError = undefined
@@ -309,6 +319,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       return { ok: true, version: next.piAiVersion }
     } catch (error) {
       const message = messageOf(error)
+      // 旧模块的 pi-ai 绑定还是旧那份（模块按 URL 缓存、绑定不变），挂回去就回滚了
       try {
         mountBridgePlugin(previous)
         bridgeMountError = undefined
