@@ -30,6 +30,7 @@ import {
   type AuthorizationResponse,
   type AuthorizationService,
   type Logger,
+  type ExactRoute,
   type PluginContext,
   type ServerRequest,
   type ServerResponse,
@@ -605,10 +606,47 @@ export function registerOAuthRoutes(ctx: PluginContext, webServer: WebServerServ
   }, SWEEP_INTERVAL_MS)
   sweeper.unref?.()
 
-  webServer.register({ kind: 'exact', path: '/provider/oauth/flows', handler: listHandler(ctx) })
-  webServer.register({ kind: 'exact', path: '/provider/oauth/begin', handler: beginHandler(ctx) })
-  webServer.register({ kind: 'exact', path: '/provider/oauth/stream', handler: streamHandler(log) })
-  webServer.register({ kind: 'exact', path: '/provider/oauth/respond', handler: respondHandler() })
-  webServer.register({ kind: 'exact', path: '/provider/oauth/cancel', handler: cancelHandler(ctx) })
+  const disposers: (() => void)[] = []
+  const routes: ExactRoute[] = [
+    { kind: 'exact', path: '/provider/oauth/flows', handler: listHandler(ctx) },
+    { kind: 'exact', path: '/provider/oauth/begin', handler: beginHandler(ctx) },
+    { kind: 'exact', path: '/provider/oauth/stream', handler: streamHandler(log) },
+    { kind: 'exact', path: '/provider/oauth/respond', handler: respondHandler() },
+    { kind: 'exact', path: '/provider/oauth/cancel', handler: cancelHandler(ctx) },
+  ]
+  for (const route of routes) disposers.push(registerExactRoute(webServer, route))
+  // 路由与 sweep 定时器都交给 fiber：插件卸载/热重载时一并收掉。
+  //
+  // 这里曾经是直接 `webServer.register(...)`、disposer 丢掉、定时器也不清——后果是**插件一旦
+  // 热重载**（装新版本、开关插件、配置重载）旧实例的路由留在表里，新实例注册同名路由直接抛
+  // `webserver: duplicate exact route "/provider/oauth/flows"`，整个插件激活失败（alpha.8 在
+  // 桌面端实测）。index.ts 里那 12 条一直是 ctx.effect 包着的，只有这五条漏了。
+  ctx.effect(() => () => {
+    for (const dispose of disposers) dispose()
+    clearInterval(sweeper)
+  }, 'dsh-llm-provider: oauth 路由与 sweep')
   log?.info?.('oauth 路由已挂载（flows / begin / stream / respond / cancel）')
+}
+
+/**
+ * 注册一条 exact 路由，并处理「表里已经有同名路由」的情况。
+ *
+ * 正常路径下 `webServer.register()` 返回 disposer，挂到 effect 上就行（见调用方）。但**旧版本
+ * 留下的残留**没有 disposer 可摘（alpha.8 及更早那五条就是直接注册的），不处理的话用户升级到
+ * 这版仍然会因为一条残留路由而激活失败。所以这里撞上重复时，把表里那条删掉再注册一次——
+ * 这样不用为了清残留重启一次 dsh。删不掉（拿不到表）就原样抛出，交给调用方。
+ *
+ * @param webServer - 宿主 webserver 服务。
+ * @param route - 要注册的路由。
+ * @returns disposer；调用方负责在插件卸载时执行。
+ */
+function registerExactRoute(webServer: WebServerService, route: ExactRoute): () => void {
+  try {
+    return webServer.register(route)
+  } catch (error) {
+    const table = (webServer as unknown as { exact?: Map<string, ExactRoute> }).exact
+    if (table === undefined || !table.has(route.path)) throw error
+    table.delete(route.path)
+    return webServer.register(route)
+  }
 }

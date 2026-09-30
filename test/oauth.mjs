@@ -34,10 +34,18 @@ function checkTruthy(name, actual) {
 
 function makeWebServer() {
   const handlers = new Map()
+  const exact = new Map()
   return {
+    exact,
+    // 与宿主 dsh-host-webserver 同形：同名 exact 路由重复注册直接抛
     register(route) {
+      if (exact.has(route.path)) throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`)
+      exact.set(route.path, route)
       handlers.set(route.path, route.handler)
-      return () => handlers.delete(route.path)
+      return () => {
+        exact.delete(route.path)
+        handlers.delete(route.path)
+      }
     },
     handlers,
   }
@@ -53,13 +61,19 @@ function makeCtx(flows) {
     begin: undefined,  // 每个测试自己替换
     cancel: () => {},
   }
+  const effects = []
   const ctx = {
     get: (name) => (name === 'authorization' ? authorization : undefined),
     authorization: authorization,
     logger: () => ({ info() {}, warn() {}, error() {} }),
-    effect: (fn) => fn(),
+    // 宿主 cordis 的 effect：回调立刻执行、返回的 disposer 在 fiber 销毁时调用
+    effect: (fn) => {
+      const dispose = fn()
+      if (typeof dispose === 'function') effects.push(dispose)
+    },
+    effects,
   }
-  return { ctx, authorization }
+  return { ctx, authorization, effects }
 }
 
 /** IncomingMessage-like：handlers 用 `data`/`end` 阶段读 body。 */
@@ -619,6 +633,46 @@ await (async () => {
   check('T13.scope 改名也认（不写死 llm-pi-ai）',
     flowKeyForProvider(['dsh-llm-pi-ai/github-copilot'], 'github-copilot'), 'dsh-llm-pi-ai/github-copilot')
   check('T13.不误配同名前缀', flowKeyForProvider(['llm-pi-ai/github-copilot-enterprise'], 'github-copilot'), undefined)
+})()
+
+/* ----------------------------- 路由必须跟着 fiber 走 ----------------------------- */
+// alpha.8 在桌面端实测的故障：这五条路由原来是直接 webServer.register、没接 disposer，
+// 插件热重载（装新版本/开关插件）时旧实例的路由留在表里，新实例一注册就抛
+// `webserver: duplicate exact route "/provider/oauth/flows"`，整个插件激活失败。
+await (async () => {
+  const paths = ['/provider/oauth/begin', '/provider/oauth/cancel', '/provider/oauth/flows', '/provider/oauth/respond', '/provider/oauth/stream']
+  const first = makeWebServer()
+  const one = makeCtx(FLOW_LIST)
+  registerOAuthRoutes(one.ctx, first)
+  check('T14.挂载后五条路由都在', [...first.handlers.keys()].sort(), paths)
+
+  // 模拟 fiber 销毁：把这些 effect 的 disposer 执行掉
+  for (const dispose of one.effects) dispose()
+  check('T14.卸载后路由被摘干净（不再泄漏）', first.handlers.size, 0)
+
+  // 再挂一次（就是热重载那一步）：不该再撞重复
+  const two = makeCtx(FLOW_LIST)
+  let reloadThrew = null
+  try {
+    registerOAuthRoutes(two.ctx, first)
+  } catch (error) {
+    reloadThrew = error instanceof Error ? error.message : String(error)
+  }
+  check('T14.热重载重新挂载不撞重复路由', reloadThrew, null)
+  check('T14.重载后路由仍在', [...first.handlers.keys()].sort(), paths)
+
+  // 旧版本留下的残留（没有 disposer 可摘）：应当被清掉并换成我们的
+  const stale = makeWebServer()
+  stale.exact.set('/provider/oauth/flows', { kind: 'exact', path: '/provider/oauth/flows', handler: () => {} })
+  const three = makeCtx(FLOW_LIST)
+  let staleThrew = null
+  try {
+    registerOAuthRoutes(three.ctx, stale)
+  } catch (error) {
+    staleThrew = error instanceof Error ? error.message : String(error)
+  }
+  check('T14.旧版本残留会被清掉而不是让插件激活失败', staleThrew, null)
+  check('T14.残留位置换成了我们的 handler', typeof stale.handlers.get('/provider/oauth/flows'), 'function')
 })()
 
 console.log(failed ? '\n有失败用例' : '\nOAuth 测试全部通过')
