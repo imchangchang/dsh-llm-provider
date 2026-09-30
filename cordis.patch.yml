@@ -11,6 +11,13 @@
 # 任何异常一律返回 false（不禁用官方行）——失败时宁可让官方插件可用，
 # 也不要出现「插件关了、官方也被禁着、一个模型都没有」这种死角。
 #
+# 注意：**首次挂载**时这个守卫看不到本插件的条目——Loader 的 EntryGroup.update 按列表顺序
+# 同步求值每一行的 disabled，而本插件的行是本文件用 insert 追加的、排在最后，所以守卫会返回
+# false（「没找到自己」），官方行这时照旧挂载。若本插件不管，随后挂桥接就会撞
+# `LlmError: configurable provider "..." is already declared`，整个插件条目激活失败
+# （Desktop 0.2.0-rc.2 实测过）。所以本插件启动时自己还会再关一次（见 src/official-rows.ts，
+# 只在进程里关、不写回文件），重载之后这里就正常生效了。
+#
 # 本插件要接管的官方行有：
 #
 # 1) llm-pi-ai：ctx.llm.registerAdapter 对同名路由直接抛 DUPLICATE_ADAPTER，没有遮蔽机制，
