@@ -20,6 +20,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve, sep } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 import { resolveDshHome } from './dsh-home.js'
 import { asRecord, readString, type AnyRecord } from './types.js'
@@ -677,91 +678,135 @@ export function updateStatus(patch: AnyRecord): void {
 /**
  * 确保桥接目录就位（同步、幂等），返回加载好的 bridge 插件模块。
  */
+/** 准备好桥接目录与选中的 pi-ai（同步部分：require 与 import 两条路共用）。 */
+type PreparedBridge =
+  | { ok: true, srcBundle: SourceBundle, chosen: PiAiCandidate, probeUnverified: boolean, rejected: RejectedCandidate[] }
+  | { ok: false, error: string }
+
+function prepareBridge(): PreparedBridge {
+  const srcBundle = resolveSourceBundle()
+  if (srcBundle === undefined) {
+    return { ok: false, error: '找不到官方 llm-pi-ai bundle：app.asar、profile 的 node_modules 与 dsh 安装目录里都没有 @deepseek-ai/dsh-llm-pi-ai' }
+  }
+
+  // 1. 桥接目录：bundle 副本（源更新过就重拷）+ 固定 package.json
+  mkdirSync(join(bridgeDir, 'lib'), { recursive: true })
+  // 换了一份源（比如从 CLI 安装树换到 app.asar 里那份）就必须重拷：asar 里的文件 mtime
+  // 可能读成 0，光比时间戳会留下旧副本，那正是「胶水层与宿主对不上」的老毛病。
+  const previousBundle = readStatus()['bundlePath']
+  const needsCopy = !existsSync(bridgeLib)
+    || previousBundle !== srcBundle.path
+    || statSync(srcBundle.path).mtimeMs > statSync(bridgeLib).mtimeMs
+  if (needsCopy) copyFileSync(srcBundle.path, bridgeLib)
+  writeFileSync(join(bridgeDir, 'package.json'), BRIDGE_PACKAGE_JSON)
+
+  // 2. 挑一份能用的 pi-ai：候选按优先级排（热更新的新→旧 → 插件自带依赖 → dsh 自带），
+  //    逐个体检，第一个通过的就是这次用的。**体检必须在加载之前**——ESM 加载失败后
+  //    同一个文件没法重试，所以不能"先试再退"。
+  //
+  //    目录不存在的档直接跳过，不算"体检没通过"：那是这一档没安装（可选档），不是兼容性
+  //    问题。写进 rejected 的话，界面上会出现「跳过 兜底依赖：兼容性检查没通过」这种
+  //    看着像故障、其实一切正常的行。
+  const requirements = piAiRequirements(readFileSync(bridgeLib, 'utf8'))
+  const rejected: RejectedCandidate[] = []
+  let chosen: PiAiCandidate | undefined
+  let probeUnverified = false
+  for (const candidate of piAiCandidates()) {
+    if (!existsSync(candidate.root)) continue
+    const probe = probePiAi(requirements, candidate.root, candidate.key)
+    if (probe.ok) {
+      chosen = candidate
+      probeUnverified = probe.unverified === true
+      break
+    }
+    rejected.push({ version: candidate.version, error: probe.error })
+  }
+  if (chosen === undefined) {
+    return {
+      ok: false,
+      error: `没有能用的 pi-ai：${rejected.map((entry) => `${entry.version}（${String(entry.error)}）`).join('；')}`,
+    }
+  }
+
+  // 3. 生效：热更新档挂软链指过去；兜底档（插件自己的依赖）不挂，让 Node 自然往上找到它
+  if (chosen.link) setPiAiLink(chosen.root)
+  else clearPiAiLink()
+
+  return { ok: true, srcBundle, chosen, probeUnverified, rejected }
+}
+
+/** 记下这次桥接的结论（状态文件 + 返回值）。require 与 import 两条路共用。 */
+function finishBridge(
+  prepared: Extract<PreparedBridge, { ok: true }>,
+  plugin: BridgePluginModule,
+): BridgeLoadResult {
+  const { srcBundle, chosen, probeUnverified, rejected } = prepared
+  activeRoot = chosen.root
+  const bundleTree = treeLabel(srcBundle.tree)
+  const piAiPath = chosen.root
+  const piAiOrigin = piAiOriginLabel(chosen.root, chosen.key)
+  writeStatus({
+    piAiVersion: chosen.version,
+    needsRestart: false,
+    piAiSource: chosen.key,
+    bundleVersion: srcBundle.version,
+    bundlePath: srcBundle.path,
+    bundleTree,
+    piAiPath,
+    piAiOrigin,
+    probeUnverified: probeUnverified || undefined,
+    ...(rejected.length === 0 ? { rejected: undefined } : { rejected }),
+  })
+  return {
+    ok: true,
+    plugin,
+    piAiVersion: chosen.version,
+    piAiSource: chosen.key,
+    bundleVersion: srcBundle.version,
+    bundleTree,
+    piAiPath,
+    piAiOrigin,
+    probeUnverified,
+    rejected,
+  }
+}
+
+/**
+ * 确保桥接目录就位（同步、幂等），返回加载好的 bridge 插件模块。启动时用这条。
+ */
 export function loadBridge(): BridgeLoadResult {
   try {
-    const srcBundle = resolveSourceBundle()
-    if (srcBundle === undefined) {
-      return { ok: false, error: '找不到官方 llm-pi-ai bundle：app.asar、profile 的 node_modules 与 dsh 安装目录里都没有 @deepseek-ai/dsh-llm-pi-ai' }
-    }
-
-    // 1. 桥接目录：bundle 副本（源更新过就重拷）+ 固定 package.json
-    mkdirSync(join(bridgeDir, 'lib'), { recursive: true })
-    // 换了一份源（比如从 CLI 安装树换到 app.asar 里那份）就必须重拷：asar 里的文件 mtime
-    // 可能读成 0，光比时间戳会留下旧副本，那正是「胶水层与宿主对不上」的老毛病。
-    const previousBundle = readStatus()['bundlePath']
-    const needsCopy = !existsSync(bridgeLib)
-      || previousBundle !== srcBundle.path
-      || statSync(srcBundle.path).mtimeMs > statSync(bridgeLib).mtimeMs
-    if (needsCopy) copyFileSync(srcBundle.path, bridgeLib)
-    writeFileSync(join(bridgeDir, 'package.json'), BRIDGE_PACKAGE_JSON)
-
-    // 2. 挑一份能用的 pi-ai：候选按优先级排（热更新的新→旧 → 插件自带依赖 → dsh 自带），
-    //    逐个体检，第一个通过的就是这次用的。**体检必须在加载之前**——ESM 加载失败后
-    //    同一个文件没法重试，所以不能"先试再退"。
-    //
-    //    目录不存在的档直接跳过，不算"体检没通过"：那是这一档没安装（可选档），不是兼容性
-    //    问题。写进 rejected 的话，界面上会出现「跳过 兜底依赖：兼容性检查没通过」这种
-    //    看着像故障、其实一切正常的行。
-    const requirements = piAiRequirements(readFileSync(bridgeLib, 'utf8'))
-    const rejected: RejectedCandidate[] = []
-    let chosen: PiAiCandidate | undefined
-    let probeUnverified = false
-    for (const candidate of piAiCandidates()) {
-      if (!existsSync(candidate.root)) continue
-      const probe = probePiAi(requirements, candidate.root, candidate.key)
-      if (probe.ok) {
-        chosen = candidate
-        probeUnverified = probe.unverified === true
-        break
-      }
-      rejected.push({ version: candidate.version, error: probe.error })
-    }
-    if (chosen === undefined) {
-      return {
-        ok: false,
-        error: `没有能用的 pi-ai：${rejected.map((entry) => `${entry.version}（${String(entry.error)}）`).join('；')}`,
-      }
-    }
-
-    // 3. 生效：热更新档挂软链指过去；兜底档（插件自己的依赖）不挂，让 Node 自然往上找到它
-    if (chosen.link) setPiAiLink(chosen.root)
-    else clearPiAiLink()
-
-    // 4. 同步 require 加载（Node 22.12+/24 支持 require ESM；bundle 无 TLA）
+    const prepared = prepareBridge()
+    if (!prepared.ok) return prepared
+    // 同步 require 加载（Node 22.12+/24 支持 require ESM；bundle 无 TLA）
     const require = createRequire(import.meta.url)
     delete require.cache?.[bridgeLib]
     const plugin = require(bridgeLib) as BridgePluginModule
+    return finishBridge(prepared, plugin)
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
 
-    activeRoot = chosen.root
-    const bundleTree = treeLabel(srcBundle.tree)
-    const piAiPath = chosen.root
-    const piAiOrigin = piAiOriginLabel(chosen.root, chosen.key)
-    writeStatus({
-      piAiVersion: chosen.version,
-      needsRestart: false,
-      piAiSource: chosen.key,
-      bundleVersion: srcBundle.version,
-      bundlePath: srcBundle.path,
-      bundleTree,
-      piAiPath,
-      piAiOrigin,
-      bundleGeneration: srcBundle.generation,
-      bundleReason: srcBundle.reason,
-      probeUnverified: probeUnverified || undefined,
-      ...(rejected.length === 0 ? { rejected: undefined } : { rejected }),
-    })
-    return {
-      ok: true,
-      plugin,
-      piAiVersion: chosen.version,
-      piAiSource: chosen.key,
-      bundleVersion: srcBundle.version,
-      bundleTree,
-      piAiPath,
-      piAiOrigin,
-      probeUnverified,
-      rejected,
-    }
+/**
+ * 重新加载一份桥接（**热切换用**：下好新版 pi-ai 之后不用重启 dsh）。
+ *
+ * 与 {@link loadBridge} 的两点不同：
+ *   1. 走 `import()` 并带一个变化的 query——ESM 按 URL 缓存，路径不变的话拿到的还是旧模块，
+ *      那样新 pi-ai 永远不会生效；
+ *   2. query 一变，bundle 里那句 `import '@earendil-works/pi-ai/…'` 会沿软链重新解析，
+ *      软链已经指向新版本，于是这次拿到的是新 pi-ai。
+ *
+ * 调用方负责先把旧的桥接挂载卸掉（`fiber.dispose()`），失败时再把旧模块挂回去——旧模块
+ * 的 pi-ai 绑定还是旧的，回滚是安全的。
+ */
+export async function reloadBridge(): Promise<BridgeLoadResult> {
+  try {
+    const prepared = prepareBridge()
+    if (!prepared.ok) return prepared
+    const url = `${pathToFileURL(bridgeLib).href}?swap=${String(Date.now())}`
+    const plugin = (await import(url)) as BridgePluginModule
+    return finishBridge(prepared, plugin)
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }

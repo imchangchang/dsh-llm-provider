@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { activePiAiRoot, activePiAiVersion, loadBridge, vendorDir } from './bridge.js'
+import { activePiAiRoot, activePiAiVersion, loadBridge, reloadBridge, vendorDir, type BridgePluginModule } from './bridge.js'
 import {
   applyAdapterCapabilities,
   applyDeclaredCapabilities,
@@ -179,6 +179,27 @@ export function apply(ctx: PluginContext, config: unknown): void {
   let bridgeMountError: string | undefined
   /** 桥接是否已经挂上：挂载要等官方行注销，这期间 /provider/status 不能报「可用」。 */
   let bridgeMounted = false
+  /**
+   * 当前挂着的桥接 fiber。挂载走**包装函数**而不是 `ctx.plugin(module, shim)`：
+   * `ctx.plugin` 会拿 bundle 的 Config 去 schemastery 校验传进去的 config，那会把 shim 上
+   * 不可枚举的 `get` 访问器剔掉——0.2.x 的 glue 正靠它读活值（模拟环境里实测过）。包装函数
+   * 没有 Config，config 原样传下去；loader 也照样把本插件的 entry 传给这个子 fiber，
+   * 所以 glue 的 `settingsNs` 语义不变。
+   */
+  let bridgeFiber: { dispose?: () => unknown } | undefined
+  /** 当前生效的桥接信息（热切换后会更新，/provider/status 要报最新的那份）。 */
+  let liveBridge: Extract<typeof bridge, { ok: true }> | undefined = bridge.ok ? bridge : undefined
+  /** 交给 bundle 的 config：providers 是活值访问器（每次读都重新合并）。 */
+  function shimConfig(): AnyRecord {
+    return configWithProviders(config, () => providerView().bridgeProviders)
+  }
+  /** 把一份 bridge 模块挂成一个可销毁的子 fiber。 */
+  function mountBridgePlugin(plugin: BridgePluginModule): void {
+    const host = ctx as unknown as { plugin: (callback: (child: unknown) => void) => { dispose?: () => unknown } }
+    bridgeFiber = host.plugin((child) => {
+      plugin.apply(child as unknown as typeof ctx, shimConfig())
+    })
+  }
   /** 日志本身抛错不该拖垮启动（Desktop 的 boot 会 fail-loud，未处理异常直接退进程）。 */
   const logSafely = (level: 'info' | 'warn' | 'error', message: string): void => {
     try {
@@ -201,7 +222,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // 合并结果（写少了等于用户那批路由全丢）。见 bridgeProviders 的注释。
     const mountBridge = (): void => {
       try {
-        bridge.plugin.apply(ctx, configWithProviders(config, () => providerView().bridgeProviders))
+        mountBridgePlugin(bridge.plugin)
         bridgeMountError = undefined
         bridgeMounted = true
         logSafely('info', `llm bridge active on pi-ai ${bridge.piAiVersion}；胶水层 ${LEGACY_NS} bundle ${bridge.bundleVersion ?? '未知'}（来自 ${bridge.bundleTree}）；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
@@ -262,6 +283,44 @@ export function apply(ctx: PluginContext, config: unknown): void {
       if (timer !== undefined) clearTimeout(timer)
     }
     logSafely('info', `已关掉官方行 ${takeover.closed.join('、')}，继续挂桥接`)
+  }
+
+  /**
+   * 就地切到刚下好的 pi-ai（不用重启 dsh）。
+   *
+   * 顺序是「先加载新的、再卸旧的」：新模块加载失败就直接放弃，旧桥接一动不动（连空窗都没有）。
+   * 卸掉旧的之后如果挂新的失败，就把**旧模块**挂回去——它的 pi-ai 绑定还是旧那份，回滚是安全的；
+   * 回滚也失败时只把原因记进 bridgeMountError，界面上照实说（此时确实没有桥接）。
+   */
+  async function swapBridge(): Promise<{ ok: boolean, version?: string, error?: string }> {
+    if (!bridge.ok) return { ok: false, error: '桥接当前不可用（插件启动时就没挂上）' }
+    const previous = bridge.plugin
+    const next = await reloadBridge()
+    if (!next.ok) return { ok: false, error: next.error }
+    try {
+      const fiber = bridgeFiber
+      bridgeFiber = undefined
+      if (fiber !== undefined && typeof fiber.dispose === 'function') await Promise.resolve(fiber.dispose())
+      mountBridgePlugin(next.plugin)
+      liveBridge = next
+      bridgeMountError = undefined
+      bridgeMounted = true
+      logSafely('info', `llm bridge 已就地切到 pi-ai ${next.piAiVersion}（${next.piAiSource}），无需重启`)
+      return { ok: true, version: next.piAiVersion }
+    } catch (error) {
+      const message = messageOf(error)
+      try {
+        mountBridgePlugin(previous)
+        bridgeMountError = undefined
+        bridgeMounted = true
+        logSafely('warn', `切换 pi-ai 失败，已回滚到原来的那份：${message}`)
+      } catch (rollbackError) {
+        bridgeMounted = false
+        bridgeMountError = messageOf(rollbackError)
+        logSafely('error', `切换 pi-ai 失败且回滚失败：${bridgeMountError}`)
+      }
+      return { ok: false, error: message }
+    }
   }
 
   interface ResolveKeyResult {
@@ -594,24 +653,25 @@ export function apply(ctx: PluginContext, config: unknown): void {
                 ...(bridgeMountError !== undefined
                   ? { error: bridgeMountError }
                   : (bridgeMounted ? {} : { error: 'llm 桥接正在挂载（先关掉官方那几行，等它们注销）' })),
-                piAiVersion: bridge.piAiVersion,
+                // 都读「当前生效」的那份（热切换之后要跟着变，不能报插件启动时那份）
+                piAiVersion: (liveBridge ?? bridge).piAiVersion,
                 // 用的是哪一档：热更新下来的版本号 / 'dependency'（内置依赖）/ 'dsh'（dsh 自带）
-                source: bridge.piAiSource,
+                source: (liveBridge ?? bridge).piAiSource,
                 // 生效那份 pi-ai 的包目录与来源（desktop=app.asar / dsh-install / profile / vendor）：
                 // 「dsh 自带」也要分 Desktop 与 CLI，它们是不同副本、版本与模型 id 都可能不同
-                piAiPath: bridge.piAiPath,
-                piAiOrigin: bridge.piAiOrigin,
+                piAiPath: (liveBridge ?? bridge).piAiPath,
+                piAiOrigin: (liveBridge ?? bridge).piAiOrigin,
                 // 拷来挂的那份官方 bundle（胶水层）：版本 + 来自哪棵树（app.asar / profile / dsh-install）。
                 // 桌面端与 CLI 安装树里的这份**不是同一版**，pi-ai 也跟着不同，出问题时先看这两个值。
-                bundleVersion: bridge.bundleVersion,
-                bundleTree: bridge.bundleTree,
+                bundleVersion: (liveBridge ?? bridge).bundleVersion,
+                bundleTree: (liveBridge ?? bridge).bundleTree,
                 // 默认模型不在当前 pi-ai 目录里时的警示（新会话一开口就会 UNKNOWN_MODEL）：
                 // 界面上要能提前看见，而不是等发送失败
                 modelWarnings: defaultModelWarningText === undefined ? [] : [defaultModelWarningText],
                 // 体检没过、被跳过的候选——有回退就列在这里
-                rejected: bridge.rejected,
+                rejected: (liveBridge ?? bridge).rejected,
                 // 需求没解析出来、体检没跑：选中项没被验证过，界面上要标出来
-                probeUnverified: bridge.probeUnverified,
+                probeUnverified: (liveBridge ?? bridge).probeUnverified,
               }
             : { active: false, error: bridge.error },
           llmDirectorySize: declaredCount,
@@ -960,6 +1020,23 @@ export function apply(ctx: PluginContext, config: unknown): void {
       },
     }),
     'dsh-llm-provider: /provider/mutate route',
+  )
+
+  // 就地切换 pi-ai：把已下好、验证通过的那份换上，不用重启 dsh
+  ctx.effect(
+    () => webServer.register({
+      kind: 'exact',
+      path: '/provider/swap',
+      handler: (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(405, { allow: 'POST' })
+          res.end()
+          return
+        }
+        void swapBridge().then((result) => { json(res, 200, result) })
+      },
+    }),
+    'dsh-llm-provider: /provider/swap route',
   )
 
   // 删除 provider：从配置里摘掉这条路由 + 清掉对应凭据；内置原生路由拒绝

@@ -319,7 +319,14 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
   if (update !== undefined && update !== null) {
     var updateRecord = update as AnyRecord
     if (updateRecord.pending !== undefined) {
-      rows.push({ key: 'pending', text: '已下载 ' + String(updateRecord.pending) + '，验证通过（完整性 + 兼容性），重启 dsh 后生效', warn: true })
+      rows.push({
+        key: 'pending',
+        text: '已下载 ' + String(updateRecord.pending) + '，验证通过（完整性 + 兼容性）',
+        value: '可以立即切换',
+        title: '点下面的「立即切换」就地换上（不用重启）：会先加载新版本，成功后再卸掉旧的，失败自动回滚。'
+          + '不想现在切也行，重启 dsh 后生效。',
+        warn: true,
+      })
     }
     if (updateRecord.rejected !== undefined && updateRecord.rejected !== null) {
       var rejectedLatest = updateRecord.rejected as AnyRecord
@@ -1659,6 +1666,28 @@ export function ProviderSettingsSection() {
   }
 
   /** 清理旧 pi-ai 副本与 npm 缓存（宿主侧按保留规则判断，正在用的那份不动）。 */
+  /**
+   * 就地切到已下好的新版 pi-ai（不用重启）。宿主侧的顺序：先加载新的 → 成功才卸旧的 →
+   * 挂新的；任何一步失败都会把旧的那份挂回去，所以这里失败也只会拿到错误文案。
+   */
+  function swapPiAi() {
+    setBusy(true)
+    setNote('正在切换 pi-ai ...')
+    postJson('/provider/swap')
+      .then(function (result: AnyRecord) {
+        if (result !== null && result !== undefined && result.ok === true) {
+          setNote('已就地切到 pi-ai ' + String(result.version || '') + '（不用重启）')
+        } else {
+          setNote('切换失败：' + String((result && result.error) || '未知错误') + '（仍用原来那份，可重启 dsh 生效）')
+        }
+        refresh(true)
+      })
+      .catch(function (cause) {
+        setNote('切换失败：' + String(cause && cause.message ? cause.message : cause))
+      })
+      .then(function () { setBusy(false) })
+  }
+
   function prune() {
     setBusy(true)
     setNote('正在清理 ...')
@@ -1742,12 +1771,21 @@ export function ProviderSettingsSection() {
       ),
     ))
   }
-  // 上游那一行右侧跟按钮：检查更新（宿主先校验下载内容、再做兼容性体检，都过了才等重启生效）
+  // 上游那一行右侧跟按钮：检查更新（宿主先校验下载内容、再做兼容性体检，都过了才等重启生效）；
+  // 已经有下好待生效的版本时，再给一个「立即切换」（不用重启）
+  var hasPending = update !== undefined && update !== null && (update as AnyRecord)['pending'] !== undefined
   bridgeLines.push(
     react.createElement(
       'div',
       { className: 'pv_line', key: 'action' },
       piAiUpstreamText(update),
+      hasPending
+        ? react.createElement(
+          'button',
+          { type: 'button', className: 'pv_action pv_push', disabled: busy, onClick: swapPiAi },
+          busy ? '切换中 ...' : '立即切换',
+        )
+        : null,
       react.createElement(
         'button',
         { type: 'button', className: 'pv_action pv_push', disabled: busy, onClick: checkUpdate },

@@ -199,7 +199,8 @@ const pending = piAiBridgeRows(
   { active: true, piAiVersion: '0.85.1', source: '0.85.1' },
   { latest: '0.86.0', pending: '0.86.0' },
 )
-rowsCheck('待生效版本提示重启', pending.some((r) => r.key === 'pending' && r.text.indexOf('重启 dsh') !== -1))
+// 文案改过：正文说「已下载 + 验证通过 + 可以立即切换」，重启这条路留在 tooltip 里
+rowsCheck('待生效那行仍提重启这条路', pending.some((r) => r.key === 'pending' && String(r.title).indexOf('重启 dsh 后生效') !== -1))
 rowsCheck('已下载档标成「已下载」', pending[0].value === '0.85.1（已下载）')
 
 const rejectedByUpdater = piAiBridgeRows(
@@ -600,6 +601,12 @@ rowsCheck('悬浮提示里点明 Desktop 与命令行不是同一版', String(de
 const cliPi = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh', piAiOrigin: 'dsh-install', piAiPath: '/Users/x/.dsh/node-macos-arm64/lib/node_modules/@earendil-works/pi-ai' }, undefined).find((r) => r.key === 'pi')
 rowsCheck('命令行那份标出 dsh-install', cliPi.value.indexOf('dsh 自带（dsh-install）') !== -1)
 rowsCheck('已下载那份照旧是「已下载」', piAiBridgeRows({ active: true, piAiVersion: '0.99.1', source: '0.99.1', piAiOrigin: 'vendor' }, undefined).find((r) => r.key === 'pi').value.indexOf('已下载') !== -1)
+
+// 已下好待生效：提示里要说明「可以立即切换」，别只写重启
+const pendingRow = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, { pending: '0.99.1' }).find((r) => r.key === 'pending')
+rowsCheck('待生效那行说明可以立即切换', pendingRow !== undefined && String(pendingRow.value).indexOf('立即切换') !== -1)
+rowsCheck('待生效那行的 tooltip 讲清会先加载再卸载、失败回滚',
+  pendingRow !== undefined && String(pendingRow.title).indexOf('回滚') !== -1)
 
 // 默认模型与目录对不上：界面上提前报警（不然要等新会话发送失败）
 const warnRows = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh', modelWarnings: ['默认模型 deepseek/deepseek-flash 不在当前 pi-ai 目录里（这个 provider 下可用：deepseek-v4-flash）'] }, undefined)
