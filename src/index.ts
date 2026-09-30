@@ -203,13 +203,15 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // （Loader 按列表顺序同步求值，而本插件的行是 insert 追加的、排在最后），官方行这时还开着。
     // 这里补一刀：在本进程里把它们关掉（不写回文件），等注销落定再挂桥接，否则会撞
     // `LlmError: configurable provider "..." is already declared`，整个插件条目激活失败。
-    const closed = disableOfficialRows(loaderEntries(service<LoaderService>('loader')))
-    if (closed.length === 0) mountBridge()
+    const loader = service<LoaderService>('loader')
+    const takeover = disableOfficialRows(loaderEntries(loader))
+    if (takeover.closed.length === 0) mountBridge()
     else {
-      logger?.warn?.(`官方行 ${closed.join('、')} 还开着（bundle patch 的守卫在首次挂载时看不到本插件的条目），先在本进程里关掉再挂桥接`)
+      if (takeover.running.length > 0) {
+        logger?.warn?.(`官方行 ${takeover.running.join('、')} 还挂着（bundle patch 的守卫在首次挂载时看不到本插件的条目），先在本进程里关掉再挂桥接`)
+      }
       // 关掉是同步开始的，但 fiber 注销在后续任务里完成：等 loader 的任务排空（最多 3 秒）再挂
-      const loader = service<LoaderService>('loader')
-      void waitForDrain(loader, closed).then(mountBridge)
+      void waitForDrain(loader, takeover.closed).then(mountBridge)
     }
   } else {
     logger?.warn?.(`llm bridge 不可用，退化为纯计费模式：${bridge.error}`)
