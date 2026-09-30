@@ -183,7 +183,7 @@ export function apply(ctx: ClientContext) {
 // 纯函数，离线测试直接调；组件里用的是同一份实现
 
 export { normalizeSelection, onPlanChange, mergePlanAccount, dropPlanAccount, parseOauthFrame, isSafeBlankPrompt, buildDetailMap, detailOf, detailKeyOf } from './data.js'
-export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort, effortRowDisabled } from './model-seat.js'
+export { aliasSelection, LEGACY_PROVIDER_ALIASES, intervalCenterMap, resolveInheritedEffort, effortRowDisabled, missingModelNotice } from './model-seat.js'
 export { piAiBridgeRows, piAiUpstreamText, piAiStorageRows, formatBytes, deleteConfirmText, detailSourceLabel, presetPickState, refreshFailure, routeProfileOf, routeRepairOf, routeClearedFields, mergeRequestOf, authEntryOf } from './settings.js'
 export { reasoningTextOf, defaultEffortOf, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible, shortWindowLabel, windowTier, quotaTipOf } from './format.js'
 export { editorRowsOf, editorToModels, parseReasoningEfforts, formatReasoningEfforts, ModelListEditor } from './model-editor.js'

@@ -77,7 +77,9 @@ dsh web                   # 插件树变了，必须重启
 | 写 | `settings.mutate('llm-pi-ai', ops)` | `ctx.configEditor.edit(条目, change)`（写 profile patch 并让 Loader 重载） |
 | 官方 bundle 的 providers | 传入的 config 被 `settings.installSection` 当 **composition base**，解析结果是 `mergeLayers(base, 用户段)`；所以传给它的只有内置默认与条目 config，用户那批路由由 settings 用户层叠上来 | **只认传入的 config**（`config.providers.get()`），不再读 `llm-pi-ai` 段；所以交给它的是**完整合并结果** |
 
-**关闭（不是卸载）本插件时，官方那四条会自己恢复**：patch 里的 `disabled` 写成 `!!js` 表达式（「仅当本插件的条目在场且启用时才禁用官方行」），Loader 每次求值，所以插件开关一拨就跟着变，不会出现「插件关了、官方也被禁着、一个模型都没有」的死角；表达式异常时一律不禁用（宁可官方插件可用）。
+我们的桥接副本（胶水层）**取宿主自己那棵树里的那份**：桌面端是 `app.asar` 里那份，命令行走安装树里那份——两处的 `dsh-llm-pi-ai` 与它旁边的 pi-ai 都可能不是同一版（实测 Desktop 是 0.2.0-rc.2 + pi-ai 0.87.1，CLI 安装树是 0.1.6-alpha.2 + 0.85.1），而**模型 id 会跟着 pi-ai 版本变**（同一个模型在 0.85.1 叫 `deepseek-v4-flash`、在 0.99.1 又叫 `deepseek-flash`）。选错那份的后果就是「会话里的模型突然不存在」，所以挑的时候按「宿主那棵树 + 胶水代次（0.1.x 用 `settings.installSection`、0.2.x 用 `settings.configure`）」比对，对不上就换下一份候选。「pi-ai 桥接」里「当前 pi-ai 版本」那一行会写明来自哪棵树（Desktop / dsh-install / profile / vendor），**鼠标悬浮显示实际加载的包目录**。
+
+**模型 id 对不上会提前报出来**，不用等发送失败：会话当前选的模型不在当前目录里时，模型选择器顶部直接出一行提示（并列出这个 provider 下可选的 id）；`agent-default-model` 那一行的默认模型对不上时，「pi-ai 桥接」里出一行警示。：patch 里的 `disabled` 写成 `!!js` 表达式（「仅当本插件的条目在场且启用时才禁用官方行」），Loader 每次求值，所以插件开关一拨就跟着变，不会出现「插件关了、官方也被禁着、一个模型都没有」的死角；表达式异常时一律不禁用（宁可官方插件可用）。
 
 **首次挂载时那个表达式看不到本插件的条目**：Loader 按条目列表顺序同步求值每一行的 `disabled`，而本插件的行是 bundle patch 用 `insert` 追加的、排在最后。于是首启时守卫返回「没找到自己」→ 官方行照旧挂载 → 本插件挂桥接时撞「同一个 provider 注册两次」（`LlmError: configurable provider "..." is already declared`），整个插件条目激活失败（Desktop 0.2.0-rc.2 上实测过这个形态）。所以本插件启动时自己还会再关一次那四行（`src/official-rows.ts`，只在本进程里关、不写回任何文件），等它们注销完再挂桥接；重载之后 patch 的守卫就能正常生效。桥接万一还是挂不上，插件本身照常激活，原因显示在「pi-ai 桥接」标签页里，而不是整块失活。
 
@@ -96,7 +98,7 @@ dsh web                   # 插件树变了，必须重启
 
 pi-ai 更新有两个触发路径：插件启动时后台查一次（6 小时节流，`DSH_PROVIDER_UPDATE=off` 可关），以及设置页上的「检查更新」按钮（`POST /provider/update`）。
 
-两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载——手动点「检查更新」也会先拿当前生效的那份比一次版本。pi-ai 换了版本要重启 dsh 才生效——桥接在进程启动时装载。
+两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载——手动点「检查更新」也会先拿当前生效的那份比一次版本。pi-ai 换了版本**可以就地切换、不用重启**：「pi-ai 桥接」里下好新版之后会出现「立即切换」按钮（`POST /provider/swap`）。宿主侧的顺序是先加载新的、成功之后才卸掉旧的，任何一步失败都会把旧的那份挂回去（失败只会看到一行提示，不会把桥接弄没）。不想点也行，重启 dsh 照样生效。
 
 下载一份 pi-ai 要占 80 MB 上下，所以插件只保留「比 dsh 自带那份新」的版本：同名或更旧的重复副本在装完后清掉，npm 缓存放系统临时目录（`<tmpdir>/dsh-llm-provider-npm-cache`），不落在插件目录里。「pi-ai 桥接」标签页显示当前占用（`vendor/` 总量 + npm 缓存），旁边的「清理」按钮（`POST /provider/prune`）删掉不会再被选中的旧版本与缓存；正在用的那份、以及「已下载、等重启生效」的那份都不动。
 
@@ -223,6 +225,7 @@ dsh 的模型目录来自它打包时那份 pi-ai。桥接让它跑在插件自�
 | `GET /plan/status` | 各供应商额度快照（60 秒缓存，`?refresh=1` 绕过） |
 | `GET /provider/status` | 桥接状态、路由表、更新状态、磁盘占用、测试实例标记 |
 | `POST /provider/update` | 手动触发一次上游检查与更新 |
+| `POST /provider/swap` | 就地切到已下好、验证通过的 pi-ai（不用重启）；失败自动回滚到原来那份 |
 | `POST /provider/prune` | 清理不会再被选中的 pi-ai 旧版本与 npm 缓存（正在用/待生效的不动） |
 | `GET /provider/models` | 模型元数据，三条链路合并：route 声明的 `input` → pi-ai 目录 → 适配器自报（`listModels`/`resolveModelInfo`，只补目录里没有的 provider，带单调用超时与总预算）。60 秒缓存（`?fresh=1` 绕开）；详情卡与能力徽章用 |
 | `GET /provider/presets` | 可添加的供应商预设清单（含已配置标记） |

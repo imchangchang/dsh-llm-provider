@@ -156,17 +156,28 @@ export function mergeRequestOf(routeId: string, value: AnyRecord, unsets: string
   return body
 }
 
-/** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
-function piAiSourceLabel(source: unknown): string {
+/**
+ * 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'；
+ * origin 进一步说明「dsh 自带」是哪一份（Desktop 走 app.asar，命令行走安装树，两者不是同一副本）。
+ */
+function piAiSourceLabel(source: unknown, origin?: unknown): string {
   if (source === 'dependency') return '兜底依赖'
-  if (source === 'dsh') return 'dsh 自带'
+  if (source === 'dsh') {
+    if (origin === 'desktop') return 'dsh 自带（Desktop）'
+    if (typeof origin === 'string' && origin !== '') return 'dsh 自带（' + origin + '）'
+    return 'dsh 自带'
+  }
   return '已下载'
 }
 
-function piAiSourceHint(source: unknown): string {
-  if (source === 'dependency') return '插件 vendor/ 下手动安装的兜底版本（可选档；没装就会落到 dsh 自带那份）'
-  if (source === 'dsh') return 'dsh 自己装的那份 pi-ai，版本随 dsh 发布走（不一定比上游旧）'
-  return '按需下载并验证过的版本，放在 vendor/pi-ai/<版本>/；换版本需重启 dsh'
+function piAiSourceHint(source: unknown, origin?: unknown, path?: unknown): string {
+  var base
+  if (source === 'dependency') base = '插件 vendor/ 下手动安装的兜底版本（可选档；没装就会落到 dsh 自带那份）'
+  else if (source === 'dsh') base = 'dsh 自己装的那份 pi-ai，版本随 dsh 发布走（不一定比上游旧）'
+  else base = '按需下载并验证过的版本，放在 vendor/pi-ai/<版本>/；换版本需重启 dsh'
+  if (source === 'dsh' && origin === 'desktop') base += '。Desktop 用的是 app 自带那份（app.asar 里），与命令行安装树里的可能不是同一版'
+  if (typeof path === 'string' && path !== '') base += '。加载的包目录：' + path
+  return base
 }
 
 /**
@@ -188,9 +199,30 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
   rows.push({
     key: 'pi',
     text: '当前 pi-ai 版本',
-    value: String(bridgeRecord.piAiVersion) + '（' + piAiSourceLabel(bridgeRecord.source) + '）',
-    title: piAiSourceHint(bridgeRecord.source),
+    value: String(bridgeRecord.piAiVersion) + '（'
+      + piAiSourceLabel(bridgeRecord.source, bridgeRecord.piAiOrigin) + '）',
+    title: piAiSourceHint(bridgeRecord.source, bridgeRecord.piAiOrigin, bridgeRecord.piAiPath),
   })
+  // 拷来挂的那份官方 bundle（胶水层）。它和 pi-ai 一样会因「从哪启动」而不同：桌面端用
+  // app.asar 里那份，CLI 用安装树里那份，两边版本可能不一样、模型 id 也跟着不一样——
+  // 报出来，排查「模型怎么突然对不上」时第一眼就有答案。
+  if (bridgeRecord.bundleVersion !== undefined || bridgeRecord.bundleTree !== undefined) {
+    var bundleVersion = bridgeRecord.bundleVersion === undefined ? '未知版本' : String(bridgeRecord.bundleVersion)
+    var bundleTree = bridgeRecord.bundleTree === undefined ? '' : '（来自 ' + String(bridgeRecord.bundleTree) + '）'
+    rows.push({
+      key: 'glue',
+      text: '桥接胶水层',
+      value: bundleVersion + bundleTree,
+      title: '官方 @deepseek-ai/dsh-llm-pi-ai 的副本，桥接就是把它的 pi-ai 换成我们维护的那份。'
+        + '桌面端（app.asar）与 CLI 安装树里的这份版本可能不同，模型 id 也会跟着不同。',
+    })
+  }
+  // 默认模型不在当前 pi-ai 目录里（模型 id 会随 pi-ai 版本变）：新会话一开口就 UNKNOWN_MODEL，
+  // 提前在这里说清，并提供可选的 id
+  var modelWarnings = Array.isArray(bridgeRecord.modelWarnings) ? bridgeRecord.modelWarnings : []
+  for (var mw = 0; mw < modelWarnings.length; mw += 1) {
+    rows.push({ key: 'model-warn-' + mw, text: String(modelWarnings[mw]), value: '看原因', title: String(modelWarnings[mw]), warn: true })
+  }
   // 体检没执行（bundle 的 import 需求解析不出）：这份 pi-ai 是靠「目录存在」放行的，没验证过
   if (bridgeRecord.probeUnverified === true) {
     rows.push({
@@ -287,7 +319,14 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
   if (update !== undefined && update !== null) {
     var updateRecord = update as AnyRecord
     if (updateRecord.pending !== undefined) {
-      rows.push({ key: 'pending', text: '已下载 ' + String(updateRecord.pending) + '，验证通过（完整性 + 兼容性），重启 dsh 后生效', warn: true })
+      rows.push({
+        key: 'pending',
+        text: '已下载 ' + String(updateRecord.pending) + '，验证通过（完整性 + 兼容性）',
+        value: '可以立即切换',
+        title: '点下面的「立即切换」就地换上（不用重启）：会先加载新版本，成功后再卸掉旧的，失败自动回滚。'
+          + '不想现在切也行，重启 dsh 后生效。',
+        warn: true,
+      })
     }
     if (updateRecord.rejected !== undefined && updateRecord.rejected !== null) {
       var rejectedLatest = updateRecord.rejected as AnyRecord
@@ -1627,6 +1666,28 @@ export function ProviderSettingsSection() {
   }
 
   /** 清理旧 pi-ai 副本与 npm 缓存（宿主侧按保留规则判断，正在用的那份不动）。 */
+  /**
+   * 就地切到已下好的新版 pi-ai（不用重启）。宿主侧的顺序：先加载新的 → 成功才卸旧的 →
+   * 挂新的；任何一步失败都会把旧的那份挂回去，所以这里失败也只会拿到错误文案。
+   */
+  function swapPiAi() {
+    setBusy(true)
+    setNote('正在切换 pi-ai ...')
+    postJson('/provider/swap')
+      .then(function (result: AnyRecord) {
+        if (result !== null && result !== undefined && result.ok === true) {
+          setNote('已就地切到 pi-ai ' + String(result.version || '') + '（不用重启）')
+        } else {
+          setNote('切换失败：' + String((result && result.error) || '未知错误') + '（仍用原来那份，可重启 dsh 生效）')
+        }
+        refresh(true)
+      })
+      .catch(function (cause) {
+        setNote('切换失败：' + String(cause && cause.message ? cause.message : cause))
+      })
+      .then(function () { setBusy(false) })
+  }
+
   function prune() {
     setBusy(true)
     setNote('正在清理 ...')
@@ -1710,12 +1771,21 @@ export function ProviderSettingsSection() {
       ),
     ))
   }
-  // 上游那一行右侧跟按钮：检查更新（宿主先校验下载内容、再做兼容性体检，都过了才等重启生效）
+  // 上游那一行右侧跟按钮：检查更新（宿主先校验下载内容、再做兼容性体检，都过了才等重启生效）；
+  // 已经有下好待生效的版本时，再给一个「立即切换」（不用重启）
+  var hasPending = update !== undefined && update !== null && (update as AnyRecord)['pending'] !== undefined
   bridgeLines.push(
     react.createElement(
       'div',
       { className: 'pv_line', key: 'action' },
       piAiUpstreamText(update),
+      hasPending
+        ? react.createElement(
+          'button',
+          { type: 'button', className: 'pv_action pv_push', disabled: busy, onClick: swapPiAi },
+          busy ? '切换中 ...' : '立即切换',
+        )
+        : null,
       react.createElement(
         'button',
         { type: 'button', className: 'pv_action pv_push', disabled: busy, onClick: checkUpdate },

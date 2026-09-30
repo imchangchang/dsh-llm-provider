@@ -22,6 +22,43 @@ import type { CatalogGroup, CatalogModel, EffortChoice, FieldEvent, ModelSelecti
 export var LEGACY_PROVIDER_ALIASES: Record<string, string> = { 'deepseek-official': 'deepseek' }
 
 /**
+ * 当前会话选的模型不在目录里时，给选择器一行提示（纯函数，离线可测）。
+ *
+ * 目录里的模型 id 会随 pi-ai 版本变（同一台机器上 0.85.1 叫 `deepseek-v4-flash`、
+ * 0.99.1 又叫 `deepseek-flash`），而会话里存的是 id 字符串。目录里没有它时**发消息才会**
+ * 报 `UNKNOWN_MODEL`；在选择器里提前说清，用户就不用先踩一次错。
+ *
+ * @param selection - 会话当前的选择（provider/model）。
+ * @param groups - 目录分组（空数组表示目录还没加载，这时不提示，免得误报）。
+ * @returns 提示文案与 tooltip；目录里有这个模型、或目录为空时返回 undefined。
+ */
+export function missingModelNotice(
+  selection: { provider?: unknown, model?: unknown } | undefined | null,
+  groups: CatalogGroup[] | undefined,
+): { text: string, title: string, provider: string, model: string } | undefined {
+  if (selection === undefined || selection === null) return undefined
+  if (groups === undefined || groups.length === 0) return undefined
+  var provider = typeof selection.provider === 'string' ? selection.provider : ''
+  var model = typeof selection.model === 'string' ? selection.model : ''
+  if (provider === '' || model === '') return undefined
+  if (findModel(groups, provider, model) !== undefined) return undefined
+  // 同一个 provider 下还有哪些可选：给几个例子，用户一眼知道往哪切
+  var group = undefined as CatalogGroup | undefined
+  for (var i = 0; i < groups.length; i += 1) {
+    if (groups[i].id === provider) { group = groups[i]; break }
+  }
+  var examples = group === undefined ? [] : group.models.slice(0, 3).map(function (m) { return m.id })
+  return {
+    text: '当前模型 ' + provider + '/' + model + ' 不在当前目录里（选一个可用的）',
+    title: '当前 pi-ai 目录里没有这个模型 id；直接发送会报 UNKNOWN_MODEL。'
+      + (examples.length === 0 ? '' : '这个 provider 下可选：' + examples.join('、') + '。')
+      + '目录会随 pi-ai 版本变化（同一个模型在不同版本里 id 可能不同）。',
+    provider: provider,
+    model: model,
+  }
+}
+
+/**
  * 把选择里已经不存在的老 provider id 折到现存路由上。
  *
  * 只在「目标 provider 和同一个 model id 都在目录里」时才折——对不上就原样返回，宁可显示
@@ -518,7 +555,9 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
     : (selection === undefined || selection === null
         ? '选择模型'
         : String(selection.provider) + '/' + String(selection.model))
-  var triggerText = effortText === undefined ? modelLabel : modelLabel + ' · ' + effortText
+  var missingNotice = missingModelNotice(selection, groups)
+  var triggerText = (effortText === undefined ? modelLabel : modelLabel + ' · ' + effortText)
+    + (missingNotice === undefined ? '' : ' · ⚠ 不在当前目录里')
 
   // 供应商那段的余量指示：跟模型面板里的 provider chip 同一套取数与配色——
   // 最紧窗口百分比（没窗口就钱包余额），点按 10%/30% 分红黄绿；悬浮显示各窗口明细。
@@ -708,6 +747,9 @@ export function ModelSwitchSeat(props: ModelSwitchSeatProps) {
       react.createElement(
         'div',
         { className: 'ms_scroll' },
+        missingNotice === undefined
+          ? null
+          : react.createElement('div', { className: 'ms_status pv_warn', key: 'missing', title: missingNotice.title }, missingNotice.text),
         groupSections,
         groupSections.length === 0
           ? react.createElement('div', { className: 'ms_status' }, needle === '' ? '没有可选模型' : '没有匹配「' + query + '」的模型')
