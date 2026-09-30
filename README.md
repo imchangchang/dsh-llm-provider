@@ -35,6 +35,8 @@ dsh web     # restart required: the plugin tree changed
 
 Add `@<version>` to the package name to install one specific version.
 
+**Upgrading an already-installed plugin requires restarting the dsh process; refreshing the page is not enough.** The plugin's `cordis.patch.yml` is re-read from disk on every mount, but **the module code is cached by Node per path**, and under pnpm's hoisted layout that path does not change between versions (`node_modules/@dsh-one/dsh-llm-provider`) — a refresh recomposes the entry tree without re-importing the module, so the code loaded at process start keeps running. If a new version seems to change nothing, look here first.
+
 Requires dsh 0.1.6-alpha.1 or newer, including the 0.2 line. The plugin declares
 `@deepseek-ai/dsh-authorization` as an optional peer, and dsh 0.2 checks that range
 against the running dsh version at install/boot — a plugin whose range excludes the
