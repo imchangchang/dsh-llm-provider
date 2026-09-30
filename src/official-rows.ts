@@ -49,6 +49,16 @@ export interface OfficialRowState {
   closed: string[]
   /** 其中当时确实挂着插件的（fiber 有 uid）——注销要等任务落定，调用方据此决定要不要等。 */
   running: string[]
+  /**
+   * `update()` 返回的 promise（注销完成）。
+   *
+   * 调用方**必须**连这些一起等：0.1.x 的 loader 1.0.3 在 `Entry._dispose` 里先把
+   * `entry.fiber` 置空再 `await fiber.dispose()`，而 `EntryTree.getTasks()` 只看
+   * `entry.fiber?.inertia`——刚发起的注销它看不见，`loader.await()` 会提前返回，注销还没
+   * 完成就去挂桥接，照样撞「already declared」。0.2.x 上这些 promise 会先于 dispose 完成就
+   * resolve，所以两边都要等（`Promise.allSettled`）。
+   */
+  pending: Promise<unknown>[]
 }
 
 /**
@@ -72,23 +82,30 @@ export function disableOfficialRows(
 ): OfficialRowState {
   const closed: string[] = []
   const running: string[] = []
+  const pending: Promise<unknown>[] = []
   for (const row of entries) {
     const id = rowIdOf(row)
     if (id === undefined || !ids.includes(id)) continue
     const record = asRecord(row)
+    const options = asRecord(record['options'])
+    // group 行没有 fiber：`update({disabled:true})` 走不到 dispose 分支，关不掉也报不了
+    if (options['group'] === true) continue
     const active = rowIsRunning(record)
     if (!active && rowSaysDisabled(record)) continue
     const update = record['update']
     if (typeof update !== 'function') continue
     try {
-      void (update as (options: { disabled: boolean }) => unknown).call(row, { disabled: true })
+      const result = (update as (options: { disabled: boolean }) => unknown).call(row, { disabled: true })
       closed.push(id)
       if (active) running.push(id)
+      if (result !== null && typeof result === 'object' && typeof (result as PromiseLike<unknown>).then === 'function') {
+        pending.push(Promise.resolve(result))
+      }
     } catch {
       /* 关不掉：调用方会在挂载时报错（不再让整个插件失活） */
     }
   }
-  return { closed, running }
+  return { closed, running, pending }
 }
 
 /** 这一行的插件是不是真的挂着（cordis 的 Fiber：dispose 之后 uid 会被清成 null）。 */
@@ -102,7 +119,13 @@ function rowIsRunning(record: AnyRecord): boolean {
   }
 }
 
-/** Loader 的 `disabled` 判据（`!!js` 表达式在这一刻求值）；表达式抛错按 Loader 的 catch 处理成 false。 */
+/**
+ * 行的 `disabled` 判据（`!!js` 表达式在这一刻求值）。
+ *
+ * 表达式抛错时按 false 处理——**不是**学 Loader（它没有 per-row catch：1.0.5 的
+ * `disabledOf` 直接求值，异常会让这一行根本不挂），而是与守卫表达式自己那层
+ * `try { … } catch { return false }` 同语义：宁可按「没关」再关一次。
+ */
 function rowSaysDisabled(record: AnyRecord): boolean {
   try {
     return record['disabled'] === true

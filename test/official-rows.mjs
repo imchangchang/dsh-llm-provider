@@ -57,6 +57,8 @@ const takeover = disableOfficialRows([piAi, deepseek, mine, unrelated])
 check('只关还开着的官方行', JSON.stringify(takeover.closed) === '["llm-pi-ai"]')
 check('关的那一行确实收到了 disabled: true', piAi.updates.length === 1 && piAi.updates[0].disabled === true)
 check('真的挂着的那条报进 running（调用方据此决定要不要等注销）', JSON.stringify(takeover.running) === '["llm-pi-ai"]')
+check('update() 的 promise 收进 pending（0.1.x 的 loader.await 看不见刚发起的注销）',
+  takeover.pending.length === 1 && typeof takeover.pending[0].then === 'function')
 check('已经关着又没挂着的不再动（用户自己关的、或 patch 守卫已生效）', deepseek.updates.length === 0)
 check('本插件的条目自己不动', mine.updates.length === 0)
 check('别的官方行不动', unrelated.updates.length === 0)
@@ -112,7 +114,26 @@ check('update 抛错时不谎报', (() => {
   target.update = () => { throw new Error('nope') }
   return disableOfficialRows([target]).closed.length === 0
 })())
-check('空列表不炸', disableOfficialRows([]).closed.length === 0)
+check('空列表不炸', (() => {
+  const empty = disableOfficialRows([])
+  return empty.closed.length === 0 && empty.pending.length === 0
+})())
+check('group 行跳过（它没有 fiber，关了也走不到 dispose）', (() => {
+  const group = row('ui-settings-models', { running: true })
+  group.options.group = true
+  const result = disableOfficialRows([group])
+  return result.closed.length === 0 && group.updates.length === 0
+})())
+check('update() 抛错时不收 pending', (() => {
+  const target = row('llm-deepseek', { running: true })
+  target.update = () => { throw new Error('nope') }
+  return disableOfficialRows([target]).pending.length === 0
+})())
+check('update() 同步返回非 promise 时不收 pending', (() => {
+  const target = row('llm-deepseek', { running: true })
+  target.update = () => undefined
+  return disableOfficialRows([target]).pending.length === 0
+})())
 check('entries 是 iterable（不是数组）也认', (() => {
   const target = row('llm-deepseek')
   return disableOfficialRows(new Set([target]).values()).closed.join(',') === 'llm-deepseek'

@@ -46,7 +46,7 @@ import {
   type ProviderWriteState,
 } from './provider-config.js'
 import { discoverModelsVia, type DiscoveryState } from './model-discovery.js'
-import { disableOfficialRows, loaderEntries } from './official-rows.js'
+import { disableOfficialRows, loaderEntries, type OfficialRowState } from './official-rows.js'
 import { labelOf, providerRoutes, websiteOf, type ProviderRoute } from './routes.js'
 import { catalogBaseUrlOf, presetsWithMeta } from './provider-presets.js'
 import { findAdapter } from './adapters/registry.js'
@@ -173,6 +173,16 @@ export function apply(ctx: PluginContext, config: unknown): void {
    * 挂桥接失败**不能**让整个插件失活——那样用户连设置页都进不去，什么也查不了。
    */
   let bridgeMountError: string | undefined
+  /** 桥接是否已经挂上：挂载要等官方行注销，这期间 /provider/status 不能报「可用」。 */
+  let bridgeMounted = false
+  /** 日志本身抛错不该拖垮启动（Desktop 的 boot 会 fail-loud，未处理异常直接退进程）。 */
+  const logSafely = (level: 'info' | 'warn' | 'error', message: string): void => {
+    try {
+      logger?.[level]?.(message)
+    } catch {
+      /* 忽略：日志不是关键路径 */
+    }
+  }
 
   if (bridge.ok) {
     // 完全接管官方 llm-pi-ai 的行为：路由注册、模型发现全在这一个调用里。
@@ -189,13 +199,14 @@ export function apply(ctx: PluginContext, config: unknown): void {
       try {
         bridge.plugin.apply(ctx, configWithProviders(config, () => providerView().bridgeProviders))
         bridgeMountError = undefined
-        logger?.info?.(`llm bridge active on pi-ai ${bridge.piAiVersion}；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
-        for (const warning of view.warnings) logger?.warn?.(warning)
+        bridgeMounted = true
+        logSafely('info', `llm bridge active on pi-ai ${bridge.piAiVersion}；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
+        for (const warning of view.warnings) logSafely('warn', warning)
       } catch (error) {
         // 官方行没关干净（见 official-rows.ts）、或上游改了什么，都会在这里抛。只降级：
         // 插件其余部分照常工作，原因由 /provider/status 报到界面上
         bridgeMountError = messageOf(error)
-        logger?.error?.(`llm bridge 挂载失败：${bridgeMountError}`)
+        logSafely('error', `llm bridge 挂载失败：${bridgeMountError}`)
       }
     }
 
@@ -208,10 +219,15 @@ export function apply(ctx: PluginContext, config: unknown): void {
     if (takeover.closed.length === 0) mountBridge()
     else {
       if (takeover.running.length > 0) {
-        logger?.warn?.(`官方行 ${takeover.running.join('、')} 还挂着（bundle patch 的守卫在首次挂载时看不到本插件的条目），先在本进程里关掉再挂桥接`)
+        logSafely('warn', `官方行 ${takeover.running.join('、')} 还挂着（bundle patch 的守卫在首次挂载时看不到本插件的条目），先在本进程里关掉再挂桥接`)
       }
-      // 关掉是同步开始的，但 fiber 注销在后续任务里完成：等 loader 的任务排空（最多 3 秒）再挂
-      void waitForDrain(loader, takeover.closed).then(mountBridge)
+      // 关掉是同步开始的，但 fiber 注销在后续任务里完成：等注销与 loader 的任务都落定再挂。
+      // **两个 then 都要写**：这个 promise 的 rejection 一旦没人接，Desktop 的 fail-loud
+      // 会当成未处理异常直接把进程退掉——代价远大于「少挂一次桥接」。
+      void waitForDrain(loader, takeover).then(mountBridge, (error: unknown) => {
+        bridgeMountError = messageOf(error)
+        logSafely('error', `等官方行注销时出错：${bridgeMountError}`)
+      })
     }
   } else {
     logger?.warn?.(`llm bridge 不可用，退化为纯计费模式：${bridge.error}`)
@@ -224,19 +240,24 @@ export function apply(ctx: PluginContext, config: unknown): void {
    * 正常很快就返回；给个上限是因为「等不到」也不该把桥接永远卡住——真撞上了挂载会抛，那个错误
    * 会被抓到并报到界面上（比整个插件失活好得多）。
    */
-  async function waitForDrain(loader: LoaderService | undefined, closed: readonly string[], timeoutMs = 3_000): Promise<void> {
-    const awaited = loader !== undefined && typeof loader.await === 'function' ? loader.await() : undefined
-    if (awaited === undefined) return
+  async function waitForDrain(loader: LoaderService | undefined, takeover: OfficialRowState, timeoutMs = 3_000): Promise<void> {
+    // 注销 promise（0.1.x 的 loader.await() 看不见刚发起的注销，见 official-rows.ts）与
+    // loader.await() 一起等；allSettled 顺带把 rejection 收掉，不会变成未处理异常
+    const waits: Promise<unknown>[] = [...takeover.pending]
+    if (loader !== undefined && typeof loader.await === 'function') {
+      waits.push(Promise.resolve(loader.await()).catch(() => undefined))
+    }
+    if (waits.length === 0) return
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, timeoutMs)
     })
     try {
-      await Promise.race([Promise.resolve(awaited).catch(() => undefined), timeout])
+      await Promise.race([Promise.allSettled(waits), timeout])
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
-    logger?.info?.(`已关掉官方行 ${closed.join('、')}，继续挂桥接`)
+    logSafely('info', `已关掉官方行 ${takeover.closed.join('、')}，继续挂桥接`)
   }
 
   interface ResolveKeyResult {
@@ -561,9 +582,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
         const payload = {
           bridge: bridge.ok
             ? {
-                // 挂载失败时按「不可用」报：界面上那行会显示原因，而不是整块空白
-                active: bridgeMountError === undefined,
-                ...(bridgeMountError === undefined ? {} : { error: bridgeMountError }),
+                // 挂载完成前（在等官方行注销）不报「可用」，失败时带上原因：
+                // 界面上那行会把它显示出来，而不是整块空白
+                active: bridgeMounted && bridgeMountError === undefined,
+                ...(bridgeMountError !== undefined
+                  ? { error: bridgeMountError }
+                  : (bridgeMounted ? {} : { error: 'llm 桥接正在挂载（先关掉官方那几行，等它们注销）' })),
                 piAiVersion: bridge.piAiVersion,
                 // 用的是哪一档：热更新下来的版本号 / 'dependency'（内置依赖）/ 'dsh'（dsh 自带）
                 source: bridge.piAiSource,
