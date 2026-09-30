@@ -251,6 +251,15 @@ const hostStore = providerStoreStatus(
 const hostRow = storeRow(hostStore).find((r) => r.key === 'store')
 rowsCheck('宿主真产出的 providerStore 能渲染出这一行', hostRow !== undefined)
 rowsCheck('宿主真产出的那份也读得出走的是哪条路', hostRow !== undefined && hostRow.value.indexOf('configEditor') !== -1)
+// 桥接胶水层那一行：跑的是哪份官方 bundle（app.asar / CLI 安装树 / profile），版本可能不同、
+// 模型 id 也跟着不同——这是排查「模型怎么突然对不上」的第一眼信息
+const glueRows = piAiBridgeRows({ active: true, piAiVersion: '0.87.1', source: 'dsh', bundleVersion: '0.2.0-rc.2', bundleTree: 'app.asar' }, undefined)
+const glueLine = glueRows.find((r) => r.key === 'glue')
+rowsCheck('报出桥接胶水层那一行', glueLine !== undefined)
+rowsCheck('胶水层带上版本与来自哪棵树',
+  glueLine !== undefined && glueLine.value.indexOf('0.2.0-rc.2') !== -1 && glueLine.value.indexOf('app.asar') !== -1)
+rowsCheck('没有胶水层字段时不出这行（老宿主/读不到）',
+  piAiBridgeRows({ active: true, piAiVersion: '0.86.0', source: '0.86.0' }, undefined).every((r) => r.key !== 'glue'))
 rowsCheck('宿主真产出的那份也读得出条数',
   hostRow !== undefined && String(hostRow.title).indexOf('自带条目 4') !== -1 && String(hostRow.title).indexOf('老段 6') !== -1)
 

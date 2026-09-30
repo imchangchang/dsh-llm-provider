@@ -191,6 +191,20 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
     value: String(bridgeRecord.piAiVersion) + '（' + piAiSourceLabel(bridgeRecord.source) + '）',
     title: piAiSourceHint(bridgeRecord.source),
   })
+  // 拷来挂的那份官方 bundle（胶水层）。它和 pi-ai 一样会因「从哪启动」而不同：桌面端用
+  // app.asar 里那份，CLI 用安装树里那份，两边版本可能不一样、模型 id 也跟着不一样——
+  // 报出来，排查「模型怎么突然对不上」时第一眼就有答案。
+  if (bridgeRecord.bundleVersion !== undefined || bridgeRecord.bundleTree !== undefined) {
+    var bundleVersion = bridgeRecord.bundleVersion === undefined ? '未知版本' : String(bridgeRecord.bundleVersion)
+    var bundleTree = bridgeRecord.bundleTree === undefined ? '' : '（来自 ' + String(bridgeRecord.bundleTree) + '）'
+    rows.push({
+      key: 'glue',
+      text: '桥接胶水层',
+      value: bundleVersion + bundleTree,
+      title: '官方 @deepseek-ai/dsh-llm-pi-ai 的副本，桥接就是把它的 pi-ai 换成我们维护的那份。'
+        + '桌面端（app.asar）与 CLI 安装树里的这份版本可能不同，模型 id 也会跟着不同。',
+    })
+  }
   // 体检没执行（bundle 的 import 需求解析不出）：这份 pi-ai 是靠「目录存在」放行的，没验证过
   if (bridgeRecord.probeUnverified === true) {
     rows.push({

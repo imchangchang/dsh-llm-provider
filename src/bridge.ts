@@ -19,7 +19,7 @@
  */
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveDshHome } from './dsh-home.js'
 import { asRecord, readString, type AnyRecord } from './types.js'
@@ -66,6 +66,10 @@ export type BridgeLoadResult =
       plugin: BridgePluginModule
       piAiVersion: string
       piAiSource: string
+      /** 拷来挂的那份官方 bundle 的版本号（读不到就没有）。 */
+      bundleVersion?: string
+      /** 它来自哪棵树（短标签，如 `app.asar` / `profile` / `dsh-install`）。 */
+      bundleTree: string
       /** 需求没解析出来、体检没跑：选中项是靠「目录存在」放行的，没验证过 */
       probeUnverified: boolean
       rejected: RejectedCandidate[]
@@ -144,61 +148,242 @@ function resolvePackageRoot(fromFile: string, specifier: string): string | undef
   }
 }
 
-/**
- * 沿解析链找宿主包时的锚点文件（文件不必存在，只借它的路径当起点）。
- *
- * 顺序：`$DSH_HOME/profiles/node_modules` → dsh 安装树（Windows 官方安装包放在
- * `<node>/node_modules`，POSIX 在 `<node>/lib/node_modules`）→ 插件自己。
- */
-function hostAnchors(): string[] {
-  const anchors: string[] = []
+/** 解析宿主包时的环境信号（可注入，便于离线测试）。 */
+export interface HostEnv {
+  /** Electron 的 `process.resourcesPath`；非 Electron 为 undefined。 */
+  resourcesPath?: string
+  /** `process.execPath`。 */
+  execPath: string
+  /** 插件自己的根目录。 */
+  pluginRoot: string
+  /** `$DSH_HOME`；拿不到就不传。 */
+  dshHome?: string
+}
+
+/** 当前进程的环境信号。 */
+export function currentHostEnv(): HostEnv {
+  let dshHome: string | undefined
   try {
-    anchors.push(join(resolveDshHome(), 'profiles', 'node_modules', '_anchor.js'))
+    dshHome = resolveDshHome()
   } catch { /* 拿不到 DSH_HOME 就少一个锚点 */ }
-  const nodeDir = dirname(process.execPath)
-  anchors.push(join(nodeDir, 'node_modules', '_anchor.js'))
-  anchors.push(join(nodeDir, '..', 'lib', 'node_modules', '_anchor.js'))
-  anchors.push(join(pluginRoot, '_anchor.js'))
-  return anchors
+  const resourcesPath = (process as unknown as { resourcesPath?: unknown })['resourcesPath']
+  return {
+    ...(typeof resourcesPath === 'string' && resourcesPath !== '' ? { resourcesPath } : {}),
+    execPath: process.execPath,
+    pluginRoot,
+    ...(dshHome === undefined ? {} : { dshHome }),
+  }
 }
 
 /**
- * 按锚点找一个宿主包（`@deepseek-ai/*`）的入口文件。
+ * 沿解析链找宿主包时的锚点文件（文件不必存在，只借它的路径当起点）。
  *
- * 与 {@link findSourceBundle} 同一套解析：包可能被提升到任意一层 node_modules，也可能嵌在
- * dsh 包自己的 node_modules 里。用的是宿主那一份——第三方插件自己再装一份同名包会带进第二份
- * cordis 运行时，服务注册就串了。
- *
- * @param specifier - 包名。
- * @returns 入口文件绝对路径；找不到返回 undefined。
+ * 顺序就是「谁更可能是宿主真正在跑的那棵树」，越靠前越优先：
+ *   0. **Electron 应用自带的 dsh**（`<resourcesPath>/app.asar/dsh`）——Desktop 就从这儿跑。
+ *      注意它的 pi-ai 与 CLI 安装树里的那份**不是同一版**（实测 Desktop 是 0.87.1，
+ *      CLI 树是 0.85.1，两边的 DeepSeek 模型 id 都不一样），所以这一档必须排在前面。
+ *   1. `$DSH_HOME/profiles/node_modules`
+ *   2. dsh 安装树（Windows 官方安装包在 `<node>/node_modules`，POSIX 在 `<node>/lib/node_modules`）
+ *   3. 插件自己
  */
-export function hostPackageEntry(specifier: string): string | undefined {
-  const seen = new Set<string>()
-  for (const anchor of hostAnchors()) {
-    const roots: string[] = []
-    const direct = resolvePackageRoot(anchor, specifier)
-    if (direct !== undefined) roots.push(direct)
-    const dshRoot = resolvePackageRoot(anchor, '@deepseek-ai/dsh')
-    if (dshRoot !== undefined) roots.push(join(dshRoot, 'node_modules', ...specifier.split('/')))
-    for (const root of roots) {
-      if (seen.has(root)) continue
-      seen.add(root)
-      const entry = join(root, 'lib', 'index.js')
-      if (existsSync(entry)) return entry
-    }
+export function hostAnchors(env: HostEnv = currentHostEnv()): string[] {
+  const anchors: string[] = []
+  if (env.resourcesPath !== undefined) {
+    anchors.push(join(env.resourcesPath, 'app.asar', 'dsh', 'node_modules', '_anchor.js'))
+    anchors.push(join(env.resourcesPath, 'app.asar.unpacked', 'dsh', 'node_modules', '_anchor.js'))
+  }
+  if (env.dshHome !== undefined) anchors.push(join(env.dshHome, 'profiles', 'node_modules', '_anchor.js'))
+  const nodeDir = dirname(env.execPath)
+  anchors.push(join(nodeDir, 'node_modules', '_anchor.js'))
+  anchors.push(join(nodeDir, '..', 'lib', 'node_modules', '_anchor.js'))
+  anchors.push(join(env.pluginRoot, '_anchor.js'))
+  return anchors
+}
+
+/** 从一个锚点能想到的某个包的包目录（直接命中 + 嵌在 dsh 包自己的 node_modules 里）。 */
+function packageRootsAt(anchor: string, specifier: string): string[] {
+  const roots: string[] = []
+  const direct = resolvePackageRoot(anchor, specifier)
+  if (direct !== undefined) roots.push(direct)
+  const dshRoot = resolvePackageRoot(anchor, '@deepseek-ai/dsh')
+  if (dshRoot !== undefined) roots.push(join(dshRoot, 'node_modules', ...specifier.split('/')))
+  return roots
+}
+
+/**
+ * 一个包目录属于哪棵树（`<tree>/node_modules/<包>` → `<tree>`）。
+ *
+ * 往上找到第一个叫 `node_modules` 的祖先目录，它的父目录就是树根——这样 scoped 包
+ * （`node_modules/@scope/name`，比非 scoped 多一层）也算得对。
+ */
+function treeOf(packageRoot: string): string {
+  let dir = dirname(packageRoot)
+  while (dir !== dirname(dir) && basename(dir) !== 'node_modules') dir = dirname(dir)
+  return basename(dir) === 'node_modules' ? dirname(dir) : dirname(packageRoot)
+}
+
+/**
+ * 宿主 dsh 自己那份安装树的根目录：按锚点顺序找 `@deepseek-ai/dsh` 的包目录，取它的树根。
+ *
+ * 这是「宿主到底在跑哪棵树」的判据——Desktop 下是 `<resourcesPath>/app.asar/dsh`，
+ * CLI 下是 `~/.dsh/node-<平台>/lib/node_modules` 那一带。
+ */
+export function hostDshTree(env: HostEnv = currentHostEnv()): string | undefined {
+  for (const anchor of hostAnchors(env)) {
+    const root = resolvePackageRoot(anchor, '@deepseek-ai/dsh')
+    if (root !== undefined) return treeOf(root)
   }
   return undefined
 }
 
 /**
- * 官方 llm-pi-ai bundle 的实际位置。
+ * 按锚点列出某个宿主包**全部**候选入口（顺序 = 锚点顺序，去重）。
  *
- * 它是桥接要拷的那份源文件。路径同样不写死：按「profile 的 node_modules → dsh 安装目录
- * （全局 node_modules）→ 插件自己」的顺序沿解析链找，找到哪个用哪个。
- * @returns bundle 入口文件的绝对路径；找不到返回 undefined。
+ * 与 {@link resolveSourceBundle} 同一套解析：包可能被提升到任意一层 node_modules，也可能嵌在
+ * dsh 包自己的 node_modules 里。用的是宿主那一份——第三方插件自己再装一份同名包会带进第二份
+ * cordis 运行时，服务注册就串了。
+ *
+ * @param specifier - 包名。
+ * @param env - 环境信号（默认取当前进程的）。
+ * @returns 入口文件绝对路径列表（可能为空）。
  */
-function findSourceBundle(): string | undefined {
-  return hostPackageEntry('@deepseek-ai/dsh-llm-pi-ai')
+export function hostPackageEntries(specifier: string, env: HostEnv = currentHostEnv()): string[] {
+  const seen = new Set<string>()
+  const entries: string[] = []
+  for (const anchor of hostAnchors(env)) {
+    for (const root of packageRootsAt(anchor, specifier)) {
+      if (seen.has(root)) continue
+      seen.add(root)
+      const entry = join(root, 'lib', 'index.js')
+      if (existsSync(entry)) entries.push(entry)
+    }
+  }
+  return entries
+}
+
+/**
+ * 按锚点找一个宿主包（`@deepseek-ai` 下的包）的入口文件（第一个命中的）。
+ *
+ * @param specifier - 包名。
+ * @param env - 环境信号（默认取当前进程的）。
+ * @returns 入口文件绝对路径；找不到返回 undefined。
+ */
+export function hostPackageEntry(specifier: string, env: HostEnv = currentHostEnv()): string | undefined {
+  return hostPackageEntries(specifier, env)[0]
+}
+
+/** 官方 bundle 的胶水代次：0.1.x 用 `settings.installSection`，0.2.x 用 `settings.configure`。 */
+export type GlueGeneration = 'legacy' | 'modern' | 'unknown'
+
+/**
+ * 认一份 bundle 源码是哪一代胶水。
+ *
+ * 两代的分界实测过（同一份 dsh-llm-pi-ai）：0.1.6-alpha.2 调 `settings.installSection(`，
+ * 0.2.0-rc.2 改成 `settings.configure(` + 只读传入的 config。
+ */
+export function glueGeneration(source: string): GlueGeneration {
+  if (source.includes('installSection(')) return 'legacy'
+  if (source.includes('settings.configure(')) return 'modern'
+  return 'unknown'
+}
+
+/** 宿主 dsh 版本 → 它要哪一代胶水（0.1.x / 0.2.x 起）。 */
+export function dshGeneration(version: string | undefined): GlueGeneration {
+  if (version === undefined) return 'unknown'
+  const match = /^(\d+)\.(\d+)/.exec(version)
+  if (match === null) return 'unknown'
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  if (major === 0 && minor <= 1) return 'legacy'
+  if (major > 0 || minor >= 2) return 'modern'
+  return 'unknown'
+}
+
+/** 选定的官方 bundle（桥接要拷的那份）。 */
+export interface SourceBundle {
+  /** bundle 入口文件绝对路径。 */
+  path: string
+  /** bundle 自己的版本号（读不到就没有）。 */
+  version?: string
+  /** 它属于哪棵树（诊断短标签）。 */
+  tree: string
+  /** 胶水代次。 */
+  generation: GlueGeneration
+  /** 为什么选它（日志/状态里要能看见）。 */
+  reason: 'host-tree+generation' | 'generation' | 'host-tree' | 'first'
+}
+
+/** 路径的短标签：状态里一眼看出桥接用的是哪棵树。 */
+export function treeLabel(tree: string, env: HostEnv = currentHostEnv()): string {
+  if (env.resourcesPath !== undefined && tree.startsWith(join(env.resourcesPath, 'app.asar'))) return 'app.asar'
+  if (env.dshHome !== undefined && tree.startsWith(join(env.dshHome, 'profiles'))) return 'profile'
+  if (tree.startsWith(dirname(env.execPath))) return 'dsh-install'
+  if (tree === env.pluginRoot) return 'plugin'
+  return tree
+}
+
+/**
+ * 从候选里挑份能用的官方 bundle（纯函数，离线可测）。
+ *
+ * 排序理由（越靠前越优先）：
+ *   1. **宿主自己那棵树里的、且胶水代次对得上**——宿主跑哪棵树，就用哪棵树里的那份；
+ *   2. 胶水代次对得上的（宿主树里没有，或读不出来）；
+ *   3. 宿主自己那棵树里的（代次认不出来时仍然优先宿主）；
+ *   4. 第一个候选（跟改造前一样，找不到更好的就用它）。
+ *
+ * 为什么非要对代次：Desktop 的宿主跑 `app.asar` 里那份（0.2.0-rc.2），而 CLI 安装树里
+ * 还躺着 0.1.6-alpha.2 那份；按路径顺序先撞上 CLI 的，就会拿 0.1.x 胶水去挂 0.2.x 宿主，
+ * pi-ai 也跟着串成 0.85.1——用户看到的就是「模型 id 突然对不上」。
+ *
+ * @param entries - {@link hostPackageEntries} 的结果（锚点顺序）。
+ * @param options - 宿主树、宿主代次、读源码的方式。
+ * @returns 选中项；候选为空时 undefined。
+ */
+export function chooseSourceBundle(
+  entries: readonly string[],
+  options: { hostTree?: string, hostGeneration: GlueGeneration, read?: (path: string) => string | undefined },
+): SourceBundle | undefined {
+  if (entries.length === 0) return undefined
+  const read = options.read ?? ((path: string) => {
+    try {
+      return readFileSync(path, 'utf8')
+    } catch {
+      return undefined
+    }
+  })
+  const described = entries.map((path) => {
+    const tree = treeOf(dirname(dirname(path)))
+    const source = read(path)
+    return {
+      path,
+      version: piAiVersionOf(dirname(dirname(path))),
+      tree,
+      generation: source === undefined ? ('unknown' as GlueGeneration) : glueGeneration(source),
+    }
+  })
+  const inHostTree = (row: { tree: string }): boolean => options.hostTree !== undefined && row.tree === options.hostTree
+  const matches = (row: { generation: GlueGeneration }): boolean => options.hostGeneration !== 'unknown' && row.generation === options.hostGeneration
+  const pick = (reason: SourceBundle['reason'], test: (row: (typeof described)[number]) => boolean): SourceBundle | undefined => {
+    const hit = described.find(test)
+    return hit === undefined ? undefined : { ...hit, reason }
+  }
+  return pick('host-tree+generation', (row) => inHostTree(row) && matches(row))
+    ?? pick('generation', matches)
+    ?? pick('host-tree', inHostTree)
+    ?? { ...described[0]!, reason: 'first' }
+}
+
+/**
+ * 官方 llm-pi-ai bundle 的实际位置（宿主真正会加载的那份）。
+ *
+ * 路径不写死：桌面端先看 Electron 自带的 `app.asar`，再看 profile 的 node_modules 与 dsh
+ * 安装树，最后是插件自己；拿到候选后按「宿主那棵树 + 胶水代次」挑（见
+ * {@link chooseSourceBundle}）。
+ */
+export function resolveSourceBundle(env: HostEnv = currentHostEnv()): SourceBundle | undefined {
+  const hostTree = hostDshTree(env)
+  const hostGeneration = dshGeneration(hostTree === undefined ? undefined : piAiVersionOf(join(hostTree, 'node_modules', '@deepseek-ai', 'dsh')))
+  return chooseSourceBundle(hostPackageEntries('@deepseek-ai/dsh-llm-pi-ai', env), { ...(hostTree === undefined ? {} : { hostTree }), hostGeneration })
 }
 
 /**
@@ -206,9 +391,9 @@ function findSourceBundle(): string | undefined {
  * 那份，dsh 把 bundle 放在哪、依赖提升到哪一层都不影响。
  * @param bundlePath - 官方 bundle 的入口文件路径。
  */
-function dshPiAiRoot(bundlePath: string | undefined): string | undefined {
-  if (bundlePath === undefined) return undefined
-  return resolvePackageRoot(bundlePath, '@earendil-works/pi-ai')
+function dshPiAiRoot(bundle: SourceBundle | undefined): string | undefined {
+  if (bundle === undefined) return undefined
+  return resolvePackageRoot(bundle.path, '@earendil-works/pi-ai')
 }
 
 /**
@@ -239,7 +424,7 @@ export function activePiAiRoot(): string | undefined {
   const newest = versions[versions.length - 1]
   if (newest !== undefined) return join(piAiVersionsDir, newest)
   if (existsSync(pluginDependencyRoot())) return pluginDependencyRoot()
-  return dshPiAiRoot(findSourceBundle())
+  return dshPiAiRoot(resolveSourceBundle())
 }
 
 /** 读一个 pi-ai 包的版本号；读不到返回 undefined。 */
@@ -400,7 +585,7 @@ export function piAiCandidates(): PiAiCandidate[] {
     root: dependency,
     link: false,
   }
-  const dshRoot = dshPiAiRoot(findSourceBundle())
+  const dshRoot = dshPiAiRoot(resolveSourceBundle())
   const dshCandidate: PiAiCandidate | undefined = dshRoot === undefined
     ? undefined
     : { key: 'dsh', version: piAiVersionOf(dshRoot) ?? 'dsh 自带', root: dshRoot, link: true }
@@ -473,16 +658,20 @@ export function updateStatus(patch: AnyRecord): void {
  */
 export function loadBridge(): BridgeLoadResult {
   try {
-    const srcBundle = findSourceBundle()
+    const srcBundle = resolveSourceBundle()
     if (srcBundle === undefined) {
-      return { ok: false, error: '找不到官方 llm-pi-ai bundle：profile 的 node_modules 与 dsh 安装目录里都没有 @deepseek-ai/dsh-llm-pi-ai' }
+      return { ok: false, error: '找不到官方 llm-pi-ai bundle：app.asar、profile 的 node_modules 与 dsh 安装目录里都没有 @deepseek-ai/dsh-llm-pi-ai' }
     }
 
     // 1. 桥接目录：bundle 副本（源更新过就重拷）+ 固定 package.json
     mkdirSync(join(bridgeDir, 'lib'), { recursive: true })
+    // 换了一份源（比如从 CLI 安装树换到 app.asar 里那份）就必须重拷：asar 里的文件 mtime
+    // 可能读成 0，光比时间戳会留下旧副本，那正是「胶水层与宿主对不上」的老毛病。
+    const previousBundle = readStatus()['bundlePath']
     const needsCopy = !existsSync(bridgeLib)
-      || statSync(srcBundle).mtimeMs > statSync(bridgeLib).mtimeMs
-    if (needsCopy) copyFileSync(srcBundle, bridgeLib)
+      || previousBundle !== srcBundle.path
+      || statSync(srcBundle.path).mtimeMs > statSync(bridgeLib).mtimeMs
+    if (needsCopy) copyFileSync(srcBundle.path, bridgeLib)
     writeFileSync(join(bridgeDir, 'package.json'), BRIDGE_PACKAGE_JSON)
 
     // 2. 挑一份能用的 pi-ai：候选按优先级排（热更新的新→旧 → 插件自带依赖 → dsh 自带），
@@ -523,14 +712,29 @@ export function loadBridge(): BridgeLoadResult {
     const plugin = require(bridgeLib) as BridgePluginModule
 
     activeRoot = chosen.root
+    const bundleTree = treeLabel(srcBundle.tree)
     writeStatus({
       piAiVersion: chosen.version,
       needsRestart: false,
       piAiSource: chosen.key,
+      bundleVersion: srcBundle.version,
+      bundlePath: srcBundle.path,
+      bundleTree,
+      bundleGeneration: srcBundle.generation,
+      bundleReason: srcBundle.reason,
       probeUnverified: probeUnverified || undefined,
       ...(rejected.length === 0 ? { rejected: undefined } : { rejected }),
     })
-    return { ok: true, plugin, piAiVersion: chosen.version, piAiSource: chosen.key, probeUnverified, rejected }
+    return {
+      ok: true,
+      plugin,
+      piAiVersion: chosen.version,
+      piAiSource: chosen.key,
+      bundleVersion: srcBundle.version,
+      bundleTree,
+      probeUnverified,
+      rejected,
+    }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }

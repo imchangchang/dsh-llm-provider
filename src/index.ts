@@ -200,7 +200,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         bridge.plugin.apply(ctx, configWithProviders(config, () => providerView().bridgeProviders))
         bridgeMountError = undefined
         bridgeMounted = true
-        logSafely('info', `llm bridge active on pi-ai ${bridge.piAiVersion}；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
+        logSafely('info', `llm bridge active on pi-ai ${bridge.piAiVersion}；胶水层 ${LEGACY_NS} bundle ${bridge.bundleVersion ?? '未知'}（来自 ${bridge.bundleTree}）；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
         for (const warning of view.warnings) logSafely('warn', warning)
       } catch (error) {
         // 官方行没关干净（见 official-rows.ts）、或上游改了什么，都会在这里抛。只降级：
@@ -591,6 +591,10 @@ export function apply(ctx: PluginContext, config: unknown): void {
                 piAiVersion: bridge.piAiVersion,
                 // 用的是哪一档：热更新下来的版本号 / 'dependency'（内置依赖）/ 'dsh'（dsh 自带）
                 source: bridge.piAiSource,
+                // 拷来挂的那份官方 bundle（胶水层）：版本 + 来自哪棵树（app.asar / profile / dsh-install）。
+                // 桌面端与 CLI 安装树里的这份**不是同一版**，pi-ai 也跟着不同，出问题时先看这两个值。
+                bundleVersion: bridge.bundleVersion,
+                bundleTree: bridge.bundleTree,
                 // 体检没过、被跳过的候选——有回退就列在这里
                 rejected: bridge.rejected,
                 // 需求没解析出来、体检没跑：选中项没被验证过，界面上要标出来

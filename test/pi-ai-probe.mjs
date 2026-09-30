@@ -3,10 +3,22 @@
 // 两件事：能不能从 bundle 源码里读出它对 pi-ai 的 import 需求；体检能不能挡住
 // 不兼容的候选——尤其是"先体检一个坏的、再体检一个好的"这种组合，因为 Node 对
 // 加载失败的 ESM 会留下半初始化记录，探针目录要是共用一条 URL，第二个必然误判成失败。
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { orderCandidates, piAiCandidates, piAiRequirements, probePiAi } from '../lib/bridge.js'
+import {
+  chooseSourceBundle,
+  dshGeneration,
+  glueGeneration,
+  hostAnchors,
+  hostDshTree,
+  hostPackageEntries,
+  orderCandidates,
+  piAiCandidates,
+  piAiRequirements,
+  probePiAi,
+  resolveSourceBundle,
+} from '../lib/bridge.js'
 
 let failures = 0
 function check(name, cond) {
@@ -111,5 +123,76 @@ check('本机版本读不出（占位串）时不参与比较',
 check('没有本机档时下载档照旧在前', keysOf(orderCandidates([dl('0.85.1')], [])) === '0.85.1')
 check('本机两份的相对顺序不变（依赖在前）', keysOf(orderCandidates([], [dep, dsh])) === 'dependency,dsh')
 
+// ---- 官方 bundle（胶水层）的挑法：宿主跑哪棵树，就用哪棵树里那份 ----
+// 实测的背景：Desktop 的宿主跑 app.asar 里那份（dsh 0.2.0-rc.2 + pi-ai 0.87.1），而 CLI 安装树里
+// 还躺着 0.1.6-alpha.2 + pi-ai 0.85.1。按路径顺序先撞上 CLI 的，就会拿 0.1.x 胶水挂 0.2.x 宿主，
+// pi-ai 也跟着串成 0.85.1——用户看到的是「模型 id 突然对不上」（deepseek-flash vs deepseek-v4-flash）。
+
+check('胶水代次：有 installSection 的是 0.1.x 胶水', glueGeneration('x.installSection(y)') === 'legacy')
+check('胶水代次：有 settings.configure 的是 0.2.x 胶水', glueGeneration('x.settings.configure({})') === 'modern')
+check('胶水代次：都认不出就是 unknown', glueGeneration('whatever') === 'unknown')
+check('宿主代次：0.1.x → legacy', dshGeneration('0.1.6-alpha.2') === 'legacy')
+check('宿主代次：0.2.x → modern', dshGeneration('0.2.0-rc.2') === 'modern')
+check('宿主代次：读不到版本 → unknown', dshGeneration(undefined) === 'unknown')
+
+// 锚点：Electron 下 app.asar 必须排最前
+const withElectron = hostAnchors({ resourcesPath: '/R', execPath: '/R/App', pluginRoot: '/P', dshHome: '/H' })
+check('Electron 下 app.asar 锚点排最前', withElectron[0].indexOf('app.asar') !== -1 && withElectron[0].startsWith('/R'))
+check('Electron 下 app.asar.unpacked 也在前面', withElectron[1].indexOf('app.asar.unpacked') !== -1)
+check('非 Electron 不带 app.asar 锚点',
+  hostAnchors({ execPath: '/usr/bin/node', pluginRoot: '/P', dshHome: '/H' }).every((a) => a.indexOf('app.asar') === -1))
+
+// 纯函数：候选挑法
+const desc = (path, generation) => ({ path, generation })
+const readOf = (map) => (path) => map[path]
+const hostTree = '/HOST'
+const modernPath = '/HOST/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js'
+const legacyPath = '/CLI/lib/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js'
+const read = readOf({
+  [modernPath]: 'settings.configure({})',
+  [legacyPath]: 'settings.installSection(ctx, NS, Config, config, {})',
+})
+check('宿主树 + 代次都对的排最前',
+  chooseSourceBundle([legacyPath, modernPath], { hostTree, hostGeneration: 'modern', read })?.reason === 'host-tree+generation')
+check('宿主树里那份代次不对时，退而选代次对的那份（这次的串台 bug 就是这条）', (() => {
+  const chosen = chooseSourceBundle([legacyPath, modernPath], { hostTree: '/CLI-TREE', hostGeneration: 'modern', read })
+  return chosen?.path === modernPath && chosen.reason === 'generation'
+})())
+check('代次认不出来时优先宿主树里那份',
+  chooseSourceBundle([legacyPath, modernPath], { hostTree, hostGeneration: 'unknown', read })?.reason === 'host-tree')
+check('什么都不匹配就用第一个（与改造前一致）',
+  chooseSourceBundle([legacyPath], { hostGeneration: 'modern', read })?.reason === 'first')
+check('没有候选就是 undefined', chooseSourceBundle([], { hostGeneration: 'modern', read }) === undefined)
+
+// 端到端：拿真实文件系统搭一份「app.asar（0.2.x）+ CLI 树（0.1.x）」，看选中谁
+const root = mkdtempSync(join(tmpdir(), 'dsh-glue-'))
+try {
+  const write = (path, text) => { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, text) }
+  // app.asar 那棵：dsh 0.2.0-rc.2 + modern 胶水
+  write(join(root, 'app.asar/dsh/node_modules/@deepseek-ai/dsh/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.0-rc.2' }))
+  write(join(root, 'app.asar/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-llm-pi-ai', version: '0.2.0-rc.2' }))
+  write(join(root, 'app.asar/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js'), 'child.settings.configure({ auto: false }, ctx.fiber)\n')
+  // CLI 那棵：dsh 0.1.6-alpha.2 + legacy 胶水
+  write(join(root, 'cli/lib/node_modules/@deepseek-ai/dsh/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.6-alpha.2' }))
+  write(join(root, 'cli/lib/node_modules/@deepseek-ai/dsh-llm-pi-ai/package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-llm-pi-ai', version: '0.1.6-alpha.2' }))
+  write(join(root, 'cli/lib/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js'), 'settings.installSection(ctx, NS, Config, config, {})\n')
+  const env = { resourcesPath: root, execPath: join(root, 'cli/bin/node'), pluginRoot: join(root, 'plugin'), dshHome: join(root, 'home') }
+  check('宿主树判成 app.asar 那棵', hostDshTree(env) === join(root, 'app.asar/dsh'))
+  check('候选里两个都在，asar 的排最前',
+    hostPackageEntries('@deepseek-ai/dsh-llm-pi-ai', env)[0] === join(root, 'app.asar/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js'))
+  const picked = resolveSourceBundle(env)
+  check('Electron 下选中 app.asar 那份（0.2.0-rc.2 胶水）',
+    picked?.path === join(root, 'app.asar/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js') && picked?.version === '0.2.0-rc.2')
+  check('选中理由带上了宿主树+代次', picked?.reason === 'host-tree+generation')
+  // 不带 resourcesPath（普通 CLI 启动）：就该用 CLI 那棵里的
+  const cliEnv = { execPath: join(root, 'cli/bin/node'), pluginRoot: join(root, 'plugin'), dshHome: join(root, 'home') }
+  const cliPicked = resolveSourceBundle(cliEnv)
+  check('CLI 启动下选中安装树那份（0.1.6-alpha.2 胶水）', cliPicked?.version === '0.1.6-alpha.2')
+} finally {
+  rmSync(root, { recursive: true, force: true })
+}
+
+
 console.log(failures === 0 ? '\npi-ai 体检测试全部通过' : `\n${failures} 个失败`)
 process.exit(failures === 0 ? 0 : 1)
+
