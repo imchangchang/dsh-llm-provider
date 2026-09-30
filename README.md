@@ -2,6 +2,8 @@
 
 [中文说明](https://github.com/imchangchang/dsh-llm-provider/blob/main/README.zh.md) · **English**
 
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/imchangchang/dsh-llm-provider)
+
 A plugin for [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh) (DeepSeek Harness). It replaces four entries of dsh's plugin tree — the pi-ai adapter (`llm-pi-ai`), the native DeepSeek adapter (`llm-deepseek`), the model selector (`ui-model-selection`) and the official Models settings page (`ui-settings-models`) — and adds quota lookups and provider management on top.
 
 What you get:

@@ -2,6 +2,8 @@
 
 **中文说明** · [English](https://github.com/imchangchang/dsh-llm-provider/blob/main/README.md)
 
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/imchangchang/dsh-llm-provider)
+
 给 [dsh](https://www.npmjs.com/package/@deepseek-ai/dsh)（DeepSeek Harness）用的插件。它替换 dsh 插件树里的四个条目：pi-ai 适配器（`llm-pi-ai`）、DeepSeek 原生适配器（`llm-deepseek`）、模型选择器（`ui-model-selection`）、官方 Models 设置页（`ui-settings-models`），并在这之上加了额度查询与供应商管理。
 
 四条能力：
