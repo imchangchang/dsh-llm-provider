@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import {
   applyAdapterCapabilities,
   applyDeclaredCapabilities,
+  defaultModelWarning,
   detailKey,
   indexDetails,
   loadModelDetails,
@@ -121,3 +122,25 @@ check('没有 listModels 的 llm 也返回 0', (await applyAdapterCapabilities(i
 
 console.log(failures === 0 ? 'model-details: 全部通过' : `model-details: ${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)
+
+// ---- 默认模型（agent-default-model）与当前目录对不上的警示 ----
+check('默认模型在目录里 → 不警示',
+  defaultModelWarning({ provider: 'deepseek', model: 'deepseek-v4-flash' }, [
+    { provider: 'deepseek', id: 'deepseek-v4-flash' },
+  ]) === undefined)
+check('默认模型不在目录里 → 报警并给出可用的 id', (() => {
+  const text = defaultModelWarning({ provider: 'deepseek', model: 'deepseek-flash' }, [
+    { provider: 'deepseek', id: 'deepseek-v4-flash' },
+    { provider: 'deepseek', id: 'deepseek-v4-pro' },
+    { provider: 'kimi-coding', id: 'kimi-k2' },
+  ])
+  return typeof text === 'string' && text.indexOf('deepseek/deepseek-flash') !== -1
+    && text.indexOf('deepseek-v4-flash') !== -1 && text.indexOf('kimi-coding') === -1
+})())
+check('该 provider 一个模型都没有 → 照样报警，只是不给例子', (() => {
+  const text = defaultModelWarning({ provider: 'ghost', model: 'm' }, [{ provider: 'deepseek', id: 'x' }])
+  return typeof text === 'string' && text.indexOf('ghost/m') !== -1 && text.indexOf('可用') === -1
+})())
+check('读不到默认模型（undefined）→ 不警示', defaultModelWarning(undefined, [{ provider: 'a', id: 'b' }]) === undefined)
+check('默认模型字段不是字符串 → 不警示',
+  defaultModelWarning({ provider: 1, model: null }, [{ provider: 'a', id: 'b' }]) === undefined)

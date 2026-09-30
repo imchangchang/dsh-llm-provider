@@ -30,7 +30,11 @@ import {
   loadModelDetails,
   type DeclaredModelEntry,
   type ModelDetail,
+  defaultModelWarning,
 } from './model-details.js'
+
+/** dsh 里「新会话默认模型」那一行的 id（config 是 `{provider, model, reasoningEffort}`）。 */
+const DEFAULT_MODEL_ROW_ID = 'agent-default-model'
 import { checkAndUpdate, pruneVersions, startBackgroundCheck, vendorUsageAsync } from './updater.js'
 import {
   LEGACY_NS,
@@ -559,6 +563,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
       path: '/provider/status',
       handler: (_req, res) => {
         const { status: bridgeState, updater } = readVendorState()
+        // 预热一次详情，好在界面上报「默认模型在不在当前目录里」（拿到就缓存 30 秒）
+        if (defaultModelWarningText === undefined) void refreshDefaultModelWarning()
         // 诊断：这一插件实际发现了哪些路由（含凭据名，不含值），排查配置问题时最有用
         const llm = service<LlmService>('llm')
         let declaredCount = -1
@@ -591,10 +597,17 @@ export function apply(ctx: PluginContext, config: unknown): void {
                 piAiVersion: bridge.piAiVersion,
                 // 用的是哪一档：热更新下来的版本号 / 'dependency'（内置依赖）/ 'dsh'（dsh 自带）
                 source: bridge.piAiSource,
+                // 生效那份 pi-ai 的包目录与来源（desktop=app.asar / dsh-install / profile / vendor）：
+                // 「dsh 自带」也要分 Desktop 与 CLI，它们是不同副本、版本与模型 id 都可能不同
+                piAiPath: bridge.piAiPath,
+                piAiOrigin: bridge.piAiOrigin,
                 // 拷来挂的那份官方 bundle（胶水层）：版本 + 来自哪棵树（app.asar / profile / dsh-install）。
                 // 桌面端与 CLI 安装树里的这份**不是同一版**，pi-ai 也跟着不同，出问题时先看这两个值。
                 bundleVersion: bridge.bundleVersion,
                 bundleTree: bridge.bundleTree,
+                // 默认模型不在当前 pi-ai 目录里时的警示（新会话一开口就会 UNKNOWN_MODEL）：
+                // 界面上要能提前看见，而不是等发送失败
+                modelWarnings: defaultModelWarningText === undefined ? [] : [defaultModelWarningText],
                 // 体检没过、被跳过的候选——有回退就列在这里
                 rejected: bridge.rejected,
                 // 需求没解析出来、体检没跑：选中项没被验证过，界面上要标出来
@@ -708,6 +721,40 @@ export function apply(ctx: PluginContext, config: unknown): void {
   // 模型详情（悬浮卡 + 能力徽章）：三条链路合并（route 声明 → pi-ai 目录 → 适配器自报），60 秒缓存
   let modelDetailsCache: { at: number, value: ModelDetail[] } | undefined
   let modelDetailsPending: Promise<ModelDetail[]> | undefined
+  /** 默认模型与当前目录对不上的警示（懒算一次，界面上「pi-ai 桥接」里要显示）。 */
+  let defaultModelWarningText: string | undefined
+  /** 30 秒内复用同一份详情，避免每次轮询都去问适配器。 */
+  function ensureModelDetails(): Promise<ModelDetail[]> {
+    if (modelDetailsCache !== undefined && Date.now() - modelDetailsCache.at <= 30_000) {
+      return Promise.resolve(modelDetailsCache.value)
+    }
+    modelDetailsPending ??= buildModelDetails()
+      .then((value) => {
+        modelDetailsCache = { at: Date.now(), value }
+        return value
+      })
+      .finally(() => { modelDetailsPending = undefined })
+    return modelDetailsPending
+  }
+  /** 读 `agent-default-model` 那一行的 config（新会话的默认 provider/model）。 */
+  function defaultModelConfig(): AnyRecord | undefined {
+    try {
+      for (const row of loaderEntries(service<LoaderService>('loader'))) {
+        const options = asRecord(asRecord(row)['options'])
+        if (readString(options['id']) !== DEFAULT_MODEL_ROW_ID) continue
+        const config = asRecord(options['config'])
+        return Object.keys(config).length === 0 ? undefined : config
+      }
+    } catch { /* 读不到就算了，不因为这个报错 */ }
+    return undefined
+  }
+  /** 算一次「默认模型在不在当前目录里」，结果给 /provider/status 用。 */
+  async function refreshDefaultModelWarning(): Promise<void> {
+    try {
+      const details = await ensureModelDetails()
+      defaultModelWarningText = defaultModelWarning(defaultModelConfig(), details)
+    } catch { /* 详情拿不到就不报 */ }
+  }
   /**
    * 合并一次详情：目录 + route 声明 + 适配器自报。
    * 结果按「provider + id」索引建好再摊平成数组下发（客户端也按同一个键查，裸 id 只作兜底）。
@@ -744,15 +791,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
           && !String(req.url ?? '').includes('fresh=1')
         if (!cacheFresh) {
           // 同一个请求窗口里并发进来只跑一次（自报那段要 await 适配器）
-          if (modelDetailsPending === undefined) {
-            modelDetailsPending = buildModelDetails()
-              .then((value) => {
-                modelDetailsCache = { at: Date.now(), value }
-                return value
-              })
-              .finally(() => { modelDetailsPending = undefined })
-          }
-          void modelDetailsPending.then(
+          void ensureModelDetails().then(
             (value) => { json(res, 200, { models: value, fetchedAt: new Date().toISOString() }) },
             () => { json(res, 200, { models: [], fetchedAt: new Date().toISOString() }) },
           )

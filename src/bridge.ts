@@ -70,6 +70,10 @@ export type BridgeLoadResult =
       bundleVersion?: string
       /** 它来自哪棵树（短标签，如 `app.asar` / `profile` / `dsh-install`）。 */
       bundleTree: string
+      /** 生效那份 pi-ai 的包目录（悬浮提示里给出来，方便核对到底加载了哪个副本）。 */
+      piAiPath: string
+      /** 它的来源：`desktop`（app.asar）/ `dsh-install` / `profile` / `vendor` / `plugin`。 */
+      piAiOrigin: string
       /** 需求没解析出来、体检没跑：选中项是靠「目录存在」放行的，没验证过 */
       probeUnverified: boolean
       rejected: RejectedCandidate[]
@@ -320,6 +324,23 @@ export function treeLabel(tree: string, env: HostEnv = currentHostEnv()): string
   if (tree.startsWith(dirname(env.execPath))) return 'dsh-install'
   if (tree === env.pluginRoot) return 'plugin'
   return tree
+}
+
+/**
+ * 生效的那份 pi-ai 来自哪儿（短标签）——`dsh 自带` 也要分 Desktop 与 CLI：
+ * 两者是不同副本，版本可能不同（实测 Desktop 的 app.asar 是 0.87.1、CLI 安装树是 0.85.1，
+ * 连模型 id 都不一样），界面上必须能分辨。
+ *
+ * @param root - pi-ai 包目录。
+ * @param key - 候选的 key（版本号 / 'dependency' / 'dsh'）。
+ * @param env - 环境信号。
+ */
+export function piAiOriginLabel(root: string, key: string, env: HostEnv = currentHostEnv()): string {
+  if (env.resourcesPath !== undefined && root.startsWith(join(env.resourcesPath, 'app.asar'))) return 'desktop'
+  if (root.includes(`${sep}vendor${sep}pi-ai${sep}`)) return 'vendor'
+  if (key === 'dependency') return 'plugin'
+  if (key === 'dsh') return treeLabel(treeOf(root), env)
+  return 'vendor'
 }
 
 /**
@@ -713,6 +734,8 @@ export function loadBridge(): BridgeLoadResult {
 
     activeRoot = chosen.root
     const bundleTree = treeLabel(srcBundle.tree)
+    const piAiPath = chosen.root
+    const piAiOrigin = piAiOriginLabel(chosen.root, chosen.key)
     writeStatus({
       piAiVersion: chosen.version,
       needsRestart: false,
@@ -720,6 +743,8 @@ export function loadBridge(): BridgeLoadResult {
       bundleVersion: srcBundle.version,
       bundlePath: srcBundle.path,
       bundleTree,
+      piAiPath,
+      piAiOrigin,
       bundleGeneration: srcBundle.generation,
       bundleReason: srcBundle.reason,
       probeUnverified: probeUnverified || undefined,
@@ -732,6 +757,8 @@ export function loadBridge(): BridgeLoadResult {
       piAiSource: chosen.key,
       bundleVersion: srcBundle.version,
       bundleTree,
+      piAiPath,
+      piAiOrigin,
       probeUnverified,
       rejected,
     }

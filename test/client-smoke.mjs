@@ -171,7 +171,7 @@ if (contribution.available({ sessionId: 'subagent-1' }) !== false) throw new Err
 if (contribution.available(undefined) !== true) throw new Error('没有会话上下文时不该把 /model 藏掉（照可用处理）')
 
 // ---- 「pi-ai 桥接」标签页的明细行（纯函数，不渲染）----
-const { mergeRequestOf, routeClearedFields, routeProfileOf, routeRepairOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
+const { missingModelNotice, mergeRequestOf, routeClearedFields, routeProfileOf, routeRepairOf, authEntryOf, piAiBridgeRows, piAiUpstreamText, reasoningTextOf, defaultEffortOf, normalizeSelection, effortRowDisabled, parseOauthFrame, isSafeBlankPrompt, dotClass, refreshable, headlineChips, resetCountdownText, modelVisible } = moduleExports
 let failures = 0
 function rowsCheck(name, cond) {
   console.log((cond ? '  ok ' : '  FAIL ') + name)
@@ -587,6 +587,48 @@ rowsCheck('两者都有 → 不算密钥型', authEntryOf(anthropicPreset).onlyA
 rowsCheck('只有 oauth 方法 → 不算密钥型', authEntryOf(codexPreset).onlyApiKey === false)
 rowsCheck('没有 flow → 也不是密钥型', authEntryOf({ id: 'x', label: 'X' }).onlyApiKey === false && authEntryOf({ id: 'x', label: 'X' }).oauth === undefined)
 rowsCheck('预设为空也不炸', authEntryOf(undefined).oauth === undefined)
+
+// ---- pi-ai 版本那一行：路径与 Desktop/CLI 要说清 ----
+// 「dsh 自带」在两个启动方式下是不同副本（Desktop 走 app.asar、命令行走安装树），
+// 版本与模型 id 都可能不同；悬浮提示里给出实际加载的包目录，方便核对。
+const plainPi = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined).find((r) => r.key === 'pi')
+rowsCheck('没给 origin 时仍是旧的「dsh 自带」', plainPi.value.indexOf('dsh 自带') !== -1 && plainPi.value.indexOf('Desktop') === -1)
+const desktopPi = piAiBridgeRows({ active: true, piAiVersion: '0.87.1', source: 'dsh', piAiOrigin: 'desktop', piAiPath: '/Applications/App.app/Contents/Resources/app.asar/dsh/node_modules/@earendil-works/pi-ai' }, undefined).find((r) => r.key === 'pi')
+rowsCheck('Desktop 那份标成「dsh 自带（Desktop）」', desktopPi.value.indexOf('dsh 自带（Desktop）') !== -1)
+rowsCheck('悬浮提示里带出 pi-ai 的包目录', String(desktopPi.title).indexOf('app.asar/dsh/node_modules/@earendil-works/pi-ai') !== -1)
+rowsCheck('悬浮提示里点明 Desktop 与命令行不是同一版', String(desktopPi.title).indexOf('app.asar') !== -1)
+const cliPi = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh', piAiOrigin: 'dsh-install', piAiPath: '/Users/x/.dsh/node-macos-arm64/lib/node_modules/@earendil-works/pi-ai' }, undefined).find((r) => r.key === 'pi')
+rowsCheck('命令行那份标出 dsh-install', cliPi.value.indexOf('dsh 自带（dsh-install）') !== -1)
+rowsCheck('已下载那份照旧是「已下载」', piAiBridgeRows({ active: true, piAiVersion: '0.99.1', source: '0.99.1', piAiOrigin: 'vendor' }, undefined).find((r) => r.key === 'pi').value.indexOf('已下载') !== -1)
+
+// 默认模型与目录对不上：界面上提前报警（不然要等新会话发送失败）
+const warnRows = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh', modelWarnings: ['默认模型 deepseek/deepseek-flash 不在当前 pi-ai 目录里（这个 provider 下可用：deepseek-v4-flash）'] }, undefined)
+const warnLine = warnRows.find((r) => String(r.key).indexOf('model-warn') === 0)
+rowsCheck('默认模型对不上时出一行警示', warnLine !== undefined && warnLine.warn === true)
+rowsCheck('警示里带上可用的模型 id', warnLine !== undefined && warnLine.text.indexOf('deepseek-v4-flash') !== -1)
+rowsCheck('没有 modelWarnings 时不出这行',
+  piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined).every((r) => String(r.key).indexOf('model-warn') !== 0))
+
+// ---- 选择器里提前暴露「当前模型不在目录里」 ----
+// 目录里的模型 id 随 pi-ai 版本变（0.85.1 是 deepseek-v4-flash、0.99.1 是 deepseek-flash），
+// 会话里存的是 id；不提示的话要等发送才报 UNKNOWN_MODEL。
+const noticeGroups = [{ id: 'deepseek', name: 'DeepSeek', models: [
+  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+  { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+] }]
+const missing = missingModelNotice({ provider: 'deepseek', model: 'deepseek-flash' }, noticeGroups)
+rowsCheck('当前模型不在目录里 → 出提示', missing !== undefined && missing.text.indexOf('deepseek/deepseek-flash') !== -1)
+rowsCheck('提示里带上这个 provider 可选的前几个 id',
+  missing !== undefined && missing.title.indexOf('deepseek-v4-flash') !== -1)
+rowsCheck('目录里有这个模型 → 不提示',
+  missingModelNotice({ provider: 'deepseek', model: 'deepseek-v4-pro' }, noticeGroups) === undefined)
+rowsCheck('目录还没加载（空数组）→ 不提示，免得误报',
+  missingModelNotice({ provider: 'deepseek', model: 'deepseek-flash' }, []) === undefined)
+rowsCheck('没有选择 → 不提示', missingModelNotice(undefined, noticeGroups) === undefined)
+rowsCheck('provider/model 不是字符串 → 不提示',
+  missingModelNotice({ provider: 1, model: 'x' }, noticeGroups) === undefined)
+rowsCheck('provider 不存在时也给提示（说明往哪切）',
+  missingModelNotice({ provider: 'ghost', model: 'm' }, noticeGroups) !== undefined)
 
 // ---- 写进 settings 的路由配置：OAuth 授权过的不带 apiKeyEnv ----
 // 官方适配器看到 apiKeyEnv 就只认那个 ref，取不到值直接抛 MISSING_CREDENTIAL——

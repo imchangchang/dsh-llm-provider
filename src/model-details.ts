@@ -303,3 +303,30 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, onTimeout?: () =>
     if (timer !== undefined) clearTimeout(timer)
   }
 }
+
+/**
+ * 默认模型（`agent-default-model` 那一行）不在当前 pi-ai 目录里时的警示（纯函数，离线可测）。
+ *
+ * 目录里的模型 id 随 pi-ai 版本变（0.85.1 是 `deepseek-v4-flash`、0.99.1 是 `deepseek-flash`），
+ * 而默认模型存的是 id 字符串。对不上时新会话一开口就 `UNKNOWN_MODEL`，所以启动时就说清，
+ * 别等用户发消息才发现。
+ *
+ * @param defaultModel - 默认模型那一行的 config（`{provider, model}`）。
+ * @param details - 当前目录+声明+适配器合并后的模型详情。
+ * @returns 一行警示文案；模型在目录里、或读不到默认模型时返回 undefined。
+ */
+export function defaultModelWarning(
+  defaultModel: { provider?: unknown, model?: unknown } | undefined,
+  details: readonly ModelDetail[],
+): string | undefined {
+  if (defaultModel === undefined) return undefined
+  const provider = typeof defaultModel.provider === 'string' ? defaultModel.provider : ''
+  const model = typeof defaultModel.model === 'string' ? defaultModel.model : ''
+  if (provider === '' || model === '') return undefined
+  if (details.some((entry) => entry.provider === provider && entry.id === model)) return undefined
+  const sameProvider = details.filter((entry) => entry.provider === provider).map((entry) => entry.id)
+  const examples = sameProvider.slice(0, 3)
+  return `默认模型 ${provider}/${model} 不在当前 pi-ai 目录里`
+    + (examples.length === 0 ? '' : `（这个 provider 下可用：${examples.join('、')}）`)
+    + '；新会话会直接报 UNKNOWN_MODEL'
+}

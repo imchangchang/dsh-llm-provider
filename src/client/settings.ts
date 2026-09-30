@@ -156,17 +156,28 @@ export function mergeRequestOf(routeId: string, value: AnyRecord, unsets: string
   return body
 }
 
-/** 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'。 */
-function piAiSourceLabel(source: unknown): string {
+/**
+ * 当前用的是哪一档 pi-ai。宿主报的 source：版本号 / 'dependency' / 'dsh'；
+ * origin 进一步说明「dsh 自带」是哪一份（Desktop 走 app.asar，命令行走安装树，两者不是同一副本）。
+ */
+function piAiSourceLabel(source: unknown, origin?: unknown): string {
   if (source === 'dependency') return '兜底依赖'
-  if (source === 'dsh') return 'dsh 自带'
+  if (source === 'dsh') {
+    if (origin === 'desktop') return 'dsh 自带（Desktop）'
+    if (typeof origin === 'string' && origin !== '') return 'dsh 自带（' + origin + '）'
+    return 'dsh 自带'
+  }
   return '已下载'
 }
 
-function piAiSourceHint(source: unknown): string {
-  if (source === 'dependency') return '插件 vendor/ 下手动安装的兜底版本（可选档；没装就会落到 dsh 自带那份）'
-  if (source === 'dsh') return 'dsh 自己装的那份 pi-ai，版本随 dsh 发布走（不一定比上游旧）'
-  return '按需下载并验证过的版本，放在 vendor/pi-ai/<版本>/；换版本需重启 dsh'
+function piAiSourceHint(source: unknown, origin?: unknown, path?: unknown): string {
+  var base
+  if (source === 'dependency') base = '插件 vendor/ 下手动安装的兜底版本（可选档；没装就会落到 dsh 自带那份）'
+  else if (source === 'dsh') base = 'dsh 自己装的那份 pi-ai，版本随 dsh 发布走（不一定比上游旧）'
+  else base = '按需下载并验证过的版本，放在 vendor/pi-ai/<版本>/；换版本需重启 dsh'
+  if (source === 'dsh' && origin === 'desktop') base += '。Desktop 用的是 app 自带那份（app.asar 里），与命令行安装树里的可能不是同一版'
+  if (typeof path === 'string' && path !== '') base += '。加载的包目录：' + path
+  return base
 }
 
 /**
@@ -188,8 +199,9 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
   rows.push({
     key: 'pi',
     text: '当前 pi-ai 版本',
-    value: String(bridgeRecord.piAiVersion) + '（' + piAiSourceLabel(bridgeRecord.source) + '）',
-    title: piAiSourceHint(bridgeRecord.source),
+    value: String(bridgeRecord.piAiVersion) + '（'
+      + piAiSourceLabel(bridgeRecord.source, bridgeRecord.piAiOrigin) + '）',
+    title: piAiSourceHint(bridgeRecord.source, bridgeRecord.piAiOrigin, bridgeRecord.piAiPath),
   })
   // 拷来挂的那份官方 bundle（胶水层）。它和 pi-ai 一样会因「从哪启动」而不同：桌面端用
   // app.asar 里那份，CLI 用安装树里那份，两边版本可能不一样、模型 id 也跟着不一样——
@@ -204,6 +216,12 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
       title: '官方 @deepseek-ai/dsh-llm-pi-ai 的副本，桥接就是把它的 pi-ai 换成我们维护的那份。'
         + '桌面端（app.asar）与 CLI 安装树里的这份版本可能不同，模型 id 也会跟着不同。',
     })
+  }
+  // 默认模型不在当前 pi-ai 目录里（模型 id 会随 pi-ai 版本变）：新会话一开口就 UNKNOWN_MODEL，
+  // 提前在这里说清，并提供可选的 id
+  var modelWarnings = Array.isArray(bridgeRecord.modelWarnings) ? bridgeRecord.modelWarnings : []
+  for (var mw = 0; mw < modelWarnings.length; mw += 1) {
+    rows.push({ key: 'model-warn-' + mw, text: String(modelWarnings[mw]), value: '看原因', title: String(modelWarnings[mw]), warn: true })
   }
   // 体检没执行（bundle 的 import 需求解析不出）：这份 pi-ai 是靠「目录存在」放行的，没验证过
   if (bridgeRecord.probeUnverified === true) {
