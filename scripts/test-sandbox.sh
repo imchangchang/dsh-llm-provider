@@ -5,6 +5,9 @@
 #   scripts/test-sandbox.sh url   [--name <slug>]
 #   scripts/test-sandbox.sh clean [--name <slug>] [--all] [--deep]
 #
+# 端口：--port 显式指定；不给就在 10000-19999 里由沙箱名字定起点、向后找空闲位，
+# 多个沙箱并行起不冲突，同一个沙箱重启端口保持不变。
+#
 # 沙箱目录 test/sandbox/<slug>/（已 gitignore）里是这个实例的全部痕迹：
 #   home/      充当 DSH_HOME 的数据目录（profile、settings、凭据都在这里面）
 #   cli/       传了 --dsh-version 时 npm 装进来的那份 dsh
@@ -26,14 +29,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SANDBOX_ROOT="$PROJECT_ROOT/test/sandbox"
-DEFAULT_PORT=3091
+# 测试端口统一落在 10000-19999：避开 dsh/profile 常用的 3xxx 段，也在系统临时端口
+# （macOS 49152 起）之下，不会被自发连接抢走。默认由沙箱名字决定起点、向后找空闲位，
+# 多个沙箱并行起不冲突；--port 仍可显式指定。
+PORT_MIN=10000
+PORT_MAX=19999
 HOST_DSH_HOME="$HOME/.dsh"
 
 die()  { echo "test-sandbox: $*" >&2; exit 1; }
 info() { echo "test-sandbox: $*"; }
 
 usage() {
-  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -51,6 +58,23 @@ default_slug() {
     agent/*)        printf '%s' "${branch#agent/}" ;;
     *)              printf '%s' "$branch" ;;
   esac
+}
+
+# 挑空闲端口：起点由沙箱名字的校验和决定（同名字 → 同起点 → 重启端口稳定），
+# 被占就向后线性扫描绕一圈。只认 LISTEN，浏览器握着的客户端连接不算占用。
+pick_free_port() {
+  local slug="$1"
+  local span=$((PORT_MAX - PORT_MIN + 1))
+  local base=$((PORT_MIN + $(printf '%s' "$slug" | cksum | awk -v span="$span" '{print $1 % span}') ))
+  local i p
+  for i in $(seq 0 $((span - 1))); do
+    p=$((PORT_MIN + (base - PORT_MIN + i) % span))
+    if [ -z "$(lsof -ti tcp:$p -sTCP:LISTEN 2>/dev/null || true)" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  die "$PORT_MIN-$PORT_MAX 里挑不出空闲端口"
 }
 
 # 删沙箱前先确认目标确实在 test/sandbox/ 底下
@@ -104,7 +128,7 @@ copy_once() { # <来源> <目的地>：来源存在且目的地还没有才拷
 # ---------------------------------------------------------------- up
 
 cmd_up() {
-  local slug="" port="$DEFAULT_PORT" version="" open=1 fresh=0
+  local slug="" port="" version="" open=1 fresh=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --name)        slug="$2"; shift 2 ;;
@@ -118,6 +142,9 @@ cmd_up() {
   [ -n "$slug" ] || slug="$(default_slug)"
   slug="$(sanitize_slug "$slug")"
   [ -n "$slug" ] || die "沙箱名字是空的，用 --name 指定一个"
+  [ -z "$port" ] || case "$port" in
+    ''|*[!0-9]*) die "--port 要数字，收到：$port" ;;
+  esac
 
   local sandbox="$SANDBOX_ROOT/$slug"
   local sandbox_home="$sandbox/home"
@@ -131,6 +158,14 @@ cmd_up() {
 
   # 重启语义（跟 test-profile.sh 一致）：保证拿到新令牌、加载刚构建的 lib/
   stop_sandbox "$sandbox"
+
+  # 没显式给端口就自动挑：名字定起点、向后扫空闲位（并行起多个沙箱互不冲突，
+  # 同一个沙箱重启端口保持稳定）。必须放在 stop_sandbox 之后——旧实例还占着
+  # 端口时挑选会顺延一位，重启就换端口了。
+  if [ -z "$port" ]; then
+    port="$(pick_free_port "$slug")"
+    info "自动挑端口：${port}（10000-19999 内空闲，名字定起点）"
+  fi
 
   # 选 dsh 可执行：指定版本就装进沙箱 cli/，否则用 PATH 上那份
   local dsh_bin
