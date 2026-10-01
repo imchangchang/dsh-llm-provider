@@ -19,6 +19,8 @@
 # 隔离原理：启动时给 dsh 进程设 DSH_HOME=<沙箱>/home。dsh-home-paths 解析 home 的
 # 优先级是「显式配置 > $DSH_HOME > 默认 ~/.dsh」，profile-boot 的注释也写明
 # DSH_HOME 就是留给测试/启动器设的——所以 ~/.dsh 一个字节都不会被写。
+# npm/pnpm 同样独立：用户配置、缓存、store 全在沙箱里（见 cmd_up 开头的 export），
+# 宿主的 ~/.npmrc、npm 缓存、pnpm 元数据缓存一概不借用。
 #
 # 宿主配置的拷入策略：.credentials.yaml（API key 与登录态）和 settings.yaml 只在
 # 沙箱里还没有时才拷，之后测试期间在沙箱里的改动（比如新登录的凭据）不会被
@@ -193,6 +195,21 @@ cmd_up() {
     port="$(pick_free_port "$slug")"
     info "自动挑端口：${port}（10000-19999 内空闲，名字定起点）"
   fi
+
+  # 沙箱独立的 npm/pnpm 环境：把 HOME 整体指进沙箱目录。pnpm/npm 的用户配置（.npmrc）、
+  # 下载缓存（macOS ~/Library/Caches/pnpm、~/.npm）、包 store（~/Library/pnpm）的默认落点
+  # 全部由 HOME 派生，指进去之后宿主同名目录一概不借用。不隔离的后果是实测过的：宿主
+  # pnpm 元数据缓存过期时，沙箱里装 @alpha 会拿到旧版本，测试结论被宿主机污染。
+  # HOME 只对本函数启动的 npm/dsh 子进程生效；dsh 的数据目录由 DSH_HOME 决定，不受影响。
+  # 随 clean 一起焚毁。XDG_CACHE_HOME/XDG_DATA_HOME 一并指进去，照顾 Linux CI 上 pnpm 的落点。
+  local npm_env_dir="$sandbox/npm"
+  mkdir -p "$npm_env_dir/home" "$npm_env_dir/cache"
+  : > "$npm_env_dir/npmrc"   # 空用户配置：宿主 ~/.npmrc 的镜像、令牌一概不带入
+  export HOME="$npm_env_dir/home"
+  export XDG_CACHE_HOME="$npm_env_dir/home/.cache"
+  export XDG_DATA_HOME="$npm_env_dir/home/.local/share"
+  export NPM_CONFIG_USERCONFIG="$npm_env_dir/npmrc"
+  export NPM_CONFIG_CACHE="$npm_env_dir/cache"
 
   # 选 dsh 可执行：指定版本就装进沙箱 cli/，否则用 PATH 上那份
   local dsh_bin
