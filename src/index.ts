@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { activePiAiRoot, activePiAiVersion, loadBridge, reloadBridge, vendorDir, type BridgePluginModule } from './bridge.js'
+import { activePiAiRoot, activePiAiVersion, commitBridgeState, loadBridge, reloadBridge, vendorDir, type BridgePluginModule } from './bridge.js'
 import {
   applyAdapterCapabilities,
   applyDeclaredCapabilities,
@@ -81,6 +81,18 @@ import {
 
 /** 桥接装载在模块加载期完成（loader 要同步读 Config）。失败则退化为纯计费模式。 */
 const bridge = loadBridge()
+
+/**
+ * 当前生效的桥接信息（热切换后会更新）。
+ *
+ * 放模块级而不是 apply 闭包里：0.2.x 上第一次写配置会整挂重载插件，apply 里的局部量会丢、
+ * 桥接会悄悄回到插件启动时那份 pi-ai；模块按路径缓存，模块级变量跨重挂保持，
+ * 热切换过的那份才不会被悄悄撤销。
+ */
+let liveBridge: Extract<typeof bridge, { ok: true }> | undefined = bridge.ok ? bridge : undefined
+
+/** 桥接挂载/卸载只能一次一个（volatile 重挂与手动切换可能并发，双击切换也一样）。 */
+let bridgeSwapInFlight = false
 
 export const name = 'provider'
 
@@ -187,12 +199,50 @@ export function apply(ctx: PluginContext, config: unknown): void {
    * 所以 glue 的 `settingsNs` 语义不变。
    */
   let bridgeFiber: { dispose?: () => unknown } | undefined
-  /** 当前生效的桥接信息（热切换后会更新，/provider/status 要报最新的那份）。 */
-  let liveBridge: Extract<typeof bridge, { ok: true }> | undefined = bridge.ok ? bridge : undefined
   /** 交给 bundle 的 config：providers 是活值访问器（每次读都重新合并）。 */
   function shimConfig(): AnyRecord {
     return configWithProviders(config, () => providerView().bridgeProviders)
   }
+  /** 把当前生效的桥接模块重挂一遍（不换 pi-ai）：dispose 旧 fiber、挂回同一个模块。
+   *
+   * 0.2.x 上写本插件条目的 config 走 volatile 快路径（不重挂插件）：事件到不了挂在子 fiber
+   * 里的官方 bundle 自己的 listener（cordis 的 filter 是 owner.fiber === fiber），路由集合的
+   * 增删不会自动重注册——add 一个 provider 之后不重启就聊天会撞 NO_ADAPTER（宿主交互层复核
+   * 实测确认）。dispose 会注销旧注册，挂上后按当前 config 重新声明，路由集合才对得上。
+   */
+  async function remountBridge(): Promise<void> {
+    if (bridgeSwapInFlight) return
+    bridgeSwapInFlight = true
+    try {
+      await remountBridgeLocked()
+    } finally {
+      bridgeSwapInFlight = false
+    }
+  }
+
+  async function remountBridgeLocked(): Promise<void> {
+    const plugin = liveBridge?.plugin ?? (bridge.ok ? bridge.plugin : undefined)
+    if (plugin === undefined) return
+    try {
+      const fiber = bridgeFiber
+      bridgeFiber = undefined
+      if (fiber !== undefined && typeof fiber.dispose === 'function') await Promise.resolve(fiber.dispose())
+    } catch (error) {
+      logSafely('warn', `重挂桥接前卸掉旧 fiber 失败，保持现状：${messageOf(error)}`)
+      return
+    }
+    try {
+      await mountBridgePlugin(plugin)
+      bridgeMounted = true
+      bridgeMountError = undefined
+      logSafely('info', 'llm bridge 已按 volatile 更新重挂')
+    } catch (error) {
+      bridgeMounted = false
+      bridgeMountError = messageOf(error)
+      logSafely('error', `volatile 更新后重挂桥接失败：${bridgeMountError}`)
+    }
+  }
+
   /** 把一份 bridge 模块挂成一个可销毁的子 fiber；返回 thenable——**调用方必须 await**。
    *
    * cordis 两代（0.2.x 的 4.0.4 与 0.1.x 的 1.0.3）都把插件回调推迟到微任务里执行，回调抛的错
@@ -230,8 +280,9 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // 合并结果（写少了等于用户那批路由全丢）。见 bridgeProviders 的注释。
     const mountBridge = async (): Promise<void> => {
       try {
-        // await 是必要的：只有它才能把 fiber 里吞掉的 apply 期错误 rethrow 出来
-        await mountBridgePlugin(bridge.plugin)
+        // await 是必要的：只有它才能把 fiber 里吞掉的 apply 期错误 rethrow 出来；
+        // 挂「当前生效的那份」：热切换过之后整挂重载也不能悄悄回到插件启动时那份
+        await mountBridgePlugin(liveBridge?.plugin ?? bridge.plugin)
         bridgeMountError = undefined
         bridgeMounted = true
         logSafely('info', `llm bridge active on pi-ai ${bridge.piAiVersion}；胶水层 ${LEGACY_NS} bundle ${bridge.bundleVersion ?? '未知'}（来自 ${bridge.bundleTree}）；providers 来源 ${view.mode}（自带条目 ${String(view.ownCount)} / ${LEGACY_NS} 段 ${String(view.legacyCount)} / 内置 ${String(view.builtinCount)}）`)
@@ -249,6 +300,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // （Loader 按列表顺序同步求值，而本插件的行是 insert 追加的、排在最后），官方行这时还开着。
     // 这里补一刀：在本进程里把它们关掉（不写回文件），等注销落定再挂桥接，否则会撞
     // `LlmError: configurable provider "..." is already declared`，整个插件条目激活失败。
+    // 0.2.x 上第二次起的写配置走 volatile 快路径：官方 bundle 自己的 listener 在子 fiber 里
+    // 收不到（filter 是 owner.fiber === fiber），路由增删不重注册。在我们自己的 fiber 上接住、
+    // 把桥接重挂一遍——dispose 注销旧注册、挂上后按当前 config 重新声明。
+    ;(ctx as unknown as { on: (event: string, listener: (...args: unknown[]) => void) => unknown })
+      .on('loader/volatile-update', () => { void remountBridge() })
+
     const loader = service<LoaderService>('loader')
     const takeover = disableOfficialRows(loaderEntries(loader))
     if (takeover.closed.length === 0) void mountBridge()
@@ -303,6 +360,16 @@ export function apply(ctx: PluginContext, config: unknown): void {
    * 回滚也失败时只把原因记进 bridgeMountError，界面上照实说（此时确实没有桥接）。
    */
   async function swapBridge(): Promise<{ ok: boolean, version?: string, error?: string }> {
+    if (bridgeSwapInFlight) return { ok: false, error: '上一次切换还在进行中' }
+    bridgeSwapInFlight = true
+    try {
+      return await swapBridgeLocked()
+    } finally {
+      bridgeSwapInFlight = false
+    }
+  }
+
+  async function swapBridgeLocked(): Promise<{ ok: boolean, version?: string, error?: string }> {
     if (!bridge.ok) return { ok: false, error: '桥接当前不可用（插件启动时就没挂上）' }
     // 回滚要挂回**当前正跑着的那份**（可能是之前切换过的），不是插件启动时那份
     const previous = liveBridge?.plugin ?? bridge.plugin
@@ -325,6 +392,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
       liveBridge = next
       bridgeMountError = undefined
       bridgeMounted = true
+      // 挂载成功之后才把这次切换落盘：reloadBridge 提前不写，免得失败/回滚后状态文件跟实际不符
+      commitBridgeState(next)
       logSafely('info', `llm bridge 已就地切到 pi-ai ${next.piAiVersion}（${next.piAiSource}），无需重启`)
       return { ok: true, version: next.piAiVersion }
     } catch (error) {
