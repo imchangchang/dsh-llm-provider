@@ -146,7 +146,7 @@ copy_once() { # <来源> <目的地>：来源存在且目的地还没有才拷
 # ---------------------------------------------------------------- up
 
 cmd_up() {
-  local slug="" port="" version="" open=1 fresh=0
+  local slug="" port="" version="" open=1 fresh=0 install_spec=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --name)        slug="$2"; shift 2 ;;
@@ -154,6 +154,7 @@ cmd_up() {
       --dsh-version) version="$2"; shift 2 ;;
       --no-open)     open=0; shift ;;
       --fresh)       fresh=1; shift ;;
+      --install)     install_spec="$2"; shift 2 ;;
       *) die "up 不认识参数：${1}（见 $0 无参用法）" ;;
     esac
   done
@@ -245,7 +246,15 @@ cmd_up() {
   # dsh-sidekick 是本机另一条插件：宿主有就带上，没有就不进 bundles
   # （test-profile.sh 是无条件写进 bundles、没有 checkout 的机器要手改两行；这里自动化掉）
   local sidekick_src="$HOST_DSH_HOME/workspaces/dsh-mobile/plugin"
-  local deps_json="\"@dsh-one/dsh-llm-provider\": \"link:$PROJECT_ROOT\""
+  # --install <spec>：装 registry 上的发布包（如 @dsh-one/dsh-llm-provider@0.2.1-alpha.10），
+  # 测的是用户拿到手的产物；默认 link: 本目录，测的是开发中的代码。install 一律显式版本号，
+  # 不用 dist-tag（pnpm 新版对 @alpha 的解析有回归，实测会装到旧版）。
+  local deps_json
+  if [ -n "$install_spec" ]; then
+    deps_json="\"@dsh-one/dsh-llm-provider\": \"$install_spec\""
+  else
+    deps_json="\"@dsh-one/dsh-llm-provider\": \"link:$PROJECT_ROOT\""
+  fi
   local bundles=("@deepseek-ai/dsh-base" "@deepseek-ai/dsh-web-app")
   if [ -d "$sidekick_src" ]; then
     deps_json+=", \"dsh-sidekick\": \"link:$sidekick_src\""
@@ -253,7 +262,6 @@ cmd_up() {
     ln -sfn "$sidekick_src" "$profile_dir/node_modules/dsh-sidekick"
   fi
   bundles+=("@dsh-one/dsh-llm-provider")
-  ln -sfn "$PROJECT_ROOT" "$profile_dir/node_modules/@dsh-one/dsh-llm-provider"
 
   cat > "$profile_dir/package.json" <<EOF
 {
@@ -263,6 +271,18 @@ cmd_up() {
   "dsh": { "profile": { "bundles": $(json_array "${bundles[@]}") } }
 }
 EOF
+
+  # 安装模式：发布包要用包管理器真装进 profile（link 模式软链即可，不用装）
+  if [ -n "$install_spec" ]; then
+    info "安装发布包 $install_spec 进沙箱 profile…"
+    (cd "$profile_dir" && pnpm install --no-frozen-lockfile --loglevel=warn)
+    local installed_version
+    installed_version="$(python3 -c "import json;print(json.load(open('$profile_dir/node_modules/@dsh-one/dsh-llm-provider/package.json'))['version'])")"
+    info "已装版本: $installed_version"
+  else
+    mkdir -p "$profile_dir/node_modules/@dsh-one"
+    ln -sfn "$PROJECT_ROOT" "$profile_dir/node_modules/@dsh-one/dsh-llm-provider"
+  fi
 
   # 与 plan-test 相同的 patch 层：官方模型管理三件套禁用，由本插件接管
   cat > "$profile_dir/cordis.patch.yml" <<'EOF'
