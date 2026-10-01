@@ -5,7 +5,6 @@ node_modules/
 lib/
 
 # 开发用 worktree（scripts/dev-start.sh 创建，一个任务一个）
-.worktrees/
 
 # 本地参考资料：第三方源码副本与调研笔记（不进仓库）
 reference/
