@@ -56,6 +56,25 @@ run_suite() {
   token="${url##*token=}"
   dsh_bin="$(sed -n 's/.*"dsh"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$sandbox/state.json" | head -1)"
 
+  # 夹具：跑一轮真实对话（模型经插件桥接真实回复），会话以正规格式落盘；
+  # 浏览器层的模型选择器用例靠它打开会话视图。headless 失败（如 CI 无外网/无凭据）
+  # 时置空标记，浏览器层相应用例自动跳过。
+  # 前置：等 pi-ai 就绪——全新沙箱首启时 updater 要现场下载，桥接一开始是空的。
+  local i bridge_active
+  for i in $(seq 1 60); do
+    bridge_active="$(curl -s "http://127.0.0.1:$port/provider/status?token=$token" 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('bridge',{}).get('active'))" 2>/dev/null || true)"
+    [ "$bridge_active" = "True" ] && break
+    sleep 2
+  done
+  mkdir -p /tmp/e2e-ws
+  if (cd /tmp/e2e-ws && DSH_HOME="$sandbox/home" "$dsh_bin" headless '请只回复两个字：好的' >/dev/null 2>&1); then
+    export E2E_CONVERSATION_READY=1
+    info "夹具就绪：真实对话已落盘（/tmp/e2e-ws）"
+  else
+    unset E2E_CONVERSATION_READY
+    info "警告：真实对话夹具失败，浏览器层的对话用例将跳过"
+  fi
+
   export E2E_BASE_URL="http://127.0.0.1:$port"
   export E2E_TOKEN="$token"
   export E2E_LOG="$sandbox/dsh.log"
