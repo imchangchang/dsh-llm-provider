@@ -1,6 +1,6 @@
 {
   "name": "@dsh-one/dsh-llm-provider",
-  "version": "0.2.1-alpha.11",
+  "version": "0.2.1",
   "description": "A dsh plugin that replaces the built-in llm-pi-ai and llm-deepseek adapters, the model selector and the Models settings page with self-maintained versions, tracks upstream @earendil-works/pi-ai, adds OAuth/device-code sign-in for subscription providers (Copilot, Codex, Claude…), and adds quota/balance lookups plus a provider management UI",
   "keywords": [
     "dsh",
