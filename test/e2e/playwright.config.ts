@@ -7,4 +7,9 @@ export default defineConfig({
   timeout: 30_000,
   retries: 1,
   reporter: [['list']],
+  use: {
+    // 固定中文：无头浏览器默认 en-US 时 dsh web 渲染英文，中文选择器全部落空。
+    // 固定之后断言与机器/CI 的 locale 无关。
+    locale: 'zh-CN',
+  },
 })

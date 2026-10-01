@@ -29,6 +29,11 @@ if [ ! -d "$E2E_DIR/node_modules/@playwright" ]; then
   (cd "$E2E_DIR" && npm install --no-audit --no-fund --loglevel=error)
 fi
 
+# 浏览器断言需要 chromium；已装过时这条命令秒回
+if [ -f "$E2E_DIR/specs/ui.spec.mjs" ]; then
+  (cd "$E2E_DIR" && npx playwright install chromium)
+fi
+
 # 跑一个版本的完整套件。空参数 = 本机已装的 dsh。
 run_suite() {
   local ver="$1"
@@ -59,6 +64,11 @@ run_suite() {
   info "── 版本 ${E2E_DSH_VERSION}：协议断言 ──"
   local ok=1
   (cd "$E2E_DIR" && npx playwright test specs/protocol.spec.mjs) || ok=0
+
+  if [ -f "$E2E_DIR/specs/ui.spec.mjs" ]; then
+    info "── 版本 ${E2E_DSH_VERSION}：浏览器断言 ──"
+    (cd "$E2E_DIR" && npx playwright test specs/ui.spec.mjs) || ok=0
+  fi
 
   # 官方行接管检查：组合出来的配置树里，三条官方行必须带着 disabled 出现，插件条目必须在位
   info "── 版本 ${E2E_DSH_VERSION}：dump-config 检查 ──"
