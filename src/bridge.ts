@@ -17,7 +17,7 @@
  * 边界：本模块只写插件自己的 vendor/ 目录，pi-ai 本身的文件一个字节都不改——改第三方包的
  * 文件不可复现，也没法保证跟 lockfile 对得上。
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -165,6 +165,11 @@ export interface HostEnv {
   pluginRoot: string
   /** `$DSH_HOME`；拿不到就不传。 */
   dshHome?: string
+  /**
+   * 正在跑这个插件的那个 dsh 的入口脚本（`process.argv[1]` 解开软链、并确认它确实落在
+   * `@deepseek-ai/dsh` 包里之后）。见 {@link runningDshEntry}。
+   */
+  entryFile?: string
 }
 
 /** 当前进程的环境信号。 */
@@ -174,12 +179,42 @@ export function currentHostEnv(): HostEnv {
     dshHome = resolveDshHome()
   } catch { /* 拿不到 DSH_HOME 就少一个锚点 */ }
   const resourcesPath = (process as unknown as { resourcesPath?: unknown })['resourcesPath']
+  const entryFile = runningDshEntry()
   return {
     ...(typeof resourcesPath === 'string' && resourcesPath !== '' ? { resourcesPath } : {}),
     execPath: process.execPath,
     pluginRoot,
     ...(dshHome === undefined ? {} : { dshHome }),
+    ...(entryFile === undefined ? {} : { entryFile }),
   }
+}
+
+/**
+ * 正在跑这个插件的那个 dsh 的入口脚本——`process.argv[1]`，两道过滤之后才认。
+ *
+ * 这是「宿主跑哪棵树」最直接的证据：不用猜，进程自己就知道自己是被谁拉起来的。两次实测
+ * 决定了过滤怎么写：
+ *   1. **要 realpath。**CLI 下 `argv[1]` 是软链那条路径（`~/.dsh/node-macos-arm64/bin/dsh`），
+ *      不是包里的 `lib/bin.js`；照原样当锚点，顺着它往上找不到 dsh 包，这一档就白加了。
+ *   2. **要确认它真的是 dsh 入口。**`argv[1]` 只要是"某个文件路径"就拿来当锚点的话，离线测试
+ *      （`argv[1]` 是 `test/*.mjs`）、`node -e`、Electron 主进程都会命中，而顺着这些路径往上
+ *      爬可能撞进一棵"有 `@deepseek-ai`、但没有 pi-ai"的树，把宿主树判错。实测过一次：在主检出
+ *      里跑测试时，`test/*.mjs` 往上会撞到开发用的 `~/.dsh/profiles/node_modules` 软链。
+ *      所以只认「入口文件落在解析出来的 `@deepseek-ai/dsh` 包目录里面」这一种。
+ *
+ * @returns dsh 入口文件的绝对路径（软链已解开）；不是 dsh 入口就拿不到。
+ */
+function runningDshEntry(): string | undefined {
+  const raw = process.argv[1]
+  if (typeof raw !== 'string' || raw === '' || !raw.includes(sep)) return undefined
+  let entry: string
+  try {
+    entry = realpathSync(raw)
+  } catch {
+    return undefined
+  }
+  const dshRoot = resolvePackageRoot(entry, '@deepseek-ai/dsh')
+  return dshRoot !== undefined && entry.startsWith(dshRoot + sep) ? entry : undefined
 }
 
 /**
@@ -189,9 +224,12 @@ export function currentHostEnv(): HostEnv {
  *   0. **Electron 应用自带的 dsh**（`<resourcesPath>/app.asar/dsh`）——Desktop 就从这儿跑。
  *      注意它的 pi-ai 与 CLI 安装树里的那份**不是同一版**（实测 Desktop 是 0.87.1，
  *      CLI 树是 0.85.1，两边的 DeepSeek 模型 id 都不一样），所以这一档必须排在前面。
- *   1. `$DSH_HOME/profiles/node_modules`
- *   2. dsh 安装树（Windows 官方安装包在 `<node>/node_modules`，POSIX 在 `<node>/lib/node_modules`）
- *   3. 插件自己
+ *   1. **正在跑这个插件的那个 dsh**（`process.argv[1]`，见 {@link runningDshEntry}）——Desktop 的
+ *      `argv[1]` 不保证是 dsh 入口，所以这一档排在 Electron 自带那份之后；但 CLI、容器、
+ *      非标准前缀安装这些场合，它是唯一"不用猜"的答案。
+ *   2. `$DSH_HOME/profiles/node_modules`
+ *   3. dsh 安装树（Windows 官方安装包在 `<node>/node_modules`，POSIX 在 `<node>/lib/node_modules`）
+ *   4. 插件自己
  */
 export function hostAnchors(env: HostEnv = currentHostEnv()): string[] {
   const anchors: string[] = []
@@ -199,6 +237,7 @@ export function hostAnchors(env: HostEnv = currentHostEnv()): string[] {
     anchors.push(join(env.resourcesPath, 'app.asar', 'dsh', 'node_modules', '_anchor.js'))
     anchors.push(join(env.resourcesPath, 'app.asar.unpacked', 'dsh', 'node_modules', '_anchor.js'))
   }
+  if (env.entryFile !== undefined) anchors.push(env.entryFile)
   if (env.dshHome !== undefined) anchors.push(join(env.dshHome, 'profiles', 'node_modules', '_anchor.js'))
   const nodeDir = dirname(env.execPath)
   anchors.push(join(nodeDir, 'node_modules', '_anchor.js'))
@@ -355,6 +394,9 @@ export function piAiOriginLabel(root: string, key: string, env: HostEnv = curren
  *   3. 宿主自己那棵树里的（代次认不出来时仍然优先宿主）；
  *   4. 第一个候选（跟改造前一样，找不到更好的就用它）。
  *
+ * 「在宿主树里」按路径包含算：直接铺在 `<树>/node_modules/` 下算，嵌在
+ * `<树>/node_modules/@deepseek-ai/dsh/node_modules/` 里也算（dsh 把自己的 bundle 放在包内）。
+ *
  * 为什么非要对代次：Desktop 的宿主跑 `app.asar` 里那份（0.2.0-rc.2），而 CLI 安装树里
  * 还躺着 0.1.6-alpha.2 那份；按路径顺序先撞上 CLI 的，就会拿 0.1.x 胶水去挂 0.2.x 宿主，
  * pi-ai 也跟着串成 0.85.1——用户看到的就是「模型 id 突然对不上」。
@@ -376,16 +418,22 @@ export function chooseSourceBundle(
     }
   })
   const described = entries.map((path) => {
-    const tree = treeOf(dirname(dirname(path)))
+    const root = dirname(dirname(path))
     const source = read(path)
     return {
       path,
-      version: piAiVersionOf(dirname(dirname(path))),
-      tree,
+      root,
+      version: piAiVersionOf(root),
+      tree: treeOf(root),
       generation: source === undefined ? ('unknown' as GlueGeneration) : glueGeneration(source),
     }
   })
-  const inHostTree = (row: { tree: string }): boolean => options.hostTree !== undefined && row.tree === options.hostTree
+  // 「在宿主树里」按路径包含判，不是比 treeOf 相等：dsh 把自己的 bundle 放在包内的
+  // `node_modules` 里（`<dsh 包>/node_modules/@deepseek-ai/dsh-llm-pi-ai`），那种位置 treeOf
+  // 算出来是 dsh 包目录，跟宿主树根不相等——只比相等就会把正在跑那棵树里那份判成"别人的"，
+  // 于是又退回按代次和列表顺序碰运气（这正是这次要修的地方）。
+  const inHostTree = (row: { root: string }): boolean => options.hostTree !== undefined
+    && (row.root === options.hostTree || row.root.startsWith(options.hostTree + sep))
   const matches = (row: { generation: GlueGeneration }): boolean => options.hostGeneration !== 'unknown' && row.generation === options.hostGeneration
   const pick = (reason: SourceBundle['reason'], test: (row: (typeof described)[number]) => boolean): SourceBundle | undefined => {
     const hit = described.find(test)

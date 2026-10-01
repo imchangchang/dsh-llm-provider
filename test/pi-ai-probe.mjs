@@ -3,11 +3,12 @@
 // 两件事：能不能从 bundle 源码里读出它对 pi-ai 的 import 需求；体检能不能挡住
 // 不兼容的候选——尤其是"先体检一个坏的、再体检一个好的"这种组合，因为 Node 对
 // 加载失败的 ESM 会留下半初始化记录，探针目录要是共用一条 URL，第二个必然误判成失败。
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   chooseSourceBundle,
+  currentHostEnv,
   dshGeneration,
   glueGeneration,
   hostAnchors,
@@ -142,6 +143,51 @@ check('Electron 下 app.asar.unpacked 也在前面', withElectron[1].indexOf('ap
 check('非 Electron 不带 app.asar 锚点',
   hostAnchors({ execPath: '/usr/bin/node', pluginRoot: '/P', dshHome: '/H' }).every((a) => a.indexOf('app.asar') === -1))
 
+// ---- 运行时锚点：正在跑这个插件的那个 dsh，不用猜 ----
+// 实测（sandbox `--install` 形态）：不加这一档，宿主树会被判到"顺着 $DSH_HOME 往上爬"撞到的
+// 那棵树上去；那棵树里只有胶水层没有 pi-ai 时，「dsh 自带」这一档整个消失，全新安装的桥接起不来。
+const withEntry = hostAnchors({ execPath: '/usr/bin/node', pluginRoot: '/P', dshHome: '/H', entryFile: '/D/lib/node_modules/@deepseek-ai/dsh/lib/bin.js' })
+check('运行时入口锚点排在 $DSH_HOME 之前',
+  withEntry[0] === '/D/lib/node_modules/@deepseek-ai/dsh/lib/bin.js' && withEntry[1] === '/H/profiles/node_modules/_anchor.js')
+check('Electron 自带那份仍排在运行时入口之前', (() => {
+  const list = hostAnchors({ resourcesPath: '/R', execPath: '/R/App', pluginRoot: '/P', dshHome: '/H', entryFile: '/D/bin.js' })
+  return list[0].startsWith('/R') && list[1].indexOf('app.asar.unpacked') !== -1 && list[2] === '/D/bin.js'
+})())
+check('给不出运行时入口时锚点里没有这一档',
+  hostAnchors({ execPath: '/usr/bin/node', pluginRoot: '/P', dshHome: '/H' }).length === withEntry.length - 1)
+
+// 真实文件系统：argv[1] 的两种形态都要认对，认不出的要拒掉
+const argvRoot = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-argv-')))
+const argvSaved = process.argv[1]
+try {
+  const dshPkg = join(argvRoot, 'lib/node_modules/@deepseek-ai/dsh')
+  mkdirSync(join(dshPkg, 'lib'), { recursive: true })
+  writeFileSync(join(dshPkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.6-alpha.2' }))
+  writeFileSync(join(dshPkg, 'lib/bin.js'), '// dsh 入口\n')
+  // CLI 实际就是这么起来的：bin 是条软链，argv[1] 拿到的是软链那条路径
+  mkdirSync(join(argvRoot, 'bin'), { recursive: true })
+  symlinkSync(join(dshPkg, 'lib/bin.js'), join(argvRoot, 'bin/dsh'))
+  process.argv[1] = join(argvRoot, 'bin/dsh')
+  check('argv[1] 是软链时解到真身，认出 dsh 入口', currentHostEnv().entryFile === join(dshPkg, 'lib/bin.js'))
+  process.argv[1] = join(dshPkg, 'lib/bin.js')
+  check('argv[1] 直接是入口文件时也认', currentHostEnv().entryFile === join(dshPkg, 'lib/bin.js'))
+  // 不是 dsh 入口：离线测试脚本、`node -e` 的参数、Electron 主进程都长这样
+  const notDsh = join(argvRoot, 'elsewhere/run.mjs')
+  mkdirSync(join(argvRoot, 'elsewhere'), { recursive: true })
+  writeFileSync(notDsh, '// 不是 dsh\n')
+  process.argv[1] = notDsh
+  check('不是 dsh 入口的 argv[1] 不当锚点（否则会把宿主树判到别的树上去）', currentHostEnv().entryFile === undefined)
+  process.argv[1] = 'plain-arg'
+  check('argv[1] 是普通参数（node -e 那种）时不当锚点', currentHostEnv().entryFile === undefined)
+} finally {
+  process.argv[1] = argvSaved
+  rmSync(argvRoot, { recursive: true, force: true })
+}
+
+// ---- 宿主树里那份也可能嵌在 dsh 包内部 ----
+// dsh 把 bundle 放在自己的 `node_modules` 里，那种位置 treeOf 算出来是 dsh 包目录；
+// 只比 treeOf 相等会把"正在跑那棵树里那份"判成别人的。断言放在下面（要用到 hostTree/legacyPath）。
+
 // 纯函数：候选挑法
 const desc = (path, generation) => ({ path, generation })
 const readOf = (map) => (path) => map[path]
@@ -163,6 +209,20 @@ check('代次认不出来时优先宿主树里那份',
 check('什么都不匹配就用第一个（与改造前一致）',
   chooseSourceBundle([legacyPath], { hostGeneration: 'modern', read })?.reason === 'first')
 check('没有候选就是 undefined', chooseSourceBundle([], { hostGeneration: 'modern', read }) === undefined)
+
+// 宿主树里那份也可能嵌在 dsh 包内部：dsh 把 bundle 放在自己的 `node_modules` 里，那种位置
+// treeOf 算出来是 dsh 包目录，跟宿主树根不相等——只比相等会把它判成"别人的"。
+const nestedGlue = '/HOST/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js'
+const nestedRead = readOf({
+  [nestedGlue]: 'settings.configure({})',
+  [legacyPath]: 'settings.installSection(ctx, NS, Config, config, {})',
+})
+check('嵌在 dsh 包里的胶水层也算宿主树里的',
+  chooseSourceBundle([legacyPath, nestedGlue], { hostTree, hostGeneration: 'modern', read: nestedRead })?.path === nestedGlue)
+check('嵌在 dsh 包里的那份（代次也对）理由是宿主树+代次',
+  chooseSourceBundle([legacyPath, nestedGlue], { hostTree, hostGeneration: 'modern', read: nestedRead })?.reason === 'host-tree+generation')
+check('前缀相同但不是同一棵树的不算宿主树（/HOST-OTHER 不等于 /HOST，退回按代次）',
+  chooseSourceBundle([nestedGlue], { hostTree: '/HOST-OTHER', hostGeneration: 'modern', read: nestedRead })?.reason === 'generation')
 
 // 端到端：拿真实文件系统搭一份「app.asar（0.2.x）+ CLI 树（0.1.x）」，看选中谁
 const root = mkdtempSync(join(tmpdir(), 'dsh-glue-'))
