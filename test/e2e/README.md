@@ -19,13 +19,19 @@
 9. 启动日志无官方行撞车（无 `already declared`、无「组件启用失败」）
 10. `--dump-config`：组合树里有 `dsh-llm-provider` 条目
 
-**浏览器层（`ui.spec.mjs`，待加，需 `npx playwright install chromium`）：**
+**浏览器层（`specs/ui.spec.mjs`，已落地，需 `npx playwright install chromium`，
+编排脚本会自动装）：**
 
-1. 设置面板有「模型服务」标签（插槽注入成功）
-2. 添加供应商表单打开、预设下拉非空
-3. composer 的模型选择器是插件接管版
-4. 全程 console 无未捕获异常
-5. DeepSeek 额度卡出数——CI 里跳过（依赖真实外网接口）
+1. ✅ 设置面板有「模型服务」标签（插槽注入成功）
+2. ✅ 添加供应商表单打开、预设下拉非空
+3. ⏳ composer 的模型选择器是插件接管版——**待夹具**：选择器需要选中的工作区会话
+   上下文，沙箱还没有可选工作区；用例已写好、标 skip，夹具就位后去掉 skip
+4. ✅ 全程 console 无未捕获异常
+5. ✅ DeepSeek 额度卡出数——CI 里跳过（`CI=1` 时 skip，依赖真实外网接口）
+
+浏览器层约定：`playwright.config.ts` 固定 `locale: 'zh-CN'`——无头浏览器默认 en-US
+时 dsh web 渲染英文，中文选择器全部落空；固定后断言与机器/CI 的 locale 无关。
+选择器只走可访问名 / 占位符 / 文本，不碰 class hash。
 
 ## 定稿的设计约束
 
