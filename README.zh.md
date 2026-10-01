@@ -98,6 +98,8 @@ dsh web                   # 插件树变了，必须重启
 
 另外两条写路径的语义现在完全一致：`merge` 是逐字段合并，`unsetFields` 只删列出的字段（删空也留着这条路由，`{routeId: {}}` 是合法 profile，也正是 OAuth-only 路由的形态），删整条路由只有 `unset`。
 
+光有活值还不够：官方 bundle 自己听 `loader/volatile-update` 的监听器挂在它的子 fiber 上，而 cordis 的事件过滤器是 `owner.fiber === fiber`，我们的条目做 volatile 更新时它收不到——**路由集合的增删不会重新注册**，新加的 provider 不重启就聊天会撞 `NO_ADAPTER`。所以插件自己接住这个事件，把桥接子 fiber 卸掉再挂一遍：旧注册随 fiber 注销，挂上时按当前 config 重新声明，路由集合这才对得上。
+
 pi-ai 更新有两个触发路径：插件启动时后台查一次（6 小时节流，`DSH_PROVIDER_UPDATE=off` 可关），以及设置页上的「检查更新」按钮（`POST /provider/update`）。
 
 两条路径都一样，**两道检查都过才会替换**：tarball 完整性（registry 的 `dist.integrity`）和兼容性检查。过了才标记为待重启，已经在跑的版本不会重复下载——手动点「检查更新」也会先拿当前生效的那份比一次版本。pi-ai 换了版本**可以就地切换、不用重启**：「pi-ai 桥接」里下好新版之后会出现「立即切换」按钮（`POST /provider/swap`）。宿主侧的顺序是先加载新的、成功之后才卸掉旧的，任何一步失败都会把旧的那份挂回去（失败只会看到一行提示，不会把桥接弄没）。不想点也行，重启 dsh 照样生效。

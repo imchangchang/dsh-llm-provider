@@ -355,6 +355,10 @@ function beginHandler(
             existing.controller.abort()
             settle(existing, 'cancelled', '被新的登录尝试取代')
             keyToAttempt.delete(key)
+            // 等宿主把这个 key 的 in-flight 槽放出来再开新的：旧的 begin() 还在宿主里 pending，
+            // 不等就 begin 会撞 ALREADY_IN_FLIGHT（宿主交互层复核实测过：宿主的槽在 begin 的
+            // finally 里、若干微任务后才清）。等不到也不挂死，宁可撞。
+            await waitForFlowIdle(authorization, key, 2_000)
           }
           if (!fresh && existing !== undefined && existing.settled === undefined) {
             jsonResponse(res, 200, {
@@ -428,9 +432,26 @@ async function runAttempt(
     settle(attempt, cancelled ? 'cancelled' : 'failed', message)
   } finally {
     // 让 begin 的下一次请求可以重开 attempt；不清 EventEmitter 引用会随 attempt 一起被 GC。
-    keyToAttempt.delete(attempt.key)
+    // 先比对 identity：「重走一遍流程」的 begin 会先 abort 旧的再 set 新的，旧 attempt 的 finally
+    // 如果不比对，会把新映射误删掉（实测：浏览器刷新后再登录会报 ALREADY_IN_FLIGHT）。
+    if (keyToAttempt.get(attempt.key) === attempt.id) keyToAttempt.delete(attempt.key)
     // settled 已写，attempts 留给 SSE handler 追一条 settled 帧用：通常 SSE 会立刻看到 closed，
     // 5 分钟 TTL 后 sweep 会把 attempts 里这条删掉。保留到 TTL 是为了浏览器刷新页面能拿到结论。
+  }
+}
+
+/** 等宿主把某个 key 的 in-flight 槽放出来；超时最多 `timeoutMs`（到点照样继续，宁可撞也不挂死）。 */
+async function waitForFlowIdle(authorization: AuthorizationService, key: string, timeoutMs: number): Promise<void> {
+  if (typeof authorization.describe !== 'function') return
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const entry = authorization.describe(key)
+      if (entry === undefined || entry.inFlight !== true) return
+    } catch {
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
   }
 }
 

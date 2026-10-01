@@ -69,6 +69,8 @@ export type BridgeLoadResult =
       piAiSource: string
       /** 拷来挂的那份官方 bundle 的版本号（读不到就没有）。 */
       bundleVersion?: string
+      /** bundle 的入口文件绝对路径（「换源时强制重拷」就靠它比）。 */
+      bundlePath: string
       /** 它来自哪棵树（短标签，如 `app.asar` / `profile` / `dsh-install`）。 */
       bundleTree: string
       /** 生效那份 pi-ai 的包目录（悬浮提示里给出来，方便核对到底加载了哪个副本）。 */
@@ -739,36 +741,52 @@ function prepareBridge(): PreparedBridge {
 function finishBridge(
   prepared: Extract<PreparedBridge, { ok: true }>,
   plugin: BridgePluginModule,
+  persist = true,
 ): BridgeLoadResult {
+  const result = finishBridgeResult(prepared, plugin)
+  // persist=false 的（reloadBridge）不在挂载前落盘：swap 挂载失败回滚后，状态文件会跟
+  // 实际跑着的那份对不上，prune 可能据此删掉真正在跑的旧下载档。由调用方在挂载成功后
+  // 调 commitBridgeState 落盘（src/index.ts 的 swapBridge 就是那样接的）。
+  if (persist) commitBridgeState(result)
+  return result
+}
+
+/** 一份桥接结果的完整落点信息（写状态文件要带上 bundlePath，用于「换源时强制重拷」）。 */
+function finishBridgeResult(
+  prepared: Extract<PreparedBridge, { ok: true }>,
+  plugin: BridgePluginModule,
+): Extract<BridgeLoadResult, { ok: true }> {
   const { srcBundle, chosen, probeUnverified, rejected } = prepared
-  activeRoot = chosen.root
-  const bundleTree = treeLabel(srcBundle.tree)
-  const piAiPath = chosen.root
-  const piAiOrigin = piAiOriginLabel(chosen.root, chosen.key)
-  writeStatus({
-    piAiVersion: chosen.version,
-    needsRestart: false,
-    piAiSource: chosen.key,
-    bundleVersion: srcBundle.version,
-    bundlePath: srcBundle.path,
-    bundleTree,
-    piAiPath,
-    piAiOrigin,
-    probeUnverified: probeUnverified || undefined,
-    ...(rejected.length === 0 ? { rejected: undefined } : { rejected }),
-  })
   return {
     ok: true,
     plugin,
     piAiVersion: chosen.version,
     piAiSource: chosen.key,
     bundleVersion: srcBundle.version,
-    bundleTree,
-    piAiPath,
-    piAiOrigin,
+    bundlePath: srcBundle.path,
+    bundleTree: treeLabel(srcBundle.tree),
+    piAiPath: chosen.root,
+    piAiOrigin: piAiOriginLabel(chosen.root, chosen.key),
     probeUnverified,
     rejected,
   }
+}
+
+/** 挂载**成功**之后再把这次桥接的结论落盘（activeRoot + status.json）；失败/回滚都不会进来。 */
+export function commitBridgeState(result: Extract<BridgeLoadResult, { ok: true }>): void {
+  activeRoot = result.piAiPath
+  writeStatus({
+    piAiVersion: result.piAiVersion,
+    needsRestart: false,
+    piAiSource: result.piAiSource,
+    bundleVersion: result.bundleVersion,
+    bundlePath: result.bundlePath,
+    bundleTree: result.bundleTree,
+    piAiPath: result.piAiPath,
+    piAiOrigin: result.piAiOrigin,
+    probeUnverified: result.probeUnverified || undefined,
+    ...(result.rejected.length === 0 ? { rejected: undefined } : { rejected: result.rejected }),
+  })
 }
 
 /**
@@ -782,7 +800,7 @@ export function loadBridge(): BridgeLoadResult {
     const require = createRequire(import.meta.url)
     delete require.cache?.[bridgeLib]
     const plugin = require(bridgeLib) as BridgePluginModule
-    return finishBridge(prepared, plugin)
+    return finishBridge(prepared, plugin, true)
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }
@@ -806,7 +824,7 @@ export async function reloadBridge(): Promise<BridgeLoadResult> {
     if (!prepared.ok) return prepared
     const url = `${pathToFileURL(bridgeLib).href}?swap=${String(Date.now())}`
     const plugin = (await import(url)) as BridgePluginModule
-    return finishBridge(prepared, plugin)
+    return finishBridge(prepared, plugin, false)
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
   }
