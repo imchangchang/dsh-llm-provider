@@ -29,11 +29,12 @@
 - 隔离沙箱实例：`scripts/test-sandbox.sh`（up / url / status / clean）。`DSH_HOME` 重定向到
   `test/sandbox/<名字>/`，不写 `~/.dsh`，`clean` 即焚；端口默认在 10000-19999 自动挑，
   可 `--dsh-version` 指定 dsh 版本。**它不是测试分层的一层**，是下面两层共用的起环境工具。
-- 测试分三层，谈测试按这三个词称呼，别混：
-  - **自测**：`npm test` 的 15 个离线脚本。开发 session 自己跑，不起 dsh。
-  - **e2e**：Playwright 对真 dsh 实例跑断言（规划中，落在 `test/e2e/`，`scripts/test-e2e.sh` 编排）。
-    机器断言、可回归，合入与 CI 必过。
-  - **验收**：kimi-webbridge 操控真实 Chrome + 真实账号，发布前过一遍。无断言，产出是确认和截图。
+- 测试分三层。「e2e」是第二、三层的统称，**不带修饰词时默认指第二层（Playwright）**：
+  - **自测**：`npm test` 的 15 个离线脚本。开发 session 自己跑，不起 dsh，不算 e2e。
+  - **e2e**（默认）：Playwright 对真 dsh 实例 + 无头浏览器跑断言（规划中，落在 `test/e2e/`，
+    `scripts/test-e2e.sh` 编排）。机器断言、可回归，合入与 CI 必过。
+  - **e2e 验收**（也叫「真实浏览器跑 e2e」）：kimi-webbridge 操控真实 Chrome + 真实账号，
+    发布前过一遍。无断言，产出是确认和截图。说「验收」或「真浏览器 e2e」都指这层。
 
 ## 注意点
 
