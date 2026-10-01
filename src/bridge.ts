@@ -743,23 +743,7 @@ function finishBridge(
   plugin: BridgePluginModule,
   persist = true,
 ): BridgeLoadResult {
-  const { srcBundle, chosen, probeUnverified, rejected } = prepared
-  const bundleTree = treeLabel(srcBundle.tree)
-  const piAiPath = chosen.root
-  const piAiOrigin = piAiOriginLabel(chosen.root, chosen.key)
-  const result: Extract<BridgeLoadResult, { ok: true }> = {
-    ok: true,
-    plugin,
-    piAiVersion: chosen.version,
-    piAiSource: chosen.key,
-    bundleVersion: srcBundle.version,
-    bundlePath: srcBundle.path,
-    bundleTree,
-    piAiPath,
-    piAiOrigin,
-    probeUnverified,
-    rejected,
-  }
+  const result = finishBridgeResult(prepared, plugin)
   // persist=false 的（reloadBridge）不在挂载前落盘：swap 挂载失败回滚后，状态文件会跟
   // 实际跑着的那份对不上，prune 可能据此删掉真正在跑的旧下载档。由调用方在挂载成功后
   // 调 commitBridgeState 落盘（src/index.ts 的 swapBridge 就是那样接的）。
