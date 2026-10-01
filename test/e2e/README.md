@@ -50,6 +50,24 @@
 用例是破坏性的（会改沙箱里的包目录），所以 `retries: 0`：serial 模式下的重试是整组重跑，
 重跑时环境已经被改过，基线断言必然失败，重试没有意义。
 
+## 截图（`specs/screenshots.spec.mjs`，不是断言）
+
+README 的界面图由这里产出：`scripts/capture-screenshots.sh` 起一次沙箱，跑
+`specs/screenshots.spec.mjs`，中文（`*.zh.png`）与英文（`*.png`）两套外壳各八张，
+写进 `docs/images/`。spec 只在 `E2E_CAPTURE=1` 时执行，不进 `test-e2e.sh` 的回归范围。
+
+夹具都在一次性的沙箱里：宿主凭据经 `.credentials.yaml` 拷入后，编排脚本把
+**凭据库里真实有值的密钥名**读出来传给 spec，spec 照着给对应的 provider 建路由
+（`/provider/presets` 的 `missingKey` 不能用来判断这件事：它只在「路由已配置且没值」
+时为 true，未配置的预设一律 false）。composer 那张图要有会话上下文，夹具是编排脚本
+在启动前写进 `home/storages/workspace.json` 的工作区——路径必须取 `fs.realpath` 过的，
+否则宿主挂不上会话（`/tmp` 在 macOS 上是软链，会踩这个）；这与 `ui.spec.mjs` 借编排器
+`dsh headless` 真实对话造夹具是两条路，互不影响。
+
+截图自身的口径：设置页裁到 `[role="dialog"]` 的可视区域，composer 那张整屏截
+（裁窄会把输入框左边和面板底边切一半）；英文外壳下插件面板仍是中文，只有
+`src/client/i18n.ts` 里有英文词条的少数键（导航名、添加供应商、OAuth 文案）跟着切。
+
 ## 定稿的设计约束
 
 - **安装类测试一律显式版本号**（如 `@dsh-one/dsh-llm-provider@0.2.1-alpha.10`），不用 dist-tag。

@@ -13,10 +13,27 @@ What you get:
 3. **Model selector.** The official two-level structure (model / reasoning effort) plus provider filtering, quota indicator, capability badges and a model detail card.
 4. **Provider settings page.** Add, remove, test and refresh providers; writes to the same settings section and credential store the official page uses.
 
-The UI strings are Chinese; the plugin ships no English UI yet.
+The UI strings are Chinese; the plugin ships no English UI yet, so the English screenshots below show English app chrome around the plugin's Chinese panels.
+
+## Screenshots
+
+![Provider cards with balance and usage windows](docs/images/providers.png)
+
+Every image comes from `scripts/capture-screenshots.sh`: a real dsh instance in a disposable sandbox, driven by headless Chromium through `test/e2e/specs/screenshots.spec.mjs`, once per shell language (`*.png` for English, `*.zh.png` for Chinese).
+
+|  |  |
+|---|---|
+| ![Provider card expanded](docs/images/provider-card.png)<br>Card body: route id, stored key, endpoint, credential name, and the model list of that route. | ![Model detail card](docs/images/model-detail.png)<br>Model detail card on hover: provider, model id, capabilities, context window, max output, reasoning efforts, and which of the three sources the capability came from. |
+| ![Model list editor](docs/images/model-editor.png)<br>Model list editor: tick models and edit fields per row; ticking none goes back to following the pi-ai catalog. | ![Add a provider](docs/images/add-provider.png)<br>Adding a provider: 43 presets behind a filter box, endpoint and key, and a test that must pass before the write. |
+| ![OAuth sign-in](docs/images/oauth-login.png)<br>OAuth sign-in: subscription providers use a device code and land in the same credential store. | ![pi-ai bridge](docs/images/pi-ai-bridge.png)<br>pi-ai bridge: which pi-ai is in use and where it came from, whether upstream has a newer one, in-place swap, and disk usage. |
+
+![Model selector in the composer](docs/images/model-selector.png)
+
+Model selector: the provider filter row carries the same quota snapshot, model rows carry capability badges and context size, the current model is ticked.
 
 ## Contents
 
+- [Screenshots](#screenshots)
 - [Usage](#usage): [Install](#install) · [First run](#first-run) · [Configuration](#configuration) · [Test instance](#test-instance) · [Command-line checks](#command-line-checks)
 - [Implementation](#implementation): [pi-ai bridge](#pi-ai-bridge) · [Candidate sources](#candidate-sources) · [Compatibility check](#compatibility-check) · [Model selector](#model-selector) · [Provider settings page](#provider-settings-page) · [Quota adapters](#quota-adapters) · [Route discovery](#route-discovery) · [Credential check](#credential-check) · [HTTP endpoints](#http-endpoints) · [Build](#build)
 - [Boundaries](#boundaries)
