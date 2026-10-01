@@ -86,7 +86,8 @@ stop_sandbox() { # <sandbox-dir>
   fi
   port="$(read_state_field "$dir" port)"
   if [ -n "$port" ]; then
-    pids="$(lsof -ti tcp:$port 2>/dev/null || true)"
+    # 只看 LISTEN：浏览器标签页握着的客户端连接也算在 tcp:$port 上，不能据此判断实例还活着
+    pids="$(lsof -ti tcp:$port -sTCP:LISTEN 2>/dev/null || true)"
     if [ -n "$pids" ]; then
       die "端口 $port 还被进程占着（${pids}），不像本沙箱的实例，请确认后手动处理"
     fi
@@ -203,7 +204,8 @@ EOF
 
   # 端口被非本沙箱进程占着就直接报错，不误杀
   local occupied
-  occupied="$(lsof -ti tcp:$port 2>/dev/null || true)"
+  # 同 stop_sandbox：只看 LISTEN，浏览器握着的客户端连接不算占用
+  occupied="$(lsof -ti tcp:$port -sTCP:LISTEN 2>/dev/null || true)"
   [ -z "$occupied" ] || die "端口 $port 已被进程占用（${occupied}），换 --port 或先清掉占用者"
 
   : > "$sandbox/dsh.log"
