@@ -26,6 +26,14 @@
   `PORT=3082 PROFILE=plan-test-foo LOG=/tmp/dsh-plan-foo.log scripts/test-profile.sh`。
   脚本生成的 profile 还会 link 本机另一条插件 `dsh-sidekick`（`$DSH_HOME/workspaces/dsh-mobile/plugin`），
   没有那份 checkout 的机器上先改脚本里那两行。
+- 隔离沙箱实例：`scripts/test-sandbox.sh`（up / url / status / clean）。`DSH_HOME` 重定向到
+  `test/sandbox/<名字>/`，不写 `~/.dsh`，`clean` 即焚；端口默认在 10000-19999 自动挑，
+  可 `--dsh-version` 指定 dsh 版本。**它不是测试分层的一层**，是下面两层共用的起环境工具。
+- 测试分三层，谈测试按这三个词称呼，别混：
+  - **自测**：`npm test` 的 15 个离线脚本。开发 session 自己跑，不起 dsh。
+  - **e2e**：Playwright 对真 dsh 实例跑断言（规划中，落在 `test/e2e/`，`scripts/test-e2e.sh` 编排）。
+    机器断言、可回归，合入与 CI 必过。
+  - **验收**：kimi-webbridge 操控真实 Chrome + 真实账号，发布前过一遍。无断言，产出是确认和截图。
 
 ## 注意点
 
