@@ -3,6 +3,7 @@
 #
 #   scripts/test-sandbox.sh up    [--name <slug>] [--port <n>] [--dsh-version <x>] [--no-open] [--fresh]
 #   scripts/test-sandbox.sh url   [--name <slug>]
+#   scripts/test-sandbox.sh status
 #   scripts/test-sandbox.sh clean [--name <slug>] [--all] [--deep]
 #
 # 端口：--port 显式指定；不给就在 10000-19999 里由沙箱名字定起点、向后找空闲位，
@@ -12,7 +13,8 @@
 #   home/      充当 DSH_HOME 的数据目录（profile、settings、凭据都在这里面）
 #   cli/       传了 --dsh-version 时 npm 装进来的那份 dsh
 #   dsh.log    实例日志（带 token 的访问地址也从这里取）
-#   state.json pid / port / 起始时间，clean 靠它停进程
+#   dsh.pid    实例进程号（标准 pid 文件，一行一个数字）
+#   state.json pid / port / 起始时间 / dsh 路径，status 和 clean 靠它
 #
 # 隔离原理：启动时给 dsh 进程设 DSH_HOME=<沙箱>/home。dsh-home-paths 解析 home 的
 # 优先级是「显式配置 > $DSH_HOME > 默认 ~/.dsh」，profile-boot 的注释也写明
@@ -40,7 +42,7 @@ die()  { echo "test-sandbox: $*" >&2; exit 1; }
 info() { echo "test-sandbox: $*"; }
 
 usage() {
-  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 }
 
@@ -100,12 +102,26 @@ read_state_field() { # <sandbox-dir> <字段名>：没有 state.json 或缺字�
   sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"*\([^\",}]*\)\"*.*/\1/p" "$1/state.json" 2>/dev/null | head -1 || true
 }
 
+read_pid() { # <sandbox-dir>：pid 文件优先，state.json 兜底
+  local pid
+  pid="$(cat "$1/dsh.pid" 2>/dev/null || true)"
+  [ -n "$pid" ] || pid="$(read_state_field "$1" pid)"
+  printf '%s' "$pid"
+}
+
+# pid 活着且命令行像我们的 dsh。防止 pid 被系统复用后误判「还在跑」、甚至误杀别人的进程
+pid_is_ours() { # <pid>
+  [ -n "$1" ] || return 1
+  kill -0 "$1" 2>/dev/null || return 1
+  ps -p "$1" -o args= 2>/dev/null | grep -q '/dsh'
+}
+
 stop_sandbox() { # <sandbox-dir>
   local dir="$1" pid port pids
-  pid="$(read_state_field "$dir" pid)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  pid="$(read_pid "$dir")"
+  if pid_is_ours "$pid"; then
     kill "$pid" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    for _ in 1 2 3 4 5; do pid_is_ours "$pid" || break; sleep 1; done
     kill -9 "$pid" 2>/dev/null || true
   fi
   port="$(read_state_field "$dir" port)"
@@ -158,6 +174,17 @@ cmd_up() {
 
   # 重启语义（跟 test-profile.sh 一致）：保证拿到新令牌、加载刚构建的 lib/
   stop_sandbox "$sandbox"
+
+  # 目录还在但 pid 没了 = 上次没走 clean（崩溃、被外部回收、手动 kill）。
+  # up 时主动报出来，把日志位置和尾部直接递到眼前，省得事后翻。
+  if [ -f "$sandbox/dsh.pid" ] || [ -f "$sandbox/state.json" ]; then
+    local old_pid
+    old_pid="$(read_pid "$sandbox")"
+    if ! pid_is_ours "$old_pid"; then
+      info "检测到上一次实例已异常退出（pid ${old_pid:-?} 不在），没走 clean。$sandbox/dsh.log 尾部："
+      tail -3 "$sandbox/dsh.log" 2>/dev/null | sed 's/^/    /' || true
+    fi
+  fi
 
   # 没显式给端口就自动挑：名字定起点、向后扫空闲位（并行起多个沙箱互不冲突，
   # 同一个沙箱重启端口保持稳定）。必须放在 stop_sandbox 之后——旧实例还占着
@@ -258,6 +285,8 @@ EOF
   "startedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
+  # 标准 pid 文件：一行一个数字，kill $(cat dsh.pid) 就能停
+  printf '%s\n' "$pid" > "$sandbox/dsh.pid"
 
   # 等 token URL 出现在日志（跟 test-profile.sh 同款 grep），进程死了提前收工
   local url="" i
@@ -349,12 +378,45 @@ cmd_clean() {
   info "完成"
 }
 
+# ---------------------------------------------------------------- status
+
+# 扫 test/sandbox/ 下全部沙箱：不用自己查端口、翻目录，一眼看清谁在跑、谁异常退了。
+# 目录还在但 pid 没了 = 上次没走 clean（崩溃、被外部回收、手动 kill），顺带把日志尾部递出来。
+cmd_status() {
+  local dirs=() d
+  for d in "$SANDBOX_ROOT"/*/; do
+    if [ -d "$d" ]; then dirs+=("${d%/}"); fi
+  done
+  if [ ${#dirs[@]} -eq 0 ]; then
+    info "test/sandbox/ 下没有沙箱"
+    return 0
+  fi
+  local t pid port
+  for t in "${dirs[@]}"; do
+    pid="$(read_pid "$t")"
+    port="$(read_state_field "$t" port)"
+    printf '%-16s ' "$(basename "$t")"
+    if pid_is_ours "$pid"; then
+      if [ -n "$(lsof -ti tcp:$port -sTCP:LISTEN 2>/dev/null || true)" ]; then
+        printf '运行中  pid %s  端口 %s  日志 %s/dsh.log\n' "$pid" "$port" "$t"
+      else
+        printf '异常    pid %s 活着但端口 %s 没监听（还在启动或卡死）  日志 %s/dsh.log\n' "$pid" "$port" "$t"
+      fi
+    else
+      printf '已退出  pid %s 不在了（未走 clean）  日志 %s/dsh.log 尾部：\n' "${pid:-?}" "$t"
+      tail -3 "$t/dsh.log" 2>/dev/null | sed 's/^/    /' || true
+    fi
+  done
+  info "全部关闭：scripts/test-sandbox.sh clean --all"
+}
+
 # ---------------------------------------------------------------- 入口
 
 case "${1:-}" in
   up)    shift; cmd_up "$@" ;;
   url)   shift; cmd_url "$@" ;;
+  status) shift; cmd_status "$@" ;;
   clean) shift; cmd_clean "$@" ;;
   ''|-h|--help) usage ;;
-  *) die "不认识的子命令：${1}（up / url / clean）" ;;
+  *) die "不认识的子命令：${1}（up / url / status / clean）" ;;
 esac
