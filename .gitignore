@@ -20,6 +20,10 @@ vendor/updater-state.json
 # 系统文件
 .DS_Store
 
+# 测试沙箱运行时产物（scripts/test-sandbox.sh 创建：DSH_HOME 副本、可选的 dsh 安装、
+# 日志和 state.json 全在里面，clean 即焚，可随时重建）
+test/sandbox/
+
 # 兜底依赖的依赖树（vendor/package.json 和 lockfile 入库，树不入库）
 vendor/node_modules/
 
