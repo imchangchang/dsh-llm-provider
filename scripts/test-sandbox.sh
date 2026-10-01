@@ -251,7 +251,12 @@ cmd_up() {
   # 不用 dist-tag（pnpm 新版对 @alpha 的解析有回归，实测会装到旧版）。
   local deps_json
   if [ -n "$install_spec" ]; then
-    deps_json="\"@dsh-one/dsh-llm-provider\": \"$install_spec\""
+    # 值位置只放版本号/标签；容忍把完整 spec 传进来，剥掉包名前缀
+    local version_spec="$install_spec"
+    case "$version_spec" in
+      '@dsh-one/dsh-llm-provider@'*) version_spec="${version_spec#@dsh-one/dsh-llm-provider@}" ;;
+    esac
+    deps_json="\"@dsh-one/dsh-llm-provider\": \"$version_spec\""
   else
     deps_json="\"@dsh-one/dsh-llm-provider\": \"link:$PROJECT_ROOT\""
   fi
@@ -272,9 +277,11 @@ cmd_up() {
 }
 EOF
 
-  # 安装模式：发布包要用包管理器真装进 profile（link 模式软链即可，不用装）
+  # 安装模式：发布包要用包管理器真装进 profile（link 模式软链即可，不用装）。
+  # 先清掉旧条目再装，防止残留目录让 pnpm 误判「已满足」。
   if [ -n "$install_spec" ]; then
     info "安装发布包 $install_spec 进沙箱 profile…"
+    rm -rf "$profile_dir/node_modules/@dsh-one/dsh-llm-provider"
     (cd "$profile_dir" && pnpm install --no-frozen-lockfile --loglevel=warn)
     local installed_version
     installed_version="$(python3 -c "import json;print(json.load(open('$profile_dir/node_modules/@dsh-one/dsh-llm-provider/package.json'))['version'])")"
