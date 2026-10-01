@@ -213,6 +213,23 @@ const broken = piAiBridgeRows({ active: false, error: '没有能用的 pi-ai：�
 rowsCheck('桥接挂掉时只报错误行', broken.length === 1 && broken[0].bad === true)
 rowsCheck('没有 bridge 时不出行', piAiBridgeRows(undefined, undefined).length === 0)
 
+// ---- 热重装漂移行（插件被重装、dsh 没重启：内存里那份 pi-ai 目录已不在盘上）----
+// 现场形态：重装换掉包目录把 vendor/ 清了，运行中的进程还记着旧路径，供应商预设只剩自定义网关。
+const driftRows = piAiBridgeRows(
+  { active: true, piAiVersion: '0.99.2', source: '0.99.2', piAiDrift: { stalePath: '/p/vendor/pi-ai/0.99.2', livePath: '/app.asar/dsh/node_modules/@earendil-works/pi-ai' } },
+  undefined,
+)
+const driftRow = driftRows.find((r) => r.key === 'drift')
+rowsCheck('热重装漂移出一行警示', driftRow !== undefined && driftRow.warn === true)
+rowsCheck('警示的动作是重启 dsh', driftRow !== undefined && driftRow.value === '重启 dsh 生效')
+rowsCheck('警示里点出旧路径与实际读的路径',
+  driftRow !== undefined && driftRow.title.indexOf('/p/vendor/pi-ai/0.99.2') !== -1 && driftRow.title.indexOf('/app.asar') !== -1)
+rowsCheck('漂移行排在版本行之后', driftRows.findIndex((r) => r.key === 'drift') === 1)
+rowsCheck('没有漂移就不出这行',
+  piAiBridgeRows({ active: true, piAiVersion: '0.99.2', source: '0.99.2' }, undefined).every((r) => r.key !== 'drift'))
+rowsCheck('漂移时仍然报当前跑的版本（不回退成读目录那份）',
+  piAiBridgeRows({ active: true, piAiVersion: '0.99.2', source: '0.99.2', piAiDrift: { stalePath: '/x' } }, undefined)[0].value.indexOf('0.99.2') !== -1)
+
 // ---- OAuth 体检行（原版 dsh 不挂 authorization 服务，这行是用来看「为什么没有 OAuth 入口」的）----
 const oauthOk = piAiBridgeRows({ active: true, piAiVersion: '0.85.1', source: 'dsh' }, undefined, { available: true, flows: 38 })
 rowsCheck('OAuth 可用时报条数', oauthOk.some((r) => r.key === 'oauth-ok' && r.value === '38 个登录方式'))

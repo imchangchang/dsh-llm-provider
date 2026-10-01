@@ -104,6 +104,60 @@ run_suite() {
   bash "$SCRIPT_DIR/test-sandbox.sh" clean --name "$slug"
 }
 
+# 热安装套件：**装完之后不重启**这个形态单独跑一遍。
+#
+# 为什么单独一套：它要的是「用户真实装进来的那份包」——link 形态下插件目录就是仓库，
+# 没法模拟「包目录被换掉、vendor 被清空」；所以这里走 install 形态（`npm pack` 出 tarball
+# 装进沙箱 profile），断言在 specs/hot-install.spec.mjs：重装后目录数据要能自愈、
+# 状态页要提示重启。宿主版本不参与（漂移判定与 dsh 版本无关），跑一次就够。
+run_hot_install_suite() {
+  local slug="e2e-hot-install"
+  info "── 热安装（重装不重启）：构建 + 打包 ──"
+  (cd "$PROJECT_ROOT" && npm run build --silent) || return 1
+
+  local tgz_dir tgz
+  tgz_dir="$(mktemp -d /tmp/dsh-e2e-pack-XXXXXX)"
+  (cd "$PROJECT_ROOT" && npm pack --pack-destination "$tgz_dir" >/dev/null 2>&1) || { rm -rf "$tgz_dir"; return 1; }
+  tgz="$(ls "$tgz_dir"/*.tgz 2>/dev/null | head -1)"
+  [ -n "$tgz" ] || { info "npm pack 没产出 tarball"; rm -rf "$tgz_dir"; return 1; }
+
+  bash "$SCRIPT_DIR/test-sandbox.sh" up --name "$slug" --no-open --install "$tgz" || { rm -rf "$tgz_dir"; return 1; }
+
+  local sandbox="$PROJECT_ROOT/test/sandbox/$slug"
+  local port url token plugin_dir
+  port="$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$sandbox/state.json" | head -1)"
+  url="$(grep -o "http://127.0.0.1:$port/?token=[A-Za-z0-9_-]*" "$sandbox/dsh.log" | tail -1)"
+  token="${url##*token=}"
+  # pnpm 装的这份是软链，取真身：用例会把整个包目录换掉，软链上操作容易只删到链接
+  plugin_dir="$(node -e 'console.log(require("node:fs").realpathSync(process.argv[1]))' \
+    "$sandbox/home/profiles/web/node_modules/@dsh-one/dsh-llm-provider" 2>/dev/null || true)"
+  if [ -z "$plugin_dir" ]; then
+    info "找不到沙箱里装好的插件目录，热安装套件跳过"
+    bash "$SCRIPT_DIR/test-sandbox.sh" clean --name "$slug" >/dev/null 2>&1 || true
+    rm -rf "$tgz_dir"
+    return 1
+  fi
+
+  export E2E_BASE_URL="http://127.0.0.1:$port"
+  export E2E_TOKEN="$token"
+  export E2E_PLUGIN_DIR="$plugin_dir"
+
+  local ok=1
+  info "── 热安装（重装不重启）：断言 ──"
+  (cd "$E2E_DIR" && npx playwright test specs/hot-install.spec.mjs) || ok=0
+
+  if [ "$ok" = 1 ]; then
+    info "── 热安装（重装不重启）：通过 ──"
+  else
+    info "── 热安装（重装不重启）：失败（沙箱保留在 $sandbox 供排查，clean --name $slug 可清）──"
+  fi
+  if [ "$ok" = 1 ]; then
+    bash "$SCRIPT_DIR/test-sandbox.sh" clean --name "$slug"
+  fi
+  rm -rf "$tgz_dir"
+  return $((1 - ok))
+}
+
 failures=()
 if [ -n "$versions" ]; then
   IFS=',' read -ra list <<< "$versions"
@@ -114,7 +168,10 @@ else
   run_suite "" || failures+=("本机版本")
 fi
 
+# 热安装形态：所有 e2e 跑法都带上（用户装完不重启是常态，不能只靠人肉记着）
+run_hot_install_suite || failures+=("热安装（重装不重启）")
+
 if [ ${#failures[@]} -gt 0 ]; then
-  die "以下版本未通过：${failures[*]}"
+  die "以下未通过：${failures[*]}"
 fi
 info "全部通过"

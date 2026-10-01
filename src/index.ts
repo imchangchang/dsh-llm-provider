@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { activePiAiRoot, activePiAiVersion, commitBridgeState, loadBridge, reloadBridge, vendorDir, type BridgePluginModule } from './bridge.js'
+import { activePiAiRoot, activePiAiVersion, commitBridgeState, loadBridge, reloadBridge, stalePiAiRoot, vendorDir, type BridgePluginModule } from './bridge.js'
 import {
   applyAdapterCapabilities,
   applyDeclaredCapabilities,
@@ -734,6 +734,13 @@ export function apply(ctx: PluginContext, config: unknown): void {
             }))
         } catch { /* 路由发现失败时留空 */ }
         // 磁盘占用是唯一要异步的部分：其余诊断先算好，占用到了再一起发（不阻塞事件循环）
+        //
+        // 先主动核一次盘再读漂移标记：`activePiAiRoot()` 才是那次核盘的触发点（它发现内存里
+        // 记的目录没了才会记下漂移）。少了这一步，重装之后**第一次** `/provider/status` 会
+        // 报不出原因——e2e 的 hot-install 用例正是这么抓到的：状态接口先被调用，读到的还是
+        // 「没漂移」，界面于是继续显示「预设莫名变少」。
+        const piAiLiveRoot = activePiAiRoot()
+        const piAiStaleRoot = stalePiAiRoot()
         const payload = {
           bridge: bridge.ok
             ? {
@@ -758,6 +765,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
                 // 默认模型不在当前 pi-ai 目录里时的警示（新会话一开口就会 UNKNOWN_MODEL）：
                 // 界面上要能提前看见，而不是等发送失败
                 modelWarnings: defaultModelWarningText === undefined ? [] : [defaultModelWarningText],
+                // 插件被重装、dsh 还没重启：内存里跑的那份 pi-ai 的目录已经不在磁盘上。目录与
+                // 供应商预设已经临时退回别的树去读，但运行中的桥接仍是内存里那份——只有重启才
+                // 恢复一致，所以这里必须报出来（不报的话界面只是「预设变少」，看不出原因）。
+                ...(piAiStaleRoot === undefined
+                  ? {}
+                  : { piAiDrift: { stalePath: piAiStaleRoot, livePath: piAiLiveRoot } }),
                 // 体检没过、被跳过的候选——有回退就列在这里
                 rejected: (liveBridge ?? bridge).rejected,
                 // 需求没解析出来、体检没跑：选中项没被验证过，界面上要标出来

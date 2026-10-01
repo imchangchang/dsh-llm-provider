@@ -488,15 +488,66 @@ function pluginDependencyRoot(): string {
  * loadBridge() 挑定之后以它为准——挑的时候可能回退过，跟"vendor 里最新"不是一回事，
  * 而这个根目录下面那三个读 pi-ai 文件的模块（provider 名字、模型详情、候选清单）
  * 必须跟真正被加载的那份对上。没跑过 loadBridge 的场合退回静态推断。
+ *
+ * **每次读之前核一次盘。**插件被重装（换包目录会把 `vendor/` 一起清掉）而 dsh 没重启时，
+ * 内存里记的那份目录已经从盘上消失；不核盘的话上面那三个模块会安静地读出空结果——界面表现
+ * 是「供应商预设只剩自定义网关、模型徽章全没了」，既不报错也看不出原因。核到掉盘就退回静态
+ * 推断（重装后 vendor 是空的，自然落到宿主那棵树），并把这次漂移记下来给状态页提示重启。
  */
 let activeRoot: string | undefined
-export function activePiAiRoot(): string | undefined {
-  if (activeRoot !== undefined) return activeRoot
+
+/**
+ * 内存里记着、盘上已经不在的那份 pi-ai（`undefined` = 没发生漂移）。
+ *
+ * 典型来源就是上面说的「重装没重启」。只有重启 dsh 才能让运行中的桥接与磁盘重新一致，
+ * 所以这个值只用来提示，不用来改运行行为。
+ */
+let staleRoot: string | undefined
+
+/**
+ * 「记录的那份 pi-ai 还在不在盘上」的判定（纯函数，离线可测）。
+ *
+ * @param recorded - 内存里记的那份；`undefined` = 还没挑过（走静态推断的第一个可用候选）。
+ * @param fallbacks - 静态推断的候选，按优先级排（下载档新→旧、兜底依赖、dsh 自带）。
+ * @param exists - 目录是否还在盘上（注入，便于离线测各种掉盘组合）。
+ * @returns `root` 这次用哪份；`stale` = 记录的那份（掉盘时给出，供界面提示重启）。
+ */
+export function resolveLiveRoot(
+  recorded: string | undefined,
+  fallbacks: readonly string[],
+  exists: (path: string) => boolean,
+): { root?: string, stale?: string } {
+  const fallback = fallbacks.find((path) => exists(path))
+  if (recorded === undefined) return fallback === undefined ? {} : { root: fallback }
+  if (exists(recorded)) return { root: recorded }
+  return fallback === undefined ? { stale: recorded } : { root: fallback, stale: recorded }
+}
+
+/** 静态推断的 pi-ai 候选，顺序 = 优先级（下载档新→旧、兜底依赖、dsh 自带）。 */
+function inferredPiAiRoots(): string[] {
+  const roots: string[] = []
   const versions = installedVersions()
-  const newest = versions[versions.length - 1]
-  if (newest !== undefined) return join(piAiVersionsDir, newest)
-  if (existsSync(pluginDependencyRoot())) return pluginDependencyRoot()
-  return dshPiAiRoot(resolveSourceBundle())
+  for (let i = versions.length - 1; i >= 0; i -= 1) {
+    const version = versions[i]
+    if (version !== undefined) roots.push(join(piAiVersionsDir, version))
+  }
+  roots.push(pluginDependencyRoot())
+  const host = dshPiAiRoot(resolveSourceBundle())
+  if (host !== undefined) roots.push(host)
+  return roots
+}
+
+export function activePiAiRoot(): string | undefined {
+  if (activeRoot !== undefined && existsSync(activeRoot)) return activeRoot
+  const picked = resolveLiveRoot(activeRoot, inferredPiAiRoots(), existsSync)
+  if (picked.stale !== undefined) staleRoot ??= picked.stale
+  activeRoot = picked.root
+  return activeRoot
+}
+
+/** 盘上已经消失的那份 pi-ai（`undefined` = 没漂移）。界面据此提示「重启 dsh 生效」。 */
+export function stalePiAiRoot(): string | undefined {
+  return staleRoot
 }
 
 /** 读一个 pi-ai 包的版本号；读不到返回 undefined。 */
@@ -823,6 +874,8 @@ function finishBridgeResult(
 /** 挂载**成功**之后再把这次桥接的结论落盘（activeRoot + status.json）；失败/回滚都不会进来。 */
 export function commitBridgeState(result: Extract<BridgeLoadResult, { ok: true }>): void {
   activeRoot = result.piAiPath
+  // 刚挂上的这份是活的（挑它之前体检过），漂移标记跟着清掉
+  staleRoot = undefined
   writeStatus({
     piAiVersion: result.piAiVersion,
     needsRestart: false,

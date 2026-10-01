@@ -223,6 +223,22 @@ export function piAiBridgeRows(bridge: unknown, update: unknown, oauth?: unknown
   for (var mw = 0; mw < modelWarnings.length; mw += 1) {
     rows.push({ key: 'model-warn-' + mw, text: String(modelWarnings[mw]), value: '看原因', title: String(modelWarnings[mw]), warn: true })
   }
+  // 插件被重装、dsh 还没重启：内存里跑的那份 pi-ai 目录已经不在了，目录与预设已临时退回
+  // 别的树去读。放在最前面（紧跟版本行）——它会直接影响「供应商预设变少」这种观感，
+  // 用户第一眼要看到的是原因，而不是以为插件坏了。
+  var drift = bridgeRecord.piAiDrift as AnyRecord | undefined
+  if (drift !== undefined && drift !== null) {
+    var driftLive = drift.livePath === undefined || drift.livePath === null ? '' : String(drift.livePath)
+    rows.push({
+      key: 'drift',
+      text: '当前 pi-ai 目录已不在磁盘上（插件重装过、dsh 还没重启）',
+      value: '重启 dsh 生效',
+      title: '内存里跑的那份是 ' + String(drift.stalePath)
+        + (driftLive === '' ? '' : '；模型目录与供应商预设已临时改用 ' + driftLive + ' 读取')
+        + '。重启 dsh 后 vendor/ 会重建，两边恢复一致。',
+      warn: true,
+    })
+  }
   // 体检没执行（bundle 的 import 需求解析不出）：这份 pi-ai 是靠「目录存在」放行的，没验证过
   if (bridgeRecord.probeUnverified === true) {
     rows.push({

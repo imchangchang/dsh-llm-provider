@@ -18,6 +18,7 @@ import {
   piAiCandidates,
   piAiRequirements,
   probePiAi,
+  resolveLiveRoot,
   resolveSourceBundle,
 } from '../lib/bridge.js'
 
@@ -135,6 +136,25 @@ check('胶水代次：都认不出就是 unknown', glueGeneration('whatever') ==
 check('宿主代次：0.1.x → legacy', dshGeneration('0.1.6-alpha.2') === 'legacy')
 check('宿主代次：0.2.x → modern', dshGeneration('0.2.0-rc.2') === 'modern')
 check('宿主代次：读不到版本 → unknown', dshGeneration(undefined) === 'unknown')
+
+// ---- 记录的那份 pi-ai 掉盘：插件被重装、dsh 没重启（现场实测过的形态）----
+// 重装换掉包目录会把 vendor/ 一起清空，运行中的进程还记着旧路径；不核盘就会安静地读出空目录，
+// 界面表现是「供应商预设只剩自定义网关」。
+const existsOnly = (...paths) => (p) => paths.includes(p)
+check('记录的那份还在盘上 → 继续用它',
+  resolveLiveRoot('/v/0.99.2', ['/h/0.87.1'], existsOnly('/v/0.99.2'))?.root === '/v/0.99.2')
+check('记录的那份还在盘上时不算漂移',
+  resolveLiveRoot('/v/0.99.2', ['/h/0.87.1'], existsOnly('/v/0.99.2'))?.stale === undefined)
+check('记录的那份掉盘 → 回退到第一份可用候选',
+  resolveLiveRoot('/v/0.99.2', ['/v/0.85.1', '/h/0.87.1'], existsOnly('/v/0.85.1', '/h/0.87.1'))?.root === '/v/0.85.1')
+check('掉盘时把原路径记下来（界面据此提示重启）',
+  resolveLiveRoot('/v/0.99.2', ['/v/0.85.1', '/h/0.87.1'], existsOnly('/v/0.85.1', '/h/0.87.1'))?.stale === '/v/0.99.2')
+check('掉盘且候选全不在 → 没有可用的根，但漂移照样记下来',
+  (() => { const r = resolveLiveRoot('/v/0.99.2', ['/v/0.85.1'], existsOnly()); return r.root === undefined && r.stale === '/v/0.99.2' })())
+check('还没挑过（recorded 为空）→ 取第一份可用候选，不算漂移',
+  (() => { const r = resolveLiveRoot(undefined, ['/v/0.85.1', '/h/0.87.1'], existsOnly('/h/0.87.1')); return r.root === '/h/0.87.1' && r.stale === undefined })())
+check('候选一个都没有、也没记录 → 拿不到根',
+  resolveLiveRoot(undefined, ['/v/0.85.1'], existsOnly())?.root === undefined)
 
 // 锚点：Electron 下 app.asar 必须排最前
 const withElectron = hostAnchors({ resourcesPath: '/R', execPath: '/R/App', pluginRoot: '/P', dshHome: '/H' })
