@@ -32,7 +32,14 @@ fi
 # 跑一个版本的完整套件。空参数 = 本机已装的 dsh。
 run_suite() {
   local ver="$1"
-  local slug="e2e-${ver//./-}"
+  # 空版本用 local 后缀（不能留空尾巴，sanitize 会把尾横线剥掉导致路径对不上）
+  local slug="e2e-${ver:-local}"
+  slug="${slug//./-}"
+
+  # 构建先行：lib/ 不入库，worktree 里第一次跑就是没有的；构建也保证测的是当前源码
+  info "构建插件（npm run build）…"
+  (cd "$PROJECT_ROOT" && npm run build --silent)
+
   local args=(up --name "$slug" --no-open)
   [ -n "$ver" ] && args+=(--dsh-version "$ver")
   bash "$SCRIPT_DIR/test-sandbox.sh" "${args[@]}"
