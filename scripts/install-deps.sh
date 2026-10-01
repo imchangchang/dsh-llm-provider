@@ -39,4 +39,11 @@ else
   rm -f "${HOME}/.npm/.dsh-write-test"
 fi
 
-npm install --no-audit --no-fund "${CACHE[@]}" "$@"
+# bash 3.2（macOS 自带）在 set -u 下把空数组的 "${CACHE[@]}" 当未绑定变量报错
+# （bash 4.4 才改成静默展开），所以只在非空时才带上它——否则这台机器上每个新 worktree
+# 装依赖都会失败在 npm 之前。
+if [ "${#CACHE[@]}" -gt 0 ]; then
+  npm install --no-audit --no-fund "${CACHE[@]}" "$@"
+else
+  npm install --no-audit --no-fund "$@"
+fi
